@@ -1,0 +1,9 @@
+bin/
+obj/
+*.user
+.DS_Store
+.vs/
+.idea/
+artifacts/
+*.binlog
+.shadercache/
