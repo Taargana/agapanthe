@@ -20,7 +20,7 @@
 
 ## Rollback Point
 
-Commit initial (scaffold) — renseigné après T1: `<hash>`
+`c78c8c9` (scaffold initial)
 
 ## Task Graph
 
@@ -47,16 +47,16 @@ T9 ─► T10 (Self code review) ─► T11 (Requirements validation) ─► T12
 
 ## Tâches
 
-### T1 — Scaffold solution [type: infra, S] — status: in-progress
+### T1 — Scaffold solution [type: infra, S] — status: done (commit c78c8c9, build+test verts)
 git init, .gitignore, Agapanthe.sln, projets Core/Platform/Graphics/Rendering/Assets/Sandbox/Tests, refs unidirectionnelles (spec §3.1), packages (Silk.NET.Windowing/Input/Vulkan/Shaderc + natives, StbImageSharp, xUnit), Directory.Build.props. AC: `dotnet build` vert, `dotnet test` vert (0 tests OK).
 
-### T2 — Core: MathHelpers + ResourceTracker + logging [type: code, M] — status: pending
+### T2 — Core: MathHelpers + ResourceTracker + logging [type: code, M] — status: done (9 tests verts)
 Deps: T1. `MathHelpers` (PerspectiveVulkan Y↓/Z[0,1], LookAt), `Log` minimal, `ResourceTracker` (compteurs par type, DEBUG, rapport fermeture). Tests: projections vs valeurs de référence, tracker leak/no-leak. AC: tests verts.
 
-### T3 — Platform: EngineWindow [type: code, M] — status: pending
+### T3 — Platform: EngineWindow [type: code, M] — status: done (build propre, run validé en T9)
 Deps: T2. Wrap Silk.NET.Windowing : création, boucle, resize events, extensions d'instance requises + création surface via handles opaques (pas de type Vk* public). AC: fenêtre s'ouvre/ferme (validé via Sandbox en T9).
 
-### T4 — Graphics: Instance + validation + debug utils [type: code, M] — status: pending
+### T4 — Graphics: Instance + validation + debug utils [type: code, M] — status: in-progress (agent background)
 Deps: T2. VkInstance avec portability_enumeration + flag (macOS), VK_LAYER_KHRONOS_validation en DEBUG, debug messenger (callback gardé vivant, ERROR = fail fast), GraphicsException (VkResult check). AC: instance créée sans message de validation.
 
 ### T5 — Graphics: PhysicalDevice + Device + queues [type: code, M] — status: pending
