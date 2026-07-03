@@ -14,7 +14,7 @@ namespace Agapanthe.Graphics;
 /// leaks through the public surface; <see cref="IVkSurface"/> is the one tolerated
 /// boundary type for window-system integration.
 /// </summary>
-public sealed unsafe class GraphicsDevice : IDisposable
+public sealed unsafe partial class GraphicsDevice : IDisposable
 {
     /// <summary>Number of frames recorded ahead of the GPU (spec §3.3).</summary>
     public const int FramesInFlight = 2;

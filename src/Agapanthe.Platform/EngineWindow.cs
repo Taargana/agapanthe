@@ -61,6 +61,22 @@ public sealed class EngineWindow : IDisposable
     /// </summary>
     public IVkSurface? VkSurface => _window.VkSurface;
 
+    /// <summary>Instance extensions the window system requires (VK_KHR_surface + platform surface).</summary>
+    public unsafe string[] GetRequiredVulkanExtensions()
+    {
+        var surface = _window.VkSurface
+            ?? throw new InvalidOperationException("Window has no Vulkan surface; call after Loaded.");
+
+        var namePtrs = surface.GetRequiredExtensions(out var count);
+        var names = new string[count];
+        for (var i = 0; i < count; i++)
+        {
+            names[i] = Silk.NET.Core.Native.SilkMarshal.PtrToString((nint)namePtrs[i]) ?? string.Empty;
+        }
+
+        return names;
+    }
+
     /// <summary>Runs the frame loop until the window closes. Blocks the calling thread.</summary>
     public void Run() => _window.Run();
 

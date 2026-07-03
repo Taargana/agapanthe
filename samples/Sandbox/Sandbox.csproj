@@ -15,4 +15,11 @@
     <Nullable>enable</Nullable>
   </PropertyGroup>
 
+  <ItemGroup>
+    <!-- Ship the GLSL sources next to the executable; ShaderCompiler reads them at runtime. -->
+    <Content Include="..\..\shaders\**\*" Link="shaders\%(RecursiveDir)%(Filename)%(Extension)">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
+  </ItemGroup>
+
 </Project>
