@@ -44,8 +44,8 @@ public sealed unsafe class Swapchain : IDisposable
     public uint Width => Extent.Width;
     public uint Height => Extent.Height;
 
-    /// <summary>Color attachment format as a raw VkFormat value (for pipeline creation).</summary>
-    public uint ColorFormat => (uint)ImageFormat;
+    /// <summary>Color attachment format (for pipeline creation).</summary>
+    public PixelFormat ColorFormat => PixelFormatExtensions.FromVk(ImageFormat);
 
     internal SwapchainKHR Handle => _swapchain;
     internal Format ImageFormat { get; private set; }

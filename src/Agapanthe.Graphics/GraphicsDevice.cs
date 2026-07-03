@@ -84,6 +84,22 @@ public sealed unsafe partial class GraphicsDevice : IDisposable
     /// <summary>Deferred-destruction queue for all GPU resources owned by this device (spec §3.2).</summary>
     public DeletionQueue DeletionQueue { get; } = new();
 
+    /// <summary>
+    /// Authoritative render frame counter, advanced once per presented frame by the
+    /// FrameRenderer. Resources disposed mid-loop stamp their destruction with this index so
+    /// the DeletionQueue can defer it past the frames still in flight (spec §3.2.1).
+    /// </summary>
+    public long CurrentFrameIndex { get; private set; }
+
+    /// <summary>Advances the frame counter. Called by the FrameRenderer after each present.</summary>
+    internal void AdvanceFrame() => CurrentFrameIndex++;
+
+    /// <summary>
+    /// Schedules a GPU destroy action to run once the current frame is out of flight
+    /// (N + FramesInFlight). Resources call this from Dispose() instead of destroying inline.
+    /// </summary>
+    public void EnqueueDestroy(Action destroy) => DeletionQueue.Enqueue(destroy, CurrentFrameIndex);
+
     /// <summary>Name of the selected physical device.</summary>
     public string AdapterName { get; private set; } = string.Empty;
 

@@ -9,6 +9,23 @@ namespace Agapanthe.Graphics;
 /// </summary>
 public sealed unsafe partial class GraphicsDevice
 {
+    /// <summary>Finds a memory type index matching <paramref name="typeBits"/> and all <paramref name="required"/> flags.</summary>
+    internal uint FindMemoryType(uint typeBits, MemoryPropertyFlags required)
+    {
+        _vk.GetPhysicalDeviceMemoryProperties(_physicalDevice, out var memProps);
+        for (var i = 0u; i < memProps.MemoryTypeCount; i++)
+        {
+            var suitable = (typeBits & (1u << (int)i)) != 0;
+            var hasProps = (memProps.MemoryTypes[(int)i].PropertyFlags & required) == required;
+            if (suitable && hasProps)
+            {
+                return i;
+            }
+        }
+
+        throw new GraphicsException($"No memory type with {required}.");
+    }
+
     internal void CmdBeginRendering(CommandBuffer cmd, RenderingInfo* info)
     {
         if (HasVulkan13Core)

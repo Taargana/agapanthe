@@ -22,6 +22,8 @@
     <ProjectReference Include="..\..\src\Agapanthe.Core\Agapanthe.Core.csproj" />
     <ProjectReference Include="..\..\src\Agapanthe.Graphics\Agapanthe.Graphics.csproj" />
     <ProjectReference Include="..\..\src\Agapanthe.Assets\Agapanthe.Assets.csproj" />
+    <ProjectReference Include="..\..\src\Agapanthe.Rendering\Agapanthe.Rendering.csproj" />
+    <ProjectReference Include="..\..\src\Agapanthe.Rendering\Agapanthe.Rendering.csproj" />
   </ItemGroup>
 
 </Project>

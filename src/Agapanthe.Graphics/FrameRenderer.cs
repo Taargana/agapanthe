@@ -20,10 +20,16 @@ public sealed unsafe class FrameRenderer : IDisposable
     private readonly CommandBuffer[] _commandBuffers = new CommandBuffer[GraphicsDevice.FramesInFlight];
     private readonly Fence[] _inFlightFences = new Fence[GraphicsDevice.FramesInFlight];
     private readonly Semaphore[] _imageAvailableSemaphores = new Semaphore[GraphicsDevice.FramesInFlight];
+    private readonly FrameContext?[] _frameContexts = new FrameContext?[GraphicsDevice.FramesInFlight];
 
+    private GpuImage? _depthImage;
+    private Extent2D _depthExtent;
     private int _frameSlot;
-    private long _frameIndex;
+    private bool _resizeRequested;
     private bool _disposed;
+
+    /// <summary>Depth attachment format used by the loop; pipelines must declare the same.</summary>
+    public const PixelFormat DepthFormat = PixelFormat.D32Sfloat;
 
     public FrameRenderer(GraphicsDevice device, Swapchain swapchain, Func<(int Width, int Height)> framebufferSizeProvider)
     {
@@ -56,10 +62,17 @@ public sealed unsafe class FrameRenderer : IDisposable
     /// the active dynamic-rendering scope. A frame is silently skipped when the swapchain is
     /// out of date (it is recreated first, on the next call it renders).
     /// </summary>
-    public void DrawFrame(Action<CommandList> record)
+    public void DrawFrame(Action<CommandList, FrameContext> record)
     {
         ArgumentNullException.ThrowIfNull(record);
         ObjectDisposedException.ThrowIf(_disposed, this);
+
+        if (_resizeRequested)
+        {
+            _resizeRequested = false;
+            RecreateSwapchain();
+            return;
+        }
 
         var vk = _device.Api;
         var fence = _inFlightFences[_frameSlot];
@@ -82,22 +95,33 @@ public sealed unsafe class FrameRenderer : IDisposable
             VkCheck.ThrowIfFailed(vk.ResetFences(_device.Device, 1, pFence), "vkResetFences");
         }
 
-        _device.DeletionQueue.Flush(_frameIndex);
+        // The just-waited fence guarantees the frame that used this slot (CurrentFrameIndex -
+        // FramesInFlight) is complete, so its deferred destroys and descriptor sets are now
+        // safe to release.
+        _device.DeletionQueue.Flush(_device.CurrentFrameIndex);
+        var context = _frameContexts[_frameSlot]!;
+        context.Reset();
 
         var cmd = _commandBuffers[_frameSlot];
         VkCheck.ThrowIfFailed(vk.ResetCommandBuffer(cmd, CommandBufferResetFlags.None), "vkResetCommandBuffer");
-        RecordCommandBuffer(cmd, imageIndex, record);
+        RecordCommandBuffer(cmd, imageIndex, record, context);
 
         SubmitAndPresent(cmd, imageIndex, imageAvailable);
 
         _frameSlot = (_frameSlot + 1) % GraphicsDevice.FramesInFlight;
-        _frameIndex++;
+        _device.AdvanceFrame();
     }
 
     /// <summary>Waits for the GPU to idle. Call before tearing down resources the loop used.</summary>
     public void WaitIdle() => _device.WaitIdle();
 
-    private void RecordCommandBuffer(CommandBuffer cmd, uint imageIndex, Action<CommandList> record)
+    /// <summary>
+    /// Requests swapchain + depth recreation on the next frame. Call from the window's resize
+    /// event: some platforms (MoltenVK) don't report OUT_OF_DATE on resize.
+    /// </summary>
+    public void RequestResize() => _resizeRequested = true;
+
+    private void RecordCommandBuffer(CommandBuffer cmd, uint imageIndex, Action<CommandList, FrameContext> record, FrameContext context)
     {
         var vk = _device.Api;
         var beginInfo = new CommandBufferBeginInfo
@@ -111,17 +135,28 @@ public sealed unsafe class FrameRenderer : IDisposable
         var view = _swapchain.ImageViews[(int)imageIndex];
 
         TransitionImage(
-            cmd, image,
+            cmd, image, ImageAspectFlags.ColorBit,
             oldLayout: ImageLayout.Undefined,
             newLayout: ImageLayout.ColorAttachmentOptimal,
             srcStage: PipelineStageFlags2.TopOfPipeBit, srcAccess: 0,
             dstStage: PipelineStageFlags2.ColorAttachmentOutputBit,
             dstAccess: AccessFlags2.ColorAttachmentWriteBit);
 
-        BeginRenderingAndDraw(cmd, view, record);
+        // loadOp=Clear makes the prior depth contents irrelevant, so a fresh Undefined->attachment
+        // transition each frame is correct and cheaper than preserving the layout.
+        TransitionImage(
+            cmd, _depthImage!.Handle, ImageAspectFlags.DepthBit,
+            oldLayout: ImageLayout.Undefined,
+            newLayout: ImageLayout.DepthAttachmentOptimal,
+            srcStage: PipelineStageFlags2.EarlyFragmentTestsBit | PipelineStageFlags2.LateFragmentTestsBit,
+            srcAccess: 0,
+            dstStage: PipelineStageFlags2.EarlyFragmentTestsBit | PipelineStageFlags2.LateFragmentTestsBit,
+            dstAccess: AccessFlags2.DepthStencilAttachmentWriteBit);
+
+        BeginRenderingAndDraw(cmd, view, record, context);
 
         TransitionImage(
-            cmd, image,
+            cmd, image, ImageAspectFlags.ColorBit,
             oldLayout: ImageLayout.ColorAttachmentOptimal,
             newLayout: ImageLayout.PresentSrcKhr,
             srcStage: PipelineStageFlags2.ColorAttachmentOutputBit,
@@ -131,7 +166,7 @@ public sealed unsafe class FrameRenderer : IDisposable
         VkCheck.ThrowIfFailed(vk.EndCommandBuffer(cmd), "vkEndCommandBuffer");
     }
 
-    private void BeginRenderingAndDraw(CommandBuffer cmd, ImageView view, Action<CommandList> record)
+    private void BeginRenderingAndDraw(CommandBuffer cmd, ImageView view, Action<CommandList, FrameContext> record, FrameContext context)
     {
         var vk = _device.Api;
         var extent = _swapchain.Extent;
@@ -147,6 +182,15 @@ public sealed unsafe class FrameRenderer : IDisposable
             StoreOp = AttachmentStoreOp.Store,
             ClearValue = clear,
         };
+        var depthAttachment = new RenderingAttachmentInfo
+        {
+            SType = StructureType.RenderingAttachmentInfo,
+            ImageView = _depthImage!.View,
+            ImageLayout = ImageLayout.DepthAttachmentOptimal,
+            LoadOp = AttachmentLoadOp.Clear,
+            StoreOp = AttachmentStoreOp.DontCare,
+            ClearValue = new ClearValue { DepthStencil = new ClearDepthStencilValue(1f, 0) },
+        };
         var renderingInfo = new RenderingInfo
         {
             SType = StructureType.RenderingInfo,
@@ -154,6 +198,7 @@ public sealed unsafe class FrameRenderer : IDisposable
             LayerCount = 1,
             ColorAttachmentCount = 1,
             PColorAttachments = &colorAttachment,
+            PDepthAttachment = &depthAttachment,
         };
 
         _device.CmdBeginRendering(cmd, &renderingInfo);
@@ -163,13 +208,13 @@ public sealed unsafe class FrameRenderer : IDisposable
         vk.CmdSetViewport(cmd, 0, 1, &viewport);
         vk.CmdSetScissor(cmd, 0, 1, &scissor);
 
-        record(new CommandList(_device, cmd));
+        record(new CommandList(_device, cmd), context);
 
         _device.CmdEndRendering(cmd);
     }
 
     private void TransitionImage(
-        CommandBuffer cmd, Image image, ImageLayout oldLayout, ImageLayout newLayout,
+        CommandBuffer cmd, Image image, ImageAspectFlags aspect, ImageLayout oldLayout, ImageLayout newLayout,
         PipelineStageFlags2 srcStage, AccessFlags2 srcAccess,
         PipelineStageFlags2 dstStage, AccessFlags2 dstAccess)
     {
@@ -185,7 +230,7 @@ public sealed unsafe class FrameRenderer : IDisposable
             SrcQueueFamilyIndex = Vk.QueueFamilyIgnored,
             DstQueueFamilyIndex = Vk.QueueFamilyIgnored,
             Image = image,
-            SubresourceRange = new ImageSubresourceRange(ImageAspectFlags.ColorBit, 0, 1, 0, 1),
+            SubresourceRange = new ImageSubresourceRange(aspect, 0, 1, 0, 1),
         };
         var dependency = new DependencyInfo
         {
@@ -246,6 +291,22 @@ public sealed unsafe class FrameRenderer : IDisposable
         }
 
         _swapchain.Recreate(width, height);
+        EnsureDepthImage();
+    }
+
+    /// <summary>(Re)creates the depth image to match the swapchain extent. Safe to call only
+    /// when the device is idle (initial creation, or right after Swapchain.Recreate's WaitIdle).</summary>
+    private void EnsureDepthImage()
+    {
+        var extent = _swapchain.Extent;
+        if (_depthImage is not null && _depthExtent.Width == extent.Width && _depthExtent.Height == extent.Height)
+        {
+            return;
+        }
+
+        _depthImage?.Dispose();
+        _depthImage = new GpuImage(_device, extent.Width, extent.Height, DepthFormat, ImagePurpose.DepthAttachment);
+        _depthExtent = extent;
     }
 
     private void CreateResources()
@@ -289,7 +350,11 @@ public sealed unsafe class FrameRenderer : IDisposable
             VkCheck.ThrowIfFailed(vk.CreateSemaphore(_device.Device, &semaphoreInfo, null, &semaphore), "vkCreateSemaphore");
             _imageAvailableSemaphores[i] = semaphore;
             ResourceTracker.Register("VkSemaphore");
+
+            _frameContexts[i] = new FrameContext(_device, i);
         }
+
+        EnsureDepthImage();
     }
 
     public void Dispose()
@@ -308,6 +373,13 @@ public sealed unsafe class FrameRenderer : IDisposable
     private void DestroyResources()
     {
         var vk = _device.Api;
+        _depthImage?.Dispose();
+        _depthImage = null;
+        for (var i = 0; i < _frameContexts.Length; i++)
+        {
+            _frameContexts[i]?.Dispose();
+            _frameContexts[i] = null;
+        }
         for (var i = 0; i < GraphicsDevice.FramesInFlight; i++)
         {
             if (_inFlightFences[i].Handle != 0)
