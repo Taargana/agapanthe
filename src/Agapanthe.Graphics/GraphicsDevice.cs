@@ -70,6 +70,8 @@ public sealed unsafe partial class GraphicsDevice : IDisposable
         catch
         {
             ReleaseResources();
+            // Resources are already balanced; stop the finalizer reporting a phantom leak.
+            GC.SuppressFinalize(this);
             throw;
         }
     }
@@ -600,8 +602,10 @@ public sealed unsafe partial class GraphicsDevice : IDisposable
         {
             Log.Error($"[Vulkan] {message}");
 #if DEBUG
-            // Fail fast (spec §4): a validation error is a bug; crash at the offending call.
-            throw new GraphicsException($"Vulkan validation error: {message}");
+            // Fail fast (spec §4). This runs on a native (loader) call stack, so throwing a
+            // managed exception across the boundary is undefined; FailFast crashes cleanly
+            // with a dump instead.
+            Environment.FailFast($"Vulkan validation error: {message}");
 #endif
         }
         else if ((severity & DebugUtilsMessageSeverityFlagsEXT.WarningBitExt) != 0)

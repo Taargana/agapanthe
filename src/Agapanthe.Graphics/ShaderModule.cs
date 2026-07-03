@@ -15,26 +15,36 @@ public sealed unsafe class ShaderModule : IDisposable
         ArgumentNullException.ThrowIfNull(device);
         if (spirv.Length == 0 || spirv.Length % 4 != 0)
         {
+            GC.SuppressFinalize(this);
             throw new GraphicsException($"SPIR-V blob length {spirv.Length} is not a positive multiple of 4.");
         }
 
         _device = device;
         Stage = stage;
 
-        fixed (byte* code = spirv)
+        try
         {
-            var createInfo = new ShaderModuleCreateInfo
+            fixed (byte* code = spirv)
             {
-                SType = StructureType.ShaderModuleCreateInfo,
-                CodeSize = (nuint)spirv.Length,
-                PCode = (uint*)code,
-            };
+                var createInfo = new ShaderModuleCreateInfo
+                {
+                    SType = StructureType.ShaderModuleCreateInfo,
+                    CodeSize = (nuint)spirv.Length,
+                    PCode = (uint*)code,
+                };
 
-            Silk.NET.Vulkan.ShaderModule handle;
-            VkCheck.ThrowIfFailed(
-                device.Api.CreateShaderModule(device.Device, &createInfo, null, &handle),
-                "vkCreateShaderModule");
-            _handle = handle;
+                Silk.NET.Vulkan.ShaderModule handle;
+                VkCheck.ThrowIfFailed(
+                    device.Api.CreateShaderModule(device.Device, &createInfo, null, &handle),
+                    "vkCreateShaderModule");
+                _handle = handle;
+            }
+        }
+        catch
+        {
+            // No handle was registered; stop the finalizer reporting a phantom leak.
+            GC.SuppressFinalize(this);
+            throw;
         }
 
         ResourceTracker.Register("VkShaderModule");

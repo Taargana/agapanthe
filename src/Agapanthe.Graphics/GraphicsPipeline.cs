@@ -32,6 +32,7 @@ public sealed unsafe class GraphicsPipeline : IDisposable
         catch
         {
             DestroyResources();
+            GC.SuppressFinalize(this);
             throw;
         }
     }

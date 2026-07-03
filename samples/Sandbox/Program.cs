@@ -24,6 +24,10 @@ GraphicsPipeline? pipeline = null;
 FrameRenderer? renderer = null;
 var resizePending = false;
 
+// Hoisted out of the render handler so the delegate is allocated once, not per frame
+// (spec §3.2.5, zero managed allocation on the hot path).
+Action<CommandList>? recordTriangle = null;
+
 window.Loaded += () =>
 {
     var requiredExtensions = window.GetRequiredVulkanExtensions();
@@ -42,6 +46,12 @@ window.Loaded += () =>
     renderer = new FrameRenderer(device, swapchain, () => window.FramebufferSize)
     {
         ClearColor = (0.02f, 0.02f, 0.05f, 1f),
+    };
+
+    recordTriangle = cmd =>
+    {
+        cmd.BindPipeline(pipeline!);
+        cmd.Draw(3);
     };
 
     Log.Info("Sandbox: initialized. Rendering triangle.");
@@ -67,11 +77,7 @@ window.Rendered += _ =>
         }
     }
 
-    renderer.DrawFrame(cmd =>
-    {
-        cmd.BindPipeline(pipeline!);
-        cmd.Draw(3);
-    });
+    renderer.DrawFrame(recordTriangle!);
 
     if (maxFrames > 0 && ++renderedFrames >= maxFrames)
     {
@@ -79,18 +85,24 @@ window.Rendered += _ =>
     }
 };
 
-window.Run();
-
-// Window loop has exited: tear down in reverse creation order, GPU-idle first.
-renderer?.WaitIdle();
-renderer?.Dispose();
-pipeline?.Dispose();
-fragmentShader?.Dispose();
-vertexShader?.Dispose();
-shaderCompiler?.Dispose();
-swapchain?.Dispose();
-device?.Dispose();
-window.Dispose();
+try
+{
+    window.Run();
+}
+finally
+{
+    // Tear down in reverse creation order, GPU-idle first — runs even if init threw
+    // inside the Loaded handler, so the leak report is always produced.
+    renderer?.WaitIdle();
+    renderer?.Dispose();
+    pipeline?.Dispose();
+    fragmentShader?.Dispose();
+    vertexShader?.Dispose();
+    shaderCompiler?.Dispose();
+    swapchain?.Dispose();
+    device?.Dispose();
+    window.Dispose();
+}
 
 var clean = ResourceTracker.Report();
 Log.Info(clean ? "Sandbox: clean shutdown, no GPU resource leaks." : "Sandbox: LEAKS DETECTED (see above).");

@@ -41,6 +41,7 @@ public sealed unsafe class FrameRenderer : IDisposable
         catch
         {
             DestroyResources();
+            GC.SuppressFinalize(this);
             throw;
         }
     }

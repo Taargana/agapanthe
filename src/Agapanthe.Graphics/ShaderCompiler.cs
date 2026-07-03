@@ -25,6 +25,7 @@ public sealed unsafe class ShaderCompiler : IDisposable
         if (_compiler is null)
         {
             _shaderc.Dispose();
+            GC.SuppressFinalize(this);
             throw new GraphicsException("Failed to initialize the shaderc compiler.");
         }
 
@@ -74,12 +75,23 @@ public sealed unsafe class ShaderCompiler : IDisposable
         };
 
         var options = _shaderc.CompileOptionsInitialize();
-        var sourcePtr = (byte*)Marshal_StringToUtf8(source, out var sourceLength);
-        var namePtr = (byte*)Marshal_StringToUtf8(sourceName, out _);
-        var entryPtr = (byte*)Marshal_StringToUtf8("main", out _);
+        if (options is null)
+        {
+            throw new GraphicsException($"shaderc failed to allocate compile options for '{sourceName}'.");
+        }
+
+        byte* sourcePtr = null;
+        byte* namePtr = null;
+        byte* entryPtr = null;
         CompilationResult* result = null;
+        var sourceLength = 0;
         try
         {
+            // Allocated inside the try so a mid-way OOM still hits the finally and frees the rest.
+            sourcePtr = (byte*)Marshal_StringToUtf8(source, out sourceLength);
+            namePtr = (byte*)Marshal_StringToUtf8(sourceName, out _);
+            entryPtr = (byte*)Marshal_StringToUtf8("main", out _);
+
             _shaderc.CompileOptionsSetOptimizationLevel(options, OptimizationLevel.Performance);
             _shaderc.CompileOptionsSetSourceLanguage(options, SourceLanguage.Glsl);
 

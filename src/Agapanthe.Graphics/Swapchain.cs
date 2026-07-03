@@ -30,6 +30,7 @@ public sealed unsafe class Swapchain : IDisposable
         catch
         {
             DestroyResources();
+            GC.SuppressFinalize(this);
             throw;
         }
     }
