@@ -49,7 +49,15 @@ public sealed unsafe class DescriptorSetLayout : IDisposable
         ResourceTracker.Register("VkDescriptorSetLayout");
     }
 
-    ~DescriptorSetLayout() => ResourceTracker.ReportFinalizerLeak(nameof(DescriptorSetLayout));
+    ~DescriptorSetLayout()
+    {
+        // Only report when a native handle was actually acquired; ctor argument-validation
+        // exceptions reach the finalizer with nothing registered (audit M2, finding 1).
+        if (_handle.Handle != 0)
+        {
+            ResourceTracker.ReportFinalizerLeak(nameof(DescriptorSetLayout));
+        }
+    }
 
     internal Silk.NET.Vulkan.DescriptorSetLayout Handle => _handle;
 

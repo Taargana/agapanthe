@@ -26,9 +26,9 @@ public sealed unsafe class GraphicsPipeline : IDisposable
         _device = device;
 
         var vk = device.Api;
-        CreateLayout(vk, desc);
         try
         {
+            CreateLayout(vk, desc);
             CreatePipeline(vk, desc);
         }
         catch
@@ -39,7 +39,15 @@ public sealed unsafe class GraphicsPipeline : IDisposable
         }
     }
 
-    ~GraphicsPipeline() => ResourceTracker.ReportFinalizerLeak(nameof(GraphicsPipeline));
+    ~GraphicsPipeline()
+    {
+        // Only report when a native handle was actually acquired; ctor argument-validation
+        // exceptions reach the finalizer with nothing registered (audit M2, finding 1).
+        if (_pipeline.Handle != 0 || _layout.Handle != 0)
+        {
+            ResourceTracker.ReportFinalizerLeak(nameof(GraphicsPipeline));
+        }
+    }
 
     internal Pipeline Handle => _pipeline;
     internal PipelineLayout Layout => _layout;

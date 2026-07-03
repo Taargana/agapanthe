@@ -78,7 +78,12 @@ public sealed unsafe partial class GraphicsDevice : IDisposable
 
     ~GraphicsDevice()
     {
-        ResourceTracker.ReportFinalizerLeak(nameof(GraphicsDevice));
+        // Only report when a native handle was actually acquired; ctor argument-validation
+        // exceptions reach the finalizer with nothing registered (audit M2, finding 1).
+        if (_instance.Handle != 0 || _device.Handle != 0)
+        {
+            ResourceTracker.ReportFinalizerLeak(nameof(GraphicsDevice));
+        }
     }
 
     /// <summary>Deferred-destruction queue for all GPU resources owned by this device (spec §3.2).</summary>

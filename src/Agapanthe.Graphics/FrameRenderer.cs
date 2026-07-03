@@ -52,7 +52,15 @@ public sealed unsafe class FrameRenderer : IDisposable
         }
     }
 
-    ~FrameRenderer() => ResourceTracker.ReportFinalizerLeak(nameof(FrameRenderer));
+    ~FrameRenderer()
+    {
+        // Only report when a native handle was actually acquired; ctor argument-validation
+        // exceptions reach the finalizer with nothing registered (audit M2, finding 1).
+        if (_commandPool.Handle != 0)
+        {
+            ResourceTracker.ReportFinalizerLeak(nameof(FrameRenderer));
+        }
+    }
 
     /// <summary>Clear color applied at the start of the color attachment (RGBA, linear).</summary>
     public (float R, float G, float B, float A) ClearColor { get; set; } = (0f, 0f, 0f, 1f);

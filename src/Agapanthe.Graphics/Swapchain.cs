@@ -37,7 +37,12 @@ public sealed unsafe class Swapchain : IDisposable
 
     ~Swapchain()
     {
-        ResourceTracker.ReportFinalizerLeak(nameof(Swapchain));
+        // Only report when a native handle was actually acquired; ctor argument-validation
+        // exceptions reach the finalizer with nothing registered (audit M2, finding 1).
+        if (_swapchain.Handle != 0)
+        {
+            ResourceTracker.ReportFinalizerLeak(nameof(Swapchain));
+        }
     }
 
     public int ImageCount => _images.Length;
