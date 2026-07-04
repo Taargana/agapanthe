@@ -1,25 +1,36 @@
 using System.Runtime.CompilerServices;
 using Agapanthe.Core;
+using Agapanthe.Graphics.Memory;
 using Silk.NET.Vulkan;
 using Buffer = Silk.NET.Vulkan.Buffer;
 
 namespace Agapanthe.Graphics;
 
 /// <summary>
-/// A GPU buffer backed by host-visible, host-coherent memory kept persistently mapped.
-/// This is the simple M2 allocation strategy — one VkDeviceMemory per buffer, writable from
-/// the CPU without staging. The device-local buffer + suballocating GpuAllocator arrives in M3.
-/// Disposal is deferred through the device DeletionQueue (spec §3.2.1).
+/// A GPU buffer whose memory is suballocated from the device <see cref="GpuAllocator"/> (spec §3.5)
+/// with an explicit <see cref="MemoryDomain"/> (architect decision, session 2):
+/// <list type="bullet">
+///   <item><see cref="MemoryDomain.HostVisible"/> (default) — the backing block is persistently
+///   mapped by the allocator, so <see cref="Write{T}"/> copies straight into
+///   <see cref="GpuAllocation.MappedPointer"/> with no per-buffer <c>vkMapMemory</c>.</item>
+///   <item><see cref="MemoryDomain.DeviceLocal"/> — GPU-only memory; <see cref="Write{T}"/> throws
+///   (data must arrive through the staging upload path, M3-06) and the buffer automatically gains
+///   <c>TRANSFER_DST</c> usage as the copy target.</item>
+/// </list>
+/// The buffer owns its <c>VkBuffer</c> handle and its suballocation, never a whole
+/// <c>VkDeviceMemory</c>: the block is owned by the allocator/backend, counted once per block in the
+/// <see cref="ResourceTracker"/> as "VkDeviceMemory". Disposal is deferred through the device
+/// <see cref="DeletionQueue"/> without capturing any managed state (spec §3.2.5).
 /// </summary>
 public sealed unsafe class GpuBuffer : IDisposable
 {
     private readonly GraphicsDevice _device;
     private Buffer _buffer;
-    private DeviceMemory _memory;
+    private GpuAllocation _allocation;
     private void* _mapped;
     private bool _disposed;
 
-    public GpuBuffer(GraphicsDevice device, ulong sizeBytes, BufferUsage usage)
+    public GpuBuffer(GraphicsDevice device, ulong sizeBytes, BufferUsage usage, MemoryDomain domain = MemoryDomain.HostVisible)
     {
         ArgumentNullException.ThrowIfNull(device);
         if (sizeBytes == 0)
@@ -29,6 +40,7 @@ public sealed unsafe class GpuBuffer : IDisposable
 
         _device = device;
         SizeBytes = sizeBytes;
+        Domain = domain;
         var vk = device.Api;
 
         try
@@ -37,7 +49,7 @@ public sealed unsafe class GpuBuffer : IDisposable
             {
                 SType = StructureType.BufferCreateInfo,
                 Size = sizeBytes,
-                Usage = ToVkUsage(usage),
+                Usage = ToVkUsage(usage, domain),
                 SharingMode = SharingMode.Exclusive,
             };
             Buffer buffer;
@@ -46,26 +58,26 @@ public sealed unsafe class GpuBuffer : IDisposable
             ResourceTracker.Register("VkBuffer");
 
             vk.GetBufferMemoryRequirements(device.Device, _buffer, out var requirements);
-            var memoryType = device.FindMemoryType(
-                requirements.MemoryTypeBits,
-                MemoryPropertyFlags.HostVisibleBit | MemoryPropertyFlags.HostCoherentBit);
 
-            var allocInfo = new MemoryAllocateInfo
+            // Memory now comes from the shared allocator (block-level VkDeviceMemory), not a
+            // per-buffer vkAllocateMemory. The block is persistently mapped by the backend, so no
+            // per-buffer vkMapMemory either.
+            _allocation = device.Allocator.Allocate(
+                new MemoryRequirementsInfo(requirements.Size, requirements.Alignment, requirements.MemoryTypeBits),
+                domain);
+
+            VkCheck.ThrowIfFailed(
+                vk.BindBufferMemory(device.Device, _buffer, _allocation.DeviceMemory, _allocation.Offset),
+                "vkBindBufferMemory");
+
+            // Host-visible: the CPU address is the block's mapped base plus this suballocation's
+            // offset, already computed by the allocator. Device-local has no CPU pointer.
+            _mapped = (void*)_allocation.MappedPointer;
+            if (domain == MemoryDomain.HostVisible && _mapped is null)
             {
-                SType = StructureType.MemoryAllocateInfo,
-                AllocationSize = requirements.Size,
-                MemoryTypeIndex = memoryType,
-            };
-            DeviceMemory memory;
-            VkCheck.ThrowIfFailed(vk.AllocateMemory(device.Device, &allocInfo, null, &memory), "vkAllocateMemory");
-            _memory = memory;
-            ResourceTracker.Register("VkDeviceMemory");
-
-            VkCheck.ThrowIfFailed(vk.BindBufferMemory(device.Device, _buffer, _memory, 0), "vkBindBufferMemory");
-
-            void* mapped;
-            VkCheck.ThrowIfFailed(vk.MapMemory(device.Device, _memory, 0, sizeBytes, 0, &mapped), "vkMapMemory");
-            _mapped = mapped;
+                throw new GraphicsException(
+                    "Host-visible allocation is not mapped; the memory backend did not persistently map its block.");
+            }
         }
         catch
         {
@@ -77,9 +89,10 @@ public sealed unsafe class GpuBuffer : IDisposable
 
     ~GpuBuffer()
     {
-        // Only report when a native handle was actually acquired; ctor argument-validation
-        // exceptions reach the finalizer with nothing registered (audit M2, finding 1).
-        if (_buffer.Handle != 0 || _memory.Handle != 0)
+        // Only report when a native resource was actually acquired; ctor argument-validation
+        // exceptions reach the finalizer with nothing registered (audit M2, finding 1). A non-zero
+        // block id in the suballocation means the allocator handed us memory.
+        if (_buffer.Handle != 0 || _allocation.DeviceMemory.Handle != 0)
         {
             ResourceTracker.ReportFinalizerLeak(nameof(GpuBuffer));
         }
@@ -87,13 +100,26 @@ public sealed unsafe class GpuBuffer : IDisposable
 
     public ulong SizeBytes { get; }
 
+    /// <summary>The memory domain this buffer was created in.</summary>
+    public MemoryDomain Domain { get; }
+
     internal Buffer Handle => _buffer;
 
-    /// <summary>Copies <paramref name="data"/> into the mapped memory. Coherent memory needs no flush.</summary>
+    /// <summary>
+    /// Copies <paramref name="data"/> into the persistently mapped host-visible memory. Coherent
+    /// memory needs no flush.
+    /// </summary>
+    /// <exception cref="GraphicsException">The buffer is device-local (use the staging upload path, M3-06).</exception>
     public void Write<T>(ReadOnlySpan<T> data)
         where T : unmanaged
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
+        if (Domain != MemoryDomain.HostVisible)
+        {
+            throw new GraphicsException(
+                "Write<T> is only valid on a host-visible buffer; use the staging upload path for device-local memory.");
+        }
+
         var bytes = (ulong)(data.Length * Unsafe.SizeOf<T>());
         if (bytes > SizeBytes)
         {
@@ -112,12 +138,20 @@ public sealed unsafe class GpuBuffer : IDisposable
         }
 
         _disposed = true;
-        // Non-capturing deferred destroy (spec §3.2.5): raw handles travel by value in the payload
-        // and the destructor is a cached static delegate, so Dispose allocates nothing. The destroy
-        // runs once this frame leaves flight (spec §3.2.1).
-        var payload = new DeletionPayload(_buffer.Handle, _memory.Handle);
+
+        // Non-capturing deferred destroy (spec §3.2.5): the raw VkBuffer handle plus the routing
+        // data needed to return the suballocation travel by value in the payload, and the destructor
+        // is a cached static delegate, so Dispose allocates nothing. The payload layout matches the
+        // DeletionPayload documentation: Handle0 = VkBuffer, Handle1 = VkDeviceMemory (block id),
+        // Handle2 = memory type index, Offset = suballocation offset. Size/MappedPointer are not
+        // needed to free (the allocator identifies a region by memory-type + block + offset).
+        var payload = new DeletionPayload(
+            _buffer.Handle,
+            _allocation.DeviceMemory.Handle,
+            _allocation.MemoryTypeIndex,
+            _allocation.Offset);
         _buffer = default;
-        _memory = default;
+        _allocation = default;
         _mapped = null;
 
         _device.EnqueueDestroy(DestroyDelegate, in payload);
@@ -132,36 +166,26 @@ public sealed unsafe class GpuBuffer : IDisposable
     {
         var vk = device.Api;
         var deviceHandle = device.Device;
+
+        // The block memory is owned by the allocator/backend now: no vkUnmapMemory, no vkFreeMemory
+        // here. We destroy only the buffer handle and hand the suballocation back to the allocator.
         var buffer = new Buffer(payload.Handle0);
-        var memory = new DeviceMemory(payload.Handle1);
-
-        // Identical order/guards to the former inline path: unmap → destroy buffer → free memory.
-        if (memory.Handle != 0)
-        {
-            vk.UnmapMemory(deviceHandle, memory);
-        }
-
         if (buffer.Handle != 0)
         {
             vk.DestroyBuffer(deviceHandle, buffer, null);
             ResourceTracker.Unregister("VkBuffer");
         }
 
-        if (memory.Handle != 0)
+        if (payload.Handle1 != 0)
         {
-            vk.FreeMemory(deviceHandle, memory, null);
-            ResourceTracker.Unregister("VkDeviceMemory");
+            var allocation = ReconstructAllocation(payload);
+            device.Allocator.Free(in allocation);
         }
     }
 
     private void DestroyNow()
     {
         var vk = _device.Api;
-        if (_mapped is not null)
-        {
-            vk.UnmapMemory(_device.Device, _memory);
-            _mapped = null;
-        }
 
         if (_buffer.Handle != 0)
         {
@@ -170,15 +194,31 @@ public sealed unsafe class GpuBuffer : IDisposable
             ResourceTracker.Unregister("VkBuffer");
         }
 
-        if (_memory.Handle != 0)
+        // Return the suballocation immediately: a construction failure is never mid-flight, so there
+        // is nothing to defer. The block itself lives on inside the allocator.
+        if (_allocation.DeviceMemory.Handle != 0)
         {
-            vk.FreeMemory(_device.Device, _memory, null);
-            _memory = default;
-            ResourceTracker.Unregister("VkDeviceMemory");
+            _device.Allocator.Free(in _allocation);
+            _allocation = default;
         }
+
+        _mapped = null;
     }
 
-    private static BufferUsageFlags ToVkUsage(BufferUsage usage)
+    /// <summary>
+    /// Rebuilds the <see cref="GpuAllocation"/> needed by <see cref="GpuAllocator.Free"/> from the
+    /// deletion payload. The free-list identifies a region purely by (memory-type index, block id,
+    /// offset), so <c>Size</c> and <c>MappedPointer</c> are irrelevant here and left at zero.
+    /// </summary>
+    private static GpuAllocation ReconstructAllocation(in DeletionPayload payload)
+    {
+        var block = new MemoryBlock(payload.Handle1, nint.Zero);
+        var suballocation = new Suballocation(block, payload.Offset, 0);
+        // Domain is not consulted by Free; any value is fine.
+        return new GpuAllocation(suballocation, (uint)payload.Handle2, MemoryDomain.DeviceLocal);
+    }
+
+    private static BufferUsageFlags ToVkUsage(BufferUsage usage, MemoryDomain domain)
     {
         var flags = BufferUsageFlags.None;
         if ((usage & BufferUsage.Vertex) != 0)
@@ -199,6 +239,13 @@ public sealed unsafe class GpuBuffer : IDisposable
         if (flags == BufferUsageFlags.None)
         {
             throw new GraphicsException("BufferUsage must specify at least one usage.");
+        }
+
+        // Device-local buffers can only be populated by a copy from a staging buffer (M3-06), so
+        // they are always a transfer destination.
+        if (domain == MemoryDomain.DeviceLocal)
+        {
+            flags |= BufferUsageFlags.TransferDstBit;
         }
 
         return flags;

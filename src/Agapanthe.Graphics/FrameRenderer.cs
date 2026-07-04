@@ -312,8 +312,10 @@ public sealed unsafe class FrameRenderer : IDisposable
             return;
         }
 
-        _depthImage?.Dispose();
-        _depthImage = new GpuImage(_device, extent.Width, extent.Height, DepthFormat, ImagePurpose.DepthAttachment);
+        // Swapchain-sized: only ever (re)created behind a device wait, so destroy synchronously
+        // rather than deferring through the DeletionQueue.
+        _depthImage?.DestroyImmediately();
+        _depthImage = new GpuImage(_device, extent.Width, extent.Height, DepthFormat, ImageUsage.DepthAttachment);
         _depthExtent = extent;
     }
 
@@ -381,7 +383,8 @@ public sealed unsafe class FrameRenderer : IDisposable
     private void DestroyResources()
     {
         var vk = _device.Api;
-        _depthImage?.Dispose();
+        // Reached only after _device.WaitIdle() (Dispose) or a failed ctor; immediate destroy is safe.
+        _depthImage?.DestroyImmediately();
         _depthImage = null;
         for (var i = 0; i < _frameContexts.Length; i++)
         {
