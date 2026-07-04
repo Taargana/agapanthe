@@ -205,7 +205,11 @@ window.FramebufferResized += (w, h) =>
 
 // Escape is two-stage: the first press releases the mouse capture, quitting only happens
 // when the cursor is already free. Edge-triggered so holding the key can't skip a stage.
-// PageUp/PageDown tune the look sensitivity live (×1.25 per press, clamped).
+// Live look-sensitivity tuning, ×1.25 per press, clamped to [0.0001, 0.01] rad/px:
+//   PageUp/PageDown = horizontal (yaw) · Home/End = vertical (pitch)
+const float sensStep = 1.25f;
+const float sensMin = 0.0001f;
+const float sensMax = 0.01f;
 window.KeyPressed += key =>
 {
     switch (key)
@@ -217,14 +221,25 @@ window.KeyPressed += key =>
             window.Close();
             break;
         case Key.PageUp:
-            controller.LookSensitivity = MathF.Min(controller.LookSensitivity * 1.25f, 0.01f);
-            Log.Info($"Look sensitivity: {controller.LookSensitivity:F5} rad/px");
+            controller.LookSensitivityX = MathF.Min(controller.LookSensitivityX * sensStep, sensMax);
+            LogSensitivity();
             break;
         case Key.PageDown:
-            controller.LookSensitivity = MathF.Max(controller.LookSensitivity / 1.25f, 0.0001f);
-            Log.Info($"Look sensitivity: {controller.LookSensitivity:F5} rad/px");
+            controller.LookSensitivityX = MathF.Max(controller.LookSensitivityX / sensStep, sensMin);
+            LogSensitivity();
+            break;
+        case Key.Home:
+            controller.LookSensitivityY = MathF.Min(controller.LookSensitivityY * sensStep, sensMax);
+            LogSensitivity();
+            break;
+        case Key.End:
+            controller.LookSensitivityY = MathF.Max(controller.LookSensitivityY / sensStep, sensMin);
+            LogSensitivity();
             break;
     }
+
+    void LogSensitivity()
+        => Log.Info($"Look sensitivity: X={controller.LookSensitivityX:F5} Y={controller.LookSensitivityY:F5} rad/px");
 };
 
 window.Updated += dt =>

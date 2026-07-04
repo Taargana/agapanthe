@@ -49,7 +49,7 @@ public readonly struct CameraInput
     /// <summary>
     /// Mouse motion since the previous frame, in <b>pixels</b>. X is screen-right,
     /// Y is screen-down (native mouse convention). Scaled by
-    /// <see cref="FreeCameraController.LookSensitivity"/> into radians.
+    /// <see cref="FreeCameraController.LookSensitivityX"/>/<see cref="FreeCameraController.LookSensitivityY"/> into radians.
     /// </summary>
     public Vector2 LookDelta { get; }
 }
@@ -73,9 +73,19 @@ public sealed class FreeCameraController
     /// <summary>Movement speed in world units per second.</summary>
     public float MoveSpeed { get; set; } = 5f;
 
-    /// <summary>Look sensitivity in radians per pixel of mouse motion (default ≈ 0.057°/px,
-    /// a mid-range FPS feel: a full turn takes about 6300 px of mouse travel).</summary>
-    public float LookSensitivity { get; set; } = 0.001f;
+    /// <summary>Horizontal (yaw) look sensitivity in radians per pixel of mouse motion
+    /// (default ≈ 0.057°/px, a mid-range FPS feel: a full turn ≈ 6300 px of travel).</summary>
+    public float LookSensitivityX { get; set; } = 0.001f;
+
+    /// <summary>Vertical (pitch) look sensitivity in radians per pixel of mouse motion.
+    /// Same default as <see cref="LookSensitivityX"/>; tune independently to taste.</summary>
+    public float LookSensitivityY { get; set; } = 0.001f;
+
+    /// <summary>Sets both axis sensitivities at once (radians per pixel).</summary>
+    public float LookSensitivity
+    {
+        set => LookSensitivityX = LookSensitivityY = value;
+    }
 
     /// <summary>
     /// Applies one frame of input to <paramref name="camera"/>. Orientation updates are
@@ -87,8 +97,8 @@ public sealed class FreeCameraController
         ArgumentNullException.ThrowIfNull(camera);
 
         // --- Look: mouse delta → yaw/pitch. Screen Y is down, so a negative dy looks up. ---
-        camera.Yaw += input.LookDelta.X * LookSensitivity;
-        camera.Pitch -= input.LookDelta.Y * LookSensitivity;
+        camera.Yaw += input.LookDelta.X * LookSensitivityX;
+        camera.Pitch -= input.LookDelta.Y * LookSensitivityY;
         camera.Pitch = Math.Clamp(camera.Pitch, -MaxPitch, MaxPitch);
 
         // --- Move: build a direction in the camera basis, normalize so diagonals aren't faster. ---
