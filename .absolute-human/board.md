@@ -1,6 +1,6 @@
 # Absolute-Human Board — Agapanthe Session 3 (M3 : Mémoire & Textures)
 
-**Status**: in-progress
+**Status**: completed
 **Créé**: 2026-07-03
 **Spec**: docs/plans/2026-07-02-graphics-engine-design.md §3.2, §3.4, §3.5, §6 (M3)
 **Board persistence**: git-tracked
@@ -95,14 +95,59 @@ Logique pure de suballocation (spec §3.5) : `IMemoryBackend` (AllocateBlock/Fre
 **Résultat**: checkerboard 256² ambre/teal (32 px), Rgba8Srgb, FullMipChain = 9 mips uploadés (copy mip 0 + blits) ; vertex/index DeviceLocal via GpuUploader (using-block, disposé post-upload) ; sampler défauts ; set 1 baseColor via DescriptorAllocator persistant écrit une fois ; pipeline SetLayouts [frame, material], VertexLayout [0 Position, 1 Color, 3 Uv] (Normal → M5) ; cube.frag module texture × couleur de face. Run 120 frames : EXIT=0, zéro VUID/warning, 43 ressources équilibrées, stats : bloc DeviceLocal 64 MiB (vertex+index+texture) + bloc host-visible (UBO+staging), tout rendu au FlushAll avant LogStats.
 Checkerboard procédural RGBA (Rgba8Srgb) → upload staging → mips → sampler ; vertex/index en DeviceLocal via staging ; UV consommé (attribut 3 + cube.vert/frag échantillonne baseColor × couleur). Stats allocateur loggées au shutdown. AC: run macOS — cube texturé net (mips visibles en éloignant la caméra), 0 validation, 0 leak, stats visibles.
 
-### M3-10 — Self code review [test, S] — pending
-Audit csharp-lowlevel (allocateur : races/alignement/fuites, hot path, DeletionQueue non-capturante prouvée) + graphics-3d (barriers mips/upload, layouts) + architecte (API allocateur/upload prête pour M4 glTF). AC: 0 finding critique.
+### M3-10 — Self code review [test, S] — done (2× PASS)
+**csharp-lowlevel PASS (0 critique)** : free-list saine (padding = région libre récupérable, fusion triple correcte, dedicated offset 0 libéré entier, double-free détecté, contrat « Size ignorée » verrouillé par les 3 tests deferred-free) ; packing 40/24 sain (dedicated toujours offset 0 → jamais > 2^40, garde-fous + round-trip aux bornes) ; chemins d'erreur ctor/mid-upload équilibrés (staging en try/finally) ; hot path toujours zéro-alloc (CommandList readonly struct, callback hoisté, Flush sans alloc) ; ordres de vie corrects (flush avant allocator.Dispose, teardown Sandbox tracé). 2 observations MINEURES phase 2 : compteur de génération anti-ABA par région en #if DEBUG ; `entry.Device!` documenté (null impossible en prod).
+**Architecte PASS** : section dédiée ci-dessous (décisions M4).
 
-### M3-11 — Requirements validation [test, S] — pending
+### M3-11 — Requirements validation [test, S] — done (tableau ci-dessous)
 Exigences spec §3.5 + §6 M3 cochées vs code. AC: toutes couvertes ou déférées documentées.
 
-### M3-12 — Full verification [test, S] — pending
-build 0 warning, dotnet test (dont tests allocateur), run Sandbox texturé (validation clean + no leaks + stats mémoire). Sortie collée au board. AC: tout vert.
+### M3-12 — Full verification [test, S] — done
+**Sortie (2026-07-04)** :
+```
+Build succeeded.    0 Warning(s)    0 Error(s)
+Passed!  - Failed: 0, Passed: 88, Skipped: 0, Total: 88 - Agapanthe.Tests.dll (net10.0)
+
+AGAPANTHE_MAX_FRAMES=240 DYLD_LIBRARY_PATH=/opt/homebrew/lib dotnet run --project samples/Sandbox :
+GpuAllocator memory stats:
+  type 0 [DeviceLocal]: 64.00 MiB allocated / 0.00 MiB used, 1 block(s), 0 alloc(s), frag 0.00
+  type 1 [DeviceLocal|HostVisible|HostCoherent|HostCached]: 64.00 MiB, 1 block(s), 0 alloc(s)
+  total: 128.00 MiB allocated across 2 block(s).
+ResourceTracker: no leaks (43 resources created and destroyed).
+EXIT=0 — zéro ERROR/WARN/VUID.
+```
+Vérification visuelle cube texturé + resize : manuelle par l'utilisateur (run non-headless).
+
+## M3-11 — Validation des exigences (spec §3.5 + §6 M3)
+
+| Exigence | État |
+|---|---|
+| Suballocation gros blocs par memory type, free-list, alignement | ✓ FreeListAllocator, blocs 64 MiB paresseux, first-fit + coalescing |
+| Seam IMemoryBackend, tests sans GPU | ✓ mock xUnit, 19 tests free-list + 11 GpuAllocator + 3 deferred-free |
+| Trois usages DeviceLocal/HostVisible/Staging | ✓ MemoryDomain {DeviceLocal, HostVisible} ; Staging = HostVisible transient encapsulé dans GpuUploader (enum à 2 domaines suffit — staging n'est pas un domaine mémoire distinct) |
+| Dedicated allocation grosses images | ✓ seuil blockSize/2 dans le free-list (taille exacte, libéré entier) |
+| Stats debug par heap (octets, blocs, fragmentation) | ✓ AllocationStats + LogStats au shutdown du device |
+| Staging uploads (pas de submit caché dans Write<T>) | ✓ GpuUploader explicite, synchrone, fence ; Write<T> jette sur DeviceLocal |
+| Images + mipmaps + samplers | ✓ GpuImage MipLevels + blits linéaires (support format vérifié), Sampler/SamplerDesc |
+| sRGB vs linéaire | ✓ texture baseColor en Rgba8Srgb ; formats linéaires disponibles dans PixelFormat (exercés M4 avec normal/MR) |
+| Mesh texturé (critère de sortie) | ✓ cube checkerboard 9 mips, set 1 per-material |
+| Tests allocateur verts | ✓ 88 tests total |
+| Stats mémoire visibles | ✓ log shutdown (voir M3-12) |
+| Anisotropie sampler | Dormante — feature device non activée, chemin de clamp prêt (M5+ si besoin) |
+| Upload async / queue transfert | Déféré M8 (Deferred Work) |
+
+## Revue architecte M3-10 (PASS) — décisions à acter au démarrage M4
+
+1. **GltfLoader/ImageLoader = DTO CPU, zéro dépendance Graphics** (tests unitaires sans GPU, spec §5). Rendering transforme les DTO en ressources GPU. Graphe : Assets → Core ; Rendering → Assets + Graphics.
+2. **Créer dans Rendering : Mesh, Material, MeshInstance, Scene, Renderer/ForwardPass** — migrer le câblage manuel du Sandbox (layouts/sets/uploads/record). Sandbox → glue applicative.
+3. **Ownership** : Material possède images/samplers/UBO facteurs + set persistant ; Mesh ses buffers ; Renderer le DescriptorAllocator. Teardown : WaitIdle → Dispose ressources (différé) → FlushAll → allocateur descriptors (synchrone).
+4. **Figer le layout set 1 en forme PBR finale (6 bindings) dès M4** même si seul baseColor est rempli — stabilise layout + pool sizing jusqu'à M5.
+5. **Cache de Sampler** dans Rendering (dedup configs glTF).
+6. **Upload per-ressource synchrone conservé** — un seul `using` GpuUploader pour tout le load. Point clé relevé : le staging unique vivant recoalesce avant l'upload suivant → zéro fragmentation host-visible ; le batch la réintroduirait. Batch/async → M8, seulement si mesuré nécessaire.
+
+À anticiper M5 (rien à faire M4) : généralisation FrameRenderer (target HDR off-screen + passe tonemap — plus gros item structurel, concevoir en tête de M5) ; pool sizing DescriptorAllocator proportionnel aux samplers/set (saturation CIS à ~12 sets sinon) ; activer samplerAnisotropy ; vérif format features du RT HDR (Rgba16Sfloat déjà mappé, GpuImage prêt).
+
+Dette acceptable : MemoryDomain à 2 domaines (Staging piggyback HostVisible — assumé, revisiter si async M8) ; DescriptorSetHandle sémantique partagée frame/persistant (tag de génération si bug un jour) ; SamplerDesc AddressMode unique (U/V séparés si une fixture l'exige) ; dedup samplers → M4 (décision 5).
 
 ## Deferred Work
 
@@ -114,3 +159,4 @@ build 0 warning, dotnet test (dont tests allocateur), run Sandbox texturé (vali
 ## Log
 
 - 2026-07-03: session 3 ouverte. Board S2 archivé. DAG 12 tâches, 6 vagues. Décisions architecte S2 + finding 2 audit actés en W1-W3.
+- 2026-07-04: W1-W5 exécutées (commits eb8e37a, 581fb04, 2514bb2, 0b8914f, ed44264). M3-10 : 2× PASS (0 critique). M3-11/12 : 88 tests, run 240 frames 0 validation 0 leak, stats visibles. **Session 3 close — M3 atteint** (cube texturé, chaîne de mips GPU, allocateur testé). M4 : acter les 6 décisions architecte (DTO CPU, Mesh/Material/Scene/Renderer dans Rendering, set 1 figé PBR, cache samplers).
