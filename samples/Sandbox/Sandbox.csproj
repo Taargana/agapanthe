@@ -20,6 +20,14 @@
     <Content Include="..\..\shaders\**\*" Link="shaders\%(RecursiveDir)%(Filename)%(Extension)">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </Content>
+    <!-- Copy the Khronos glTF fixtures into models/ next to the executable so the default model
+         (DamagedHelmet.glb) and any fixture passed by bare name resolve independently of the shell's
+         working directory. Files are copied flat, preserving names, so a .gltf's relative uri references
+         to its .bin / .png siblings still resolve inside models/. Fixtures live under tests/ (git-tracked
+         there, M4-01); this glob is the sample's own copy of them, authorised by M4-11. -->
+    <Content Include="..\..\tests\Agapanthe.Tests\Fixtures\**\*" Link="models\%(RecursiveDir)%(Filename)%(Extension)">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
   </ItemGroup>
 
 </Project>
