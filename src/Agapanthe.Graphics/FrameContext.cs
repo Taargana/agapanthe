@@ -4,9 +4,10 @@ using Silk.NET.Vulkan;
 namespace Agapanthe.Graphics;
 
 /// <summary>
-/// An opaque reference to a descriptor set allocated from a <see cref="FrameContext"/> pool.
-/// Valid only for the frame it was allocated in — the pool is reset once the frame's fence
-/// signals, so holding one across frames is a use-after-free.
+/// An opaque reference to a descriptor set. Its validity is that of the pool it came from:
+/// a set from a <see cref="FrameContext"/> pool is valid only for that frame (the pool is reset once
+/// the frame's fence signals, so holding it across frames is a use-after-free), while a set from a
+/// <see cref="DescriptorAllocator"/> is persistent (valid until that allocator is disposed).
 /// </summary>
 public readonly struct DescriptorSetHandle
 {
@@ -96,23 +97,19 @@ public sealed unsafe class FrameContext : IDisposable
     {
         ArgumentNullException.ThrowIfNull(buffer);
         ObjectDisposedException.ThrowIf(_disposed, this);
+        DescriptorWrites.UniformBuffer(_device, set.Set, binding, buffer);
+    }
 
-        var bufferInfo = new DescriptorBufferInfo
-        {
-            Buffer = buffer.Handle,
-            Offset = 0,
-            Range = buffer.SizeBytes,
-        };
-        var write = new WriteDescriptorSet
-        {
-            SType = StructureType.WriteDescriptorSet,
-            DstSet = set.Set,
-            DstBinding = binding,
-            DescriptorCount = 1,
-            DescriptorType = DescriptorType.UniformBuffer,
-            PBufferInfo = &bufferInfo,
-        };
-        _device.Api.UpdateDescriptorSets(_device.Device, 1, &write, 0, null);
+    /// <summary>
+    /// Points <paramref name="binding"/> of <paramref name="set"/> at a combined image sampler
+    /// (<paramref name="image"/> read through <paramref name="sampler"/>, layout ShaderReadOnlyOptimal).
+    /// </summary>
+    public void WriteCombinedImageSampler(DescriptorSetHandle set, uint binding, GpuImage image, Sampler sampler)
+    {
+        ArgumentNullException.ThrowIfNull(image);
+        ArgumentNullException.ThrowIfNull(sampler);
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        DescriptorWrites.CombinedImageSampler(_device, set.Set, binding, image, sampler);
     }
 
     /// <summary>Frees all sets from this frame's pool. Called by the frame loop right after

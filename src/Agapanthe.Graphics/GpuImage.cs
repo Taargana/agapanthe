@@ -145,6 +145,15 @@ public sealed unsafe class GpuImage : IDisposable
     public static uint FullMipChain(uint width, uint height)
         => (uint)(BitOperations.Log2(Math.Max(Math.Max(width, height), 1u)) + 1);
 
+    /// <summary>
+    /// Dimensions of mip <paramref name="level"/> for a base image of
+    /// <paramref name="width"/>×<paramref name="height"/>: each axis is halved per level and floored to a
+    /// minimum of 1 (<c>max(1, dim &gt;&gt; level)</c>). This is the extent a buffer→image copy or a blit
+    /// target uses at that level, and it matches the Vulkan mip-size rule. Pure/testable (M3-07).
+    /// </summary>
+    public static (uint Width, uint Height) MipSize(uint width, uint height, uint level)
+        => (Math.Max(1u, width >> (int)level), Math.Max(1u, height >> (int)level));
+
     internal Image Handle => _image;
     internal ImageView View => _view;
 
@@ -165,22 +174,23 @@ public sealed unsafe class GpuImage : IDisposable
 
         _disposed = true;
 
-        // TODO-M3-06: this deferred path uses the closure-allocating legacy DeletionQueue overload,
-        // because a GpuAllocation (block reference + offset + size + type) does not fit the non-capturing
-        // 4×ulong DeletionPayload and no shared suballocation registry exists yet to carry it. The
-        // zero-alloc non-capturing migration lands at the M3-06 (W4) integration. In M3-05 no image is
-        // freed per frame — the only live image (depth) uses DestroyImmediately after WaitIdle — so this
-        // closure path is not on any hot loop.
-        var device = _device;
-        var image = _image;
-        var view = _view;
-        var allocation = _allocation;
-        var hasAllocation = _hasAllocation;
+        // Non-capturing deferred destroy (spec §3.2.5, zero managed allocation): the raw handles plus
+        // the routing data needed to return the suballocation travel by value in the payload, and the
+        // destructor is a cached static delegate. An image needs FIVE values (image, view, block id,
+        // memory-type index, offset) but the payload has four ulong slots, so memory-type index and
+        // offset are packed into the single Offset slot by PackOffsetAndType (40-bit offset / 24-bit
+        // type — see the helper for the guards). Payload layout: Handle0 = VkImage, Handle1 =
+        // VkImageView, Handle2 = VkDeviceMemory (block id), Offset = packed(offset, memTypeIndex).
+        var payload = new DeletionPayload(
+            _image.Handle,
+            _view.Handle,
+            _hasAllocation ? _allocation.DeviceMemory.Handle : 0,
+            _hasAllocation ? PackOffsetAndType(_allocation.Offset, _allocation.MemoryTypeIndex) : 0);
         _image = default;
         _view = default;
         _hasAllocation = false;
 
-        device.EnqueueDestroy(() => DestroyHandles(device, image, view, in allocation, hasAllocation));
+        _device.EnqueueDestroy(DestroyDelegate, in payload);
         GC.SuppressFinalize(this);
     }
 
@@ -204,10 +214,84 @@ public sealed unsafe class GpuImage : IDisposable
         GC.SuppressFinalize(this);
     }
 
+    // Allocated once per type: passing this reference on the deferred path costs no allocation.
+    private static readonly Action<GraphicsDevice, DeletionPayload> DestroyDelegate = DestroyDeferred;
+
     /// <summary>
-    /// Single destruction routine shared by the ctor rollback, the immediate path and the deferred
-    /// closure. Order: view → image → free the suballocation. The allocator's blocks outlive any
-    /// deferred free, so replaying this after the frame leaves flight is safe.
+    /// Deferred destructor for the non-capturing DeletionQueue path (<see cref="Dispose"/>): rebuilds the
+    /// handles and the <see cref="GpuAllocation"/> from the value-type payload, then destroys view → image
+    /// and returns the suballocation. The free-list identifies a region by (memory-type index, block id,
+    /// offset) only — <c>Size</c>/<c>MappedPointer</c> are irrelevant and left at zero. The allocator's
+    /// blocks outlive any deferred free, so replaying this after the frame leaves flight is safe.
+    /// </summary>
+    private static void DestroyDeferred(GraphicsDevice device, DeletionPayload payload)
+    {
+        var vk = device.Api;
+        var deviceHandle = device.Device;
+
+        var view = new ImageView(payload.Handle1);
+        if (view.Handle != 0)
+        {
+            vk.DestroyImageView(deviceHandle, view, null);
+            ResourceTracker.Unregister("VkImageView");
+        }
+
+        var image = new Image(payload.Handle0);
+        if (image.Handle != 0)
+        {
+            vk.DestroyImage(deviceHandle, image, null);
+            ResourceTracker.Unregister("VkImage");
+        }
+
+        // Non-zero block id ⇒ a suballocation was bound (a null VkDeviceMemory handle is never valid).
+        if (payload.Handle2 != 0)
+        {
+            var block = new MemoryBlock(payload.Handle2, nint.Zero);
+            var sub = new Suballocation(block, UnpackOffset(payload.Offset), 0);
+            // Domain is not consulted by Free; any value is fine.
+            var allocation = new GpuAllocation(sub, UnpackMemoryType(payload.Offset), MemoryDomain.DeviceLocal);
+            device.Allocator.Free(in allocation);
+        }
+    }
+
+    // Payload packing (spec §3.2.5): the suballocation offset and its memory-type index share the single
+    // 64-bit Offset slot. Suballocation offsets sit inside 64–256 MiB blocks (≪ 2^40), and Vulkan caps
+    // memory types at VK_MAX_MEMORY_TYPES = 32 (≪ 2^24), so a 40/24 split is comfortable with headroom.
+    private const int OffsetBits = 40;
+    private const ulong OffsetMask = (1UL << OffsetBits) - 1;
+    private const uint MaxMemoryTypeIndex = (1u << (64 - OffsetBits)) - 1; // 24-bit ceiling
+
+    /// <summary>Packs a suballocation <paramref name="offset"/> (low 40 bits) and
+    /// <paramref name="memoryTypeIndex"/> (high 24 bits) into one 64-bit value for the deletion payload.</summary>
+    /// <exception cref="GraphicsException">The offset needs ≥ 40 bits or the memory-type index ≥ 24 bits
+    /// (would silently corrupt the free-list routing).</exception>
+    internal static ulong PackOffsetAndType(ulong offset, uint memoryTypeIndex)
+    {
+        if (offset > OffsetMask)
+        {
+            throw new GraphicsException(
+                $"Suballocation offset {offset} exceeds the {OffsetBits}-bit deletion-payload packing limit.");
+        }
+
+        if (memoryTypeIndex > MaxMemoryTypeIndex)
+        {
+            throw new GraphicsException(
+                $"Memory-type index {memoryTypeIndex} exceeds the {64 - OffsetBits}-bit deletion-payload packing limit.");
+        }
+
+        return ((ulong)memoryTypeIndex << OffsetBits) | offset;
+    }
+
+    /// <summary>Extracts the suballocation offset from a value packed by <see cref="PackOffsetAndType"/>.</summary>
+    internal static ulong UnpackOffset(ulong packed) => packed & OffsetMask;
+
+    /// <summary>Extracts the memory-type index from a value packed by <see cref="PackOffsetAndType"/>.</summary>
+    internal static uint UnpackMemoryType(ulong packed) => (uint)(packed >> OffsetBits);
+
+    /// <summary>
+    /// Single destruction routine shared by the ctor rollback and the immediate path. Order: view → image
+    /// → free the suballocation. The allocator's blocks outlive any deferred free, so replaying this after
+    /// the frame leaves flight is safe.
     /// </summary>
     private static void DestroyHandles(
         GraphicsDevice device, Image image, ImageView view, in GpuAllocation allocation, bool hasAllocation)
