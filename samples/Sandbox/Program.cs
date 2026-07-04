@@ -190,7 +190,7 @@ window.Loaded += () =>
         cmd.DrawIndexed(indexCount);
     };
 
-    Log.Info($"Sandbox: initialized on '{device.AdapterName}'. Rendering textured cube — WASD + souris, Échap pour quitter.");
+    Log.Info($"Sandbox: initialized on '{device.AdapterName}'. Rendering textured cube — clic pour capturer la souris, WASD + souris, Échap libère puis quitte.");
 };
 
 // MoltenVK does not always report OUT_OF_DATE on resize; recreate explicitly to be safe.
@@ -203,15 +203,35 @@ window.FramebufferResized += (w, h) =>
     }
 };
 
-window.Updated += dt =>
+// Escape is two-stage: the first press releases the mouse capture, quitting only happens
+// when the cursor is already free. Edge-triggered so holding the key can't skip a stage.
+window.KeyPressed += key =>
 {
-    if (window.IsKeyDown(Key.Escape))
+    if (key != Key.Escape)
     {
-        window.Close();
         return;
     }
 
+    if (window.MouseCaptured)
+    {
+        window.SetMouseCaptured(false);
+    }
+    else
+    {
+        window.Close();
+    }
+};
+
+window.Updated += dt =>
+{
     modelAngle += (float)dt * 0.8f;
+
+    // Camera control only while the cursor is captured (a click in the window captures it,
+    // focus loss releases it) — mouse motion outside the window never steers the view.
+    if (!window.MouseCaptured)
+    {
+        return;
+    }
 
     var input = new CameraInput(
         moveForward: window.IsKeyDown(Key.W),

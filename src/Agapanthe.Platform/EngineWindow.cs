@@ -49,6 +49,7 @@ public sealed class EngineWindow : IDisposable
         };
         _window.Render += dt => Rendered?.Invoke(dt);
         _window.FramebufferResize += size => FramebufferResized?.Invoke(size.X, size.Y);
+        _window.FocusChanged += OnFocusChanged;
         _window.Closing += () => Closing?.Invoke();
 
         ResourceTracker.Register("EngineWindow");
@@ -65,6 +66,9 @@ public sealed class EngineWindow : IDisposable
     public event Action<int, int>? FramebufferResized;
 
     public event Action? Closing;
+
+    /// <summary>Edge-triggered key press (fires once per physical press, unlike <see cref="IsKeyDown"/> polling).</summary>
+    public event Action<Key>? KeyPressed;
 
     /// <summary>Framebuffer size in pixels, the size swapchains must use.</summary>
     public (int Width, int Height) FramebufferSize
@@ -98,11 +102,19 @@ public sealed class EngineWindow : IDisposable
     /// <summary>
     /// Mouse motion accumulated this frame, in pixels (X right, Y down). Valid to read
     /// inside an <see cref="Updated"/> handler; reset to zero after each update tick.
+    /// Always zero while the cursor is not captured — look input is strictly correlated
+    /// to an active capture, never to stray OS mouse events.
     /// </summary>
-    public Vector2 MouseDelta => _mouseDelta;
+    public Vector2 MouseDelta => _mouseCaptured ? _mouseDelta : Vector2.Zero;
 
     /// <summary>True while the cursor is captured for FPS-style look (hidden + locked).</summary>
     public bool MouseCaptured => _mouseCaptured;
+
+    /// <summary>
+    /// When true (default), clicking inside the window captures the cursor. Release stays
+    /// explicit (<see cref="SetMouseCaptured"/>) or automatic on focus loss.
+    /// </summary>
+    public bool CaptureMouseOnClick { get; set; } = true;
 
     /// <summary>Convenience keyboard poll; false when no keyboard is present.</summary>
     public bool IsKeyDown(Key key) => _keyboard?.IsKeyPressed(key) ?? false;
@@ -159,18 +171,49 @@ public sealed class EngineWindow : IDisposable
         _keyboard = _input.Keyboards.Count > 0 ? _input.Keyboards[0] : null;
         _mouse = _input.Mice.Count > 0 ? _input.Mice[0] : null;
 
+        if (_keyboard is not null)
+        {
+            _keyboard.KeyDown += OnKeyDown;
+        }
+
         if (_mouse is not null)
         {
             _mouse.MouseMove += OnMouseMove;
-            SetMouseCaptured(true);
+            _mouse.MouseDown += OnMouseDown;
         }
 
+        // No capture here: grabbing the cursor before the window has focus is unreliable
+        // (notably GLFW on macOS) and hostile UX. Capture happens on the first click.
         Loaded?.Invoke();
+    }
+
+    private void OnKeyDown(IKeyboard keyboard, Key key, int scancode) => KeyPressed?.Invoke(key);
+
+    private void OnMouseDown(IMouse mouse, MouseButton button)
+    {
+        // The click that lands inside the window proves both focus and intent — the only
+        // portable moment to grab the cursor (works the same under GLFW win32/x11/cocoa).
+        if (CaptureMouseOnClick && !_mouseCaptured)
+        {
+            SetMouseCaptured(true);
+        }
+    }
+
+    private void OnFocusChanged(bool focused)
+    {
+        // Losing focus always releases the capture: background windows must never keep
+        // steering the camera. Regaining focus does NOT recapture — that takes a click.
+        if (!focused && _mouseCaptured)
+        {
+            SetMouseCaptured(false);
+        }
     }
 
     private void OnMouseMove(IMouse mouse, Vector2 position)
     {
-        if (_hasLastMousePosition)
+        // Deltas only accumulate while captured; positions are still tracked so the first
+        // captured move has a valid reference and produces no jump.
+        if (_hasLastMousePosition && _mouseCaptured)
         {
             _mouseDelta += position - _lastMousePosition;
         }
@@ -188,9 +231,15 @@ public sealed class EngineWindow : IDisposable
 
         _disposed = true;
 
+        if (_keyboard is not null)
+        {
+            _keyboard.KeyDown -= OnKeyDown;
+        }
+
         if (_mouse is not null)
         {
             _mouse.MouseMove -= OnMouseMove;
+            _mouse.MouseDown -= OnMouseDown;
         }
 
         _input?.Dispose();
