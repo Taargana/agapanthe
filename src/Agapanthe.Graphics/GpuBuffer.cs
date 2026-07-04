@@ -112,36 +112,46 @@ public sealed unsafe class GpuBuffer : IDisposable
         }
 
         _disposed = true;
-        // Capture handles; the actual destroy runs once this frame leaves flight (spec §3.2.1).
-        var vk = _device.Api;
-        var deviceHandle = _device.Device;
-        var buffer = _buffer;
-        var memory = _memory;
+        // Non-capturing deferred destroy (spec §3.2.5): raw handles travel by value in the payload
+        // and the destructor is a cached static delegate, so Dispose allocates nothing. The destroy
+        // runs once this frame leaves flight (spec §3.2.1).
+        var payload = new DeletionPayload(_buffer.Handle, _memory.Handle);
         _buffer = default;
         _memory = default;
         _mapped = null;
 
-        _device.EnqueueDestroy(() =>
-        {
-            if (memory.Handle != 0)
-            {
-                vk.UnmapMemory(deviceHandle, memory);
-            }
-
-            if (buffer.Handle != 0)
-            {
-                vk.DestroyBuffer(deviceHandle, buffer, null);
-                ResourceTracker.Unregister("VkBuffer");
-            }
-
-            if (memory.Handle != 0)
-            {
-                vk.FreeMemory(deviceHandle, memory, null);
-                ResourceTracker.Unregister("VkDeviceMemory");
-            }
-        });
+        _device.EnqueueDestroy(DestroyDelegate, in payload);
 
         GC.SuppressFinalize(this);
+    }
+
+    // Allocated once per type: passing this reference on the hot path costs no allocation.
+    private static readonly Action<GraphicsDevice, DeletionPayload> DestroyDelegate = DestroyDeferred;
+
+    private static void DestroyDeferred(GraphicsDevice device, DeletionPayload payload)
+    {
+        var vk = device.Api;
+        var deviceHandle = device.Device;
+        var buffer = new Buffer(payload.Handle0);
+        var memory = new DeviceMemory(payload.Handle1);
+
+        // Identical order/guards to the former inline path: unmap → destroy buffer → free memory.
+        if (memory.Handle != 0)
+        {
+            vk.UnmapMemory(deviceHandle, memory);
+        }
+
+        if (buffer.Handle != 0)
+        {
+            vk.DestroyBuffer(deviceHandle, buffer, null);
+            ResourceTracker.Unregister("VkBuffer");
+        }
+
+        if (memory.Handle != 0)
+        {
+            vk.FreeMemory(deviceHandle, memory, null);
+            ResourceTracker.Unregister("VkDeviceMemory");
+        }
     }
 
     private void DestroyNow()

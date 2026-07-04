@@ -100,8 +100,19 @@ public sealed unsafe partial class GraphicsDevice : IDisposable
     internal void AdvanceFrame() => CurrentFrameIndex++;
 
     /// <summary>
+    /// Non-capturing deferred destroy (spec §3.2.5, zero managed allocation on the hot path).
+    /// <paramref name="destructor"/> must be a cached static delegate and <paramref name="payload"/>
+    /// carries the raw handles by value, so no closure is allocated per Dispose. Preferred for any
+    /// resource freed per-frame (textures, staging buffers).
+    /// </summary>
+    public void EnqueueDestroy(Action<GraphicsDevice, DeletionPayload> destructor, in DeletionPayload payload)
+        => DeletionQueue.Enqueue(this, destructor, in payload, CurrentFrameIndex);
+
+    /// <summary>
     /// Schedules a GPU destroy action to run once the current frame is out of flight
-    /// (N + FramesInFlight). Resources call this from Dispose() instead of destroying inline.
+    /// (N + FramesInFlight). Allocates a closure/delegate — reserved for rare or shutdown-only
+    /// teardown. Prefer <see cref="EnqueueDestroy(Action{GraphicsDevice, DeletionPayload}, in DeletionPayload)"/>
+    /// on the per-frame hot path.
     /// </summary>
     public void EnqueueDestroy(Action destroy) => DeletionQueue.Enqueue(destroy, CurrentFrameIndex);
 
