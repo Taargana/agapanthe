@@ -1,4 +1,5 @@
 using Agapanthe.Core;
+using Agapanthe.Graphics.Memory;
 using Silk.NET.Core;
 using Silk.NET.Core.Contexts;
 using Silk.NET.Core.Native;
@@ -50,6 +51,7 @@ public sealed unsafe partial class GraphicsDevice : IDisposable
     private bool _debugUtilsEnabled;
     private bool _useVulkan13Features;
     private bool _hasPortabilitySubset;
+    private GpuAllocator? _allocator;
     private bool _disposed;
 
     public GraphicsDevice(string applicationName, string[] requiredInstanceExtensions, IVkSurface windowSurface)
@@ -66,9 +68,14 @@ public sealed unsafe partial class GraphicsDevice : IDisposable
             CreateSurface(windowSurface);
             SelectPhysicalDevice();
             CreateLogicalDevice();
+            _allocator = new GpuAllocator(this);
         }
         catch
         {
+            // Lazy allocator: nothing is bound yet, so disposing frees nothing — but keep the
+            // ordering contract (allocator before the device it depends on).
+            _allocator?.Dispose();
+            _allocator = null;
             ReleaseResources();
             // Resources are already balanced; stop the finalizer reporting a phantom leak.
             GC.SuppressFinalize(this);
@@ -88,6 +95,14 @@ public sealed unsafe partial class GraphicsDevice : IDisposable
 
     /// <summary>Deferred-destruction queue for all GPU resources owned by this device (spec §3.2).</summary>
     public DeletionQueue DeletionQueue { get; } = new();
+
+    /// <summary>
+    /// The device's GPU memory allocator (spec §3.5). Buffers and images allocate through this from
+    /// M3-04 onward; it is created after the logical device and torn down after the DeletionQueue is
+    /// drained so deferred frees still have their backing blocks alive.
+    /// </summary>
+    public GpuAllocator Allocator =>
+        _allocator ?? throw new InvalidOperationException("GraphicsDevice allocator is not available (device disposed or construction failed).");
 
     /// <summary>
     /// Authoritative render frame counter, advanced once per presented frame by the
@@ -159,7 +174,20 @@ public sealed unsafe partial class GraphicsDevice : IDisposable
             WaitIdle();
         }
 
+        // Drain deferred destroys first: resource teardown (M3-04/05) returns suballocations to the
+        // allocator, which must still hold their backing blocks at this point.
         DeletionQueue.FlushAll();
+
+#if DEBUG
+        // Spec §6 M3: memory stats visible at shutdown, before the blocks are freed.
+        _allocator?.LogStats();
+#endif
+
+        // Then free the blocks (vkFreeMemory) — the device is still alive here, before ReleaseResources
+        // destroys it.
+        _allocator?.Dispose();
+        _allocator = null;
+
         ReleaseResources();
         GC.SuppressFinalize(this);
     }
