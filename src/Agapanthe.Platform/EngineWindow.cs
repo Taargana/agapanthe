@@ -28,6 +28,7 @@ public sealed class EngineWindow : IDisposable
     private Vector2 _lastMousePosition;
     private bool _hasLastMousePosition;
     private bool _mouseCaptured;
+    private bool _recenterCapture;
     private bool _disposed;
 
     public EngineWindow(string title, int width, int height)
@@ -46,6 +47,7 @@ public sealed class EngineWindow : IDisposable
             // Reset after subscribers consumed this frame's motion; the next batch of
             // MouseMove events (pumped before the following Update) starts from zero.
             _mouseDelta = Vector2.Zero;
+            RecenterCursor();
         };
         _window.Render += dt => Rendered?.Invoke(dt);
         _window.FramebufferResize += size => FramebufferResized?.Invoke(size.X, size.Y);
@@ -121,8 +123,10 @@ public sealed class EngineWindow : IDisposable
 
     /// <summary>
     /// Captures or releases the cursor. Capture prefers <see cref="CursorMode.Raw"/>
-    /// (unaccelerated FPS look) and falls back to <see cref="CursorMode.Disabled"/> when
-    /// the platform can't do raw motion (e.g. macOS). Release restores the normal cursor.
+    /// (unaccelerated, unbounded FPS look — Windows/Linux). Where raw motion is not
+    /// supported (e.g. macOS) it hides the cursor and re-centers it every update tick
+    /// instead: deltas are measured against the window center, so the cursor can never
+    /// pin against a screen edge and stall the look. Release restores the normal cursor.
     /// </summary>
     public void SetMouseCaptured(bool captured)
     {
@@ -134,13 +138,31 @@ public sealed class EngineWindow : IDisposable
         }
 
         var cursor = _mouse.Cursor;
-        cursor.CursorMode = captured
-            ? (cursor.IsSupported(CursorMode.Raw) ? CursorMode.Raw : CursorMode.Disabled)
-            : CursorMode.Normal;
+        if (captured)
+        {
+            if (cursor.IsSupported(CursorMode.Raw))
+            {
+                cursor.CursorMode = CursorMode.Raw;
+                _recenterCapture = false;
+            }
+            else
+            {
+                // CursorMode.Disabled is not trustworthy everywhere (macOS keeps a real,
+                // screen-clamped cursor), so use the deterministic classic: hide + warp.
+                cursor.CursorMode = CursorMode.Hidden;
+                _recenterCapture = true;
+            }
+        }
+        else
+        {
+            cursor.CursorMode = CursorMode.Normal;
+            _recenterCapture = false;
+        }
 
         // Drop the last position so a re-capture doesn't emit one huge delta jump.
         _hasLastMousePosition = false;
         _mouseDelta = Vector2.Zero;
+        RecenterCursor();
     }
 
     /// <summary>Instance extensions the window system requires (VK_KHR_surface + platform surface).</summary>
@@ -219,6 +241,25 @@ public sealed class EngineWindow : IDisposable
         }
 
         _lastMousePosition = position;
+        _hasLastMousePosition = true;
+    }
+
+    /// <summary>
+    /// Recenter-capture mode only: warps the (hidden) cursor back to the window center after
+    /// each update tick, so it always has the full window to move in before the next one.
+    /// Resetting the reference position to the center keeps the synthetic warp event from
+    /// counting as look motion.
+    /// </summary>
+    private void RecenterCursor()
+    {
+        if (!_mouseCaptured || !_recenterCapture || _mouse is null)
+        {
+            return;
+        }
+
+        var center = new Vector2(_window.Size.X / 2f, _window.Size.Y / 2f);
+        _mouse.Position = center;
+        _lastMousePosition = center;
         _hasLastMousePosition = true;
     }
 
