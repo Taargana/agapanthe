@@ -2,6 +2,7 @@
 
   <ItemGroup>
     <ProjectReference Include="..\Agapanthe.Graphics\Agapanthe.Graphics.csproj" />
+    <ProjectReference Include="..\Agapanthe.Assets\Agapanthe.Assets.csproj" />
     <ProjectReference Include="..\Agapanthe.Core\Agapanthe.Core.csproj" />
   </ItemGroup>
 
