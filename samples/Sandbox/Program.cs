@@ -205,20 +205,25 @@ window.FramebufferResized += (w, h) =>
 
 // Escape is two-stage: the first press releases the mouse capture, quitting only happens
 // when the cursor is already free. Edge-triggered so holding the key can't skip a stage.
+// PageUp/PageDown tune the look sensitivity live (×1.25 per press, clamped).
 window.KeyPressed += key =>
 {
-    if (key != Key.Escape)
+    switch (key)
     {
-        return;
-    }
-
-    if (window.MouseCaptured)
-    {
-        window.SetMouseCaptured(false);
-    }
-    else
-    {
-        window.Close();
+        case Key.Escape when window.MouseCaptured:
+            window.SetMouseCaptured(false);
+            break;
+        case Key.Escape:
+            window.Close();
+            break;
+        case Key.PageUp:
+            controller.LookSensitivity = MathF.Min(controller.LookSensitivity * 1.25f, 0.01f);
+            Log.Info($"Look sensitivity: {controller.LookSensitivity:F5} rad/px");
+            break;
+        case Key.PageDown:
+            controller.LookSensitivity = MathF.Max(controller.LookSensitivity / 1.25f, 0.0001f);
+            Log.Info($"Look sensitivity: {controller.LookSensitivity:F5} rad/px");
+            break;
     }
 };
 

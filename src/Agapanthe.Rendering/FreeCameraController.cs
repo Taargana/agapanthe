@@ -73,8 +73,9 @@ public sealed class FreeCameraController
     /// <summary>Movement speed in world units per second.</summary>
     public float MoveSpeed { get; set; } = 5f;
 
-    /// <summary>Look sensitivity in radians per pixel of mouse motion.</summary>
-    public float LookSensitivity { get; set; } = 0.0025f;
+    /// <summary>Look sensitivity in radians per pixel of mouse motion (default ≈ 0.057°/px,
+    /// a mid-range FPS feel: a full turn takes about 6300 px of mouse travel).</summary>
+    public float LookSensitivity { get; set; } = 0.001f;
 
     /// <summary>
     /// Applies one frame of input to <paramref name="camera"/>. Orientation updates are
