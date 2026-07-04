@@ -34,11 +34,15 @@ public static class Primitives
         for (var f = 0; f < faces.Length; f++)
         {
             var face = faces[f];
+            // Analytic tangent: U grows from corner A to corner B (uv 0,0 → 1,0), so the
+            // tangent is the A→B edge. V grows A→D and the corners are laid out CCW, which
+            // makes bitangent = cross(N, T) point along +V — glTF handedness w = +1.
+            var tangent = new Vector4(Vector3.Normalize(face.B - face.A), 1f);
             var v = f * 4;
-            vertices[v + 0] = new Vertex(face.A, face.Color, face.Normal, new Vector2(0, 0));
-            vertices[v + 1] = new Vertex(face.B, face.Color, face.Normal, new Vector2(1, 0));
-            vertices[v + 2] = new Vertex(face.C, face.Color, face.Normal, new Vector2(1, 1));
-            vertices[v + 3] = new Vertex(face.D, face.Color, face.Normal, new Vector2(0, 1));
+            vertices[v + 0] = new Vertex(face.A, face.Color, face.Normal, new Vector2(0, 0), tangent);
+            vertices[v + 1] = new Vertex(face.B, face.Color, face.Normal, new Vector2(1, 0), tangent);
+            vertices[v + 2] = new Vertex(face.C, face.Color, face.Normal, new Vector2(1, 1), tangent);
+            vertices[v + 3] = new Vertex(face.D, face.Color, face.Normal, new Vector2(0, 1), tangent);
 
             var i = f * 6;
             indices[i + 0] = (ushort)(v + 0);

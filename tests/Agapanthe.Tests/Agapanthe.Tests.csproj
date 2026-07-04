@@ -23,7 +23,12 @@
     <ProjectReference Include="..\..\src\Agapanthe.Graphics\Agapanthe.Graphics.csproj" />
     <ProjectReference Include="..\..\src\Agapanthe.Assets\Agapanthe.Assets.csproj" />
     <ProjectReference Include="..\..\src\Agapanthe.Rendering\Agapanthe.Rendering.csproj" />
-    <ProjectReference Include="..\..\src\Agapanthe.Rendering\Agapanthe.Rendering.csproj" />
+  </ItemGroup>
+
+  <!-- Khronos glTF sample fixtures (Box, BoxInterleaved, BoxTextured, DamagedHelmet),
+       copied next to the test binaries so parsing tests read them by relative path. -->
+  <ItemGroup>
+    <None Include="Fixtures\**" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
 </Project>

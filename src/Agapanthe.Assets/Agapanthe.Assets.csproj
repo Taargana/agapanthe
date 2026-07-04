@@ -1,18 +1,20 @@
-﻿<Project Sdk="Microsoft.NET.Sdk">
+<Project Sdk="Microsoft.NET.Sdk">
 
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+  </PropertyGroup>
+
+  <!-- Assets is GPU-free by design (spec §5: glTF parsing is unit-testable without a GPU).
+       It must never reference Agapanthe.Graphics or any Silk.NET package. -->
   <ItemGroup>
-    <ProjectReference Include="..\Agapanthe.Graphics\Agapanthe.Graphics.csproj" />
     <ProjectReference Include="..\Agapanthe.Core\Agapanthe.Core.csproj" />
   </ItemGroup>
 
   <ItemGroup>
     <PackageReference Include="StbImageSharp" Version="2.30.15" />
   </ItemGroup>
-
-  <PropertyGroup>
-    <TargetFramework>net10.0</TargetFramework>
-    <ImplicitUsings>enable</ImplicitUsings>
-    <Nullable>enable</Nullable>
-  </PropertyGroup>
 
 </Project>
