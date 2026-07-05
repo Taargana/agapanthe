@@ -148,17 +148,20 @@ public sealed class EngineWindow : IDisposable
             // focus guaranteed.) Hidden+recenter remains as a last-resort fallback only.
             if (cursor.IsSupported(CursorMode.Raw))
             {
+                // Raw feeds unbounded deltas directly; no recentering needed.
                 cursor.CursorMode = CursorMode.Raw;
-                _recenterCapture = false;
-            }
-            else if (cursor.IsSupported(CursorMode.Disabled))
-            {
-                cursor.CursorMode = CursorMode.Disabled;
                 _recenterCapture = false;
             }
             else
             {
-                cursor.CursorMode = CursorMode.Hidden;
+                // Disabled confines the cursor to the window, but on some platforms (observed on
+                // macOS) the *reported position* is still clamped at the screen edges — deltas go
+                // to zero there and the rotation stalls. Keep the edge-band recenter active on
+                // top of the confinement: whenever the reported position nears the window edge,
+                // warp back to the center so look deltas never run out of room.
+                cursor.CursorMode = cursor.IsSupported(CursorMode.Disabled)
+                    ? CursorMode.Disabled
+                    : CursorMode.Hidden;
                 _recenterCapture = true;
             }
         }
