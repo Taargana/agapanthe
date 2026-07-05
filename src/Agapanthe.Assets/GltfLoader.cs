@@ -45,9 +45,13 @@ public static class GltfLoader
             ? scenes[sceneIndex]
             : throw new AssetException(sourcePath, $"default scene {sceneIndex} does not exist.");
 
+        // glTF mandates a strict tree (one parent per node); enforcing it here also bounds the
+        // total traversal work — without it, a node referenced by two parents fans out
+        // exponentially even under the depth guard (audit M4, finding M1).
+        var visited = new HashSet<int>();
         foreach (var nodeIndex in scene.Nodes ?? [])
         {
-            VisitNode(root, nodeIndex, Matrix4x4.Identity, reader, materials, meshes, sourcePath, depth: 0);
+            VisitNode(root, nodeIndex, Matrix4x4.Identity, reader, materials, meshes, sourcePath, depth: 0, visited);
         }
 
         return meshes;
@@ -55,11 +59,17 @@ public static class GltfLoader
 
     private static void VisitNode(
         GltfRoot root, int nodeIndex, Matrix4x4 parentWorld, AccessorReader reader,
-        IReadOnlyList<MaterialAsset> materials, List<MeshAsset> meshes, string sourcePath, int depth)
+        IReadOnlyList<MaterialAsset> materials, List<MeshAsset> meshes, string sourcePath, int depth,
+        HashSet<int> visited)
     {
         if (depth > 256)
         {
             throw new AssetException(sourcePath, "node hierarchy exceeds depth 256 (cycle?).");
+        }
+
+        if (!visited.Add(nodeIndex))
+        {
+            throw new AssetException(sourcePath, $"node {nodeIndex} is referenced more than once; glTF requires a strict tree.");
         }
 
         if (root.Nodes is not { } nodes || nodeIndex < 0 || nodeIndex >= nodes.Length)
@@ -78,7 +88,7 @@ public static class GltfLoader
 
         foreach (var child in node.Children ?? [])
         {
-            VisitNode(root, child, world, reader, materials, meshes, sourcePath, depth + 1);
+            VisitNode(root, child, world, reader, materials, meshes, sourcePath, depth + 1, visited);
         }
     }
 
@@ -152,6 +162,18 @@ public static class GltfLoader
             var indices = primitive.Indices is { } idx
                 ? reader.ReadIndices(idx)
                 : SequentialIndices(positions.Length);
+
+            // A corrupt index would otherwise escape as a raw IndexOutOfRangeException from the
+            // tangent generator, or reach the GPU as an out-of-bounds vertex fetch (audit M4, M3).
+            foreach (var index in indices)
+            {
+                if (index >= (uint)positions.Length)
+                {
+                    throw new AssetException(
+                        sourcePath,
+                        $"mesh '{gltfMesh.Name}' primitive {p}: index {index} out of range (vertex count {positions.Length}).");
+                }
+            }
 
             var materialIndex = primitive.Material ?? -1;
 
@@ -339,7 +361,10 @@ public static class GltfLoader
 
                 var view = views[viewIndex];
                 var buffer = document.GetBufferData(view.Buffer);
-                if (view.ByteOffset + view.ByteLength > buffer.Length)
+                // long arithmetic + sign checks: corrupt offsets must not overflow into a passing
+                // check and then blow up in Slice (audit M4, N1 — mirrors AccessorReader).
+                if (view.ByteOffset < 0 || view.ByteLength < 0
+                    || (long)view.ByteOffset + view.ByteLength > buffer.Length)
                 {
                     throw new AssetException(document.SourcePath, $"image '{name}': bufferView exceeds buffer length.");
                 }

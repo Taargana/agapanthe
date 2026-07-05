@@ -1,6 +1,6 @@
 # Absolute-Human Board — Agapanthe Session 4 (M4 : glTF)
 
-**Status**: in-progress
+**Status**: completed
 **Créé**: 2026-07-04
 **Spec**: docs/plans/2026-07-02-graphics-engine-design.md §3.6, §5, §6 (M4)
 **Board persistence**: git-tracked
@@ -95,14 +95,58 @@ Fichiers partagés : Vertex.cs/Primitives.cs → M4-02 seul. Assets/* → séque
 ### M4-11 — Sandbox fixtures + shaders [code, M] — done — OWNER Program.cs + shaders
 **Résultat**: Program réécrit — GltfLoader.Load → SceneBuilder.Build → Renderer.DrawScene (callback hoisté), plus AUCUN objet Vulkan câblé à la main dans le Sandbox. Fixtures copiées à l'output via glob Sandbox.csproj (tests/Fixtures → models/, à plat — uris relatifs des .gltf valides) ; arg CLI = chemin ou nom nu sous models/, défaut DamagedHelmet.glb, exit 2 si introuvable avant toute ressource GPU. Caméra cadrée AABB monde (distance 1.5× diagonale, front surélevé, near/far à l'échelle). Contrôles M3 conservés. **Runs** : DamagedHelmet 120 frames — 15 452 triangles, 5 images, 0 validation, 0 leak (67 ressources), 256 MiB alloués (192 device-local) ; BoxTextured — 12 triangles, 0 validation, 0 leak (53 ressources). EXIT=0 les deux.
 
-### M4-12 — Self code review [test, S] — pending
-Audits : csharp-lowlevel (parsing robuste, allocs, ownership Rendering) + graphics-3d (correctness géométrie/UV/tangentes, sRGB) + architecte (prêt M5). AC: 0 critique.
+### M4-12 — Self code review [test, S] — done (2× PASS, findings MOYENS corrigés)
+**csharp-lowlevel PASS (0 critique)** : parsing GLB/accessors robuste prouvé (arithmétique long, counts bornés par la taille réelle du buffer, AssetException systématique), conversion matricielle/narrowing/entrelacement/std140 corrects, ownership sain, DrawScene zéro-alloc confirmé, teardown Sandbox légal. **3 MOYENS corrigés dans la foulée** : (M1) fan-out exponentiel de nœuds — HashSet de visite, arbre strict glTF enforced ; (M2) leak placeholders sur échec partiel — tableau pré-alloué rempli en place ; (M3) indices hors-borne → IndexOutOfRange brute — validation max(indices) < vertexCount avec AssetException ; + (N1) check bufferView image en long + signes. Restent MINEURS documentés : NaN source non filtrés (tangentes), allocations non bornées sur assets non fiables (N4 — à traiter si contenu tiers), LoadFromStream >2 Gio. Revalidé après fixes : 154 tests, run DamagedHelmet 0 validation 0 leak.
+**Architecte PASS conditionnel** : axe asset/material/mesh M5-ready ; section « plan M5 » ci-dessous.
 
-### M4-13 — Requirements validation [test, S] — pending
-Spec §3.6 + §6 M4 cochées vs code.
+### M4-13 — Requirements validation [test, S] — done (tableau ci-dessous)
 
-### M4-14 — Full verification [test, S] — pending
-build 0 warning, dotnet test, run Sandbox DamagedHelmet + BoxTextured clean. Sortie au board.
+### M4-14 — Full verification [test, S] — done
+**Sortie (2026-07-04)** :
+```
+Build succeeded.    0 Warning(s)    0 Error(s)
+Passed!  - Failed: 0, Passed: 154, Total: 154
+
+DamagedHelmet (défaut, 180 frames) : 1 mesh, 1 material, 5 images, 15452 triangles.
+  total: 256.00 MiB allocated across 4 block(s). ResourceTracker: no leaks (67 resources).
+BoxTextured.gltf (arg, 120 frames) : 1 mesh, 1 material, 1 image, 12 triangles.
+  ResourceTracker: no leaks (53 resources).
+Zéro ERROR/WARN/VUID sur les deux runs. EXIT=0.
+```
+Vérification visuelle (helmet texturé, caméra cadrée, resize) : manuelle par l'utilisateur.
+
+## M4-13 — Validation des exigences (spec §3.6 + §6 M4)
+
+| Exigence | État |
+|---|---|
+| POSITION/NORMAL/TANGENT/TEXCOORD_0 | ✓ AccessorReader + GltfLoader |
+| Indices u16 ET u32 (+u8) | ✓ élargis u32 en DTO, narrowing u16 au GPU si max<65536 |
+| Accessors entrelacés (byteStride) | ✓ testé Box vs BoxInterleaved élément par élément |
+| Hiérarchie de nœuds aplatie en transforms monde | ✓ matrix (colonne-major→row-vector, testé sur Box Z-up→Y-up) + TRS (S·R·T), monde = local·parent |
+| Matériaux metallic-roughness | ✓ MaterialAsset complet, set 1 PBR figé 6 bindings |
+| alphaMode OPAQUE et MASK (cutoff) | ✓ + discard dans mesh.frag ; BLEND → opaque + warning (spec) |
+| KHR_materials_emissive_strength | ✓ parsé + packé dans MaterialUniforms |
+| .gltf+.bin ET .glb | ✓ GLB par magic, buffers fichier/data:/chunk BIN |
+| TANGENT absent → génération | ✓ Lengyel accumulé + Gram-Schmidt + handedness, prouvé sur DamagedHelmet (unit/⊥N/±1 en test) |
+| Exclusions (skinning/anim/morph/sparse/Draco) | ✓ AssetException explicites (sparse, mode≠4, extensions requises inconnues) |
+| sRGB (baseColor/emissive) vs linéaire (normal/MR/AO) | ✓ décidé par slot, dédupliqué par (image, sRGB) |
+| Décodage StbImageSharp → device-local + mips blits | ✓ chemin M3 réutilisé (FullMipChain) |
+| Fixtures Khronos affichées | ✓ DamagedHelmet + BoxTextured, 0 validation, 0 leak |
+| Tests parsing sans GPU (spec §5) | ✓ Assets sans réf Graphics, 154 tests dont parser/accessors/loader/tangentes/images |
+
+## Revue architecte M4-12 (PASS) — plan M5 acté
+
+Axe asset/material/mesh **M5-ready** (set 1 figé, 5 textures bindées, slots UBO réservés — « remplir le shader »). Seul trou : structure de frame mono-passe (identifié dès M3). Décisions démarrage M5, dans l'ordre :
+
+1. **Chantier multi-passes d'abord (le titre de M5)** : `CommandList.BeginRendering/EndRendering` + `TransitionImage` + `SetViewport/Scissor` publics (attachments typés moteur) ; FrameRenderer réduit à acquire/submit/present/sync (garde la transition PresentSrc) ; **depth déplacé au Renderer** (ressource de technique, pas de present). Callback devient `(cmd, frame, swapchainTarget)`. Tonemap dans Rendering, jamais dans Graphics (frontière de couche). Coût estimé ~1-1.5 session, additif, zéro churn M4.
+2. **HDR target** Rgba16Sfloat (ColorAttachment|Sampled, taille swapchain) + depth possédés par Renderer, recréés ensemble au resize, clear color migre.
+3. **Tonemap fullscreen** : pipeline sans vertex buffer (VertexLayout nullable déjà supporté), Draw(3), ACES/Reinhard + exposition, sortie swapchain sRGB (OETF par le format, pas de gamma manuelle), barrier HDR→ShaderReadOnly entre passes.
+4. **Set 0 étendu** : binding 1 UBO lumières (Fragment), caméra Vertex|Fragment, CameraUniforms += position (+16 o). Coût quasi nul — set 0 transient réécrit chaque frame (le YAGNI M2 était le bon call).
+5. **mesh.vert** : normal matrix = inverse(transpose(mat3(model))) — 1 ligne, requis avant de valider l'éclairage (mat3(model) faux sous scale non-uniforme ; DamagedHelmet uniforme donc invisible en M4).
+6. **MaterialAsset** += NormalScale/OcclusionStrength (schéma les parse déjà), packés dans mrno.z/.w (~4 lignes / 3 fichiers).
+7. **Cull Back** (1 ligne) + protocole visuel §5 (docs/visual-checks/) sur DamagedHelmet/FlightHelmet. Risque noté : scale négatif (det<0) inverse le winding — différé tant qu'aucune fixture miroitée.
+
+Dette différable : WorldTransform sur Mesh (instancing → phase 2), SamplerCache WrapV ignoré (si artefact), double décodage sRGB/linéaire (négligeable).
 
 ## Deferred Work
 
@@ -114,3 +158,4 @@ build 0 warning, dotnet test, run Sandbox DamagedHelmet + BoxTextured clean. Sor
 ## Log
 
 - 2026-07-04: session 4 ouverte. Board S3 archivé. DAG 14 tâches, 8 vagues. Décisions architecte S3 actées (DTO CPU, set 1 PBR figé, SamplerCache, Renderer).
+- 2026-07-04/05: W1-W7 exécutées (commits ae8761d, 064d96e, 20f6632, 6ccc6fd, de7c7d3, e70592f, f7cfdd0). Deux vagues (W1 partiel, W4) réimplémentées par l'orchestrateur après agents tués par limites de session. M4-12 : 2× PASS, 3 findings MOYENS corrigés immédiatement. M4-13/14 : 154 tests, DamagedHelmet 15 452 tris + BoxTextured, 0 validation, 0 leak. **Session 4 close — M4 atteint.** M5 : plan multi-passes HDR+tonemap acté (7 décisions, section revue architecte).

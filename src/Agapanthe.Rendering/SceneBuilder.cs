@@ -47,7 +47,11 @@ public static class SceneBuilder
             // of this block — every upload is synchronous (waits on its fence), so nothing is in flight.
             using (var uploader = new GpuUploader(device))
             {
-                placeholders = CreatePlaceholders(device, uploader);
+                // Pre-allocated and filled in place so a failure on the 2nd/3rd placeholder still
+                // leaves the earlier ones reachable by the catch below (audit M4, finding M2) —
+                // same pattern as the texture and mesh loops.
+                placeholders = new GpuImage[3];
+                FillPlaceholders(device, uploader, placeholders);
                 var slots = new Placeholders(placeholders[0], placeholders[1], placeholders[2]);
 
                 textures = new GpuImage[model.Images.Count];
@@ -84,21 +88,20 @@ public static class SceneBuilder
 
     /// <summary>
     /// The three shared 1×1 placeholders bound to absent texture slots (index order matches the array
-    /// returned by <see cref="CreatePlaceholders"/>): white sRGB (base color/emissive absent), neutral
+    /// filled by <see cref="FillPlaceholders"/>): white sRGB (base color/emissive absent), neutral
     /// normal <c>(128,128,255)</c> linear (normal absent), and white linear (MR/AO absent).
     /// </summary>
     private readonly record struct Placeholders(GpuImage WhiteSrgb, GpuImage NormalNeutral, GpuImage LinearWhite);
 
-    private static GpuImage[] CreatePlaceholders(GraphicsDevice device, GpuUploader uploader)
+    private static void FillPlaceholders(GraphicsDevice device, GpuUploader uploader, GpuImage[] placeholders)
     {
         // White sRGB: baseColor/emissive absent → factor passes through unchanged (emissive factor is 0 by
         // default, so absent emissive stays black regardless).
-        var whiteSrgb = CreatePixel(device, uploader, PixelFormat.Rgba8Srgb, 255, 255, 255, 255);
+        placeholders[0] = CreatePixel(device, uploader, PixelFormat.Rgba8Srgb, 255, 255, 255, 255);
         // Neutral tangent-space normal (0,0,1) encoded → (128,128,255); linear data, so UNORM.
-        var normalNeutral = CreatePixel(device, uploader, PixelFormat.Rgba8Unorm, 128, 128, 255, 255);
+        placeholders[1] = CreatePixel(device, uploader, PixelFormat.Rgba8Unorm, 128, 128, 255, 255);
         // White linear: metallic-roughness and occlusion absent → the factor/1.0 dominates.
-        var linearWhite = CreatePixel(device, uploader, PixelFormat.Rgba8Unorm, 255, 255, 255, 255);
-        return [whiteSrgb, normalNeutral, linearWhite];
+        placeholders[2] = CreatePixel(device, uploader, PixelFormat.Rgba8Unorm, 255, 255, 255, 255);
     }
 
     private static GpuImage CreatePixel(GraphicsDevice device, GpuUploader uploader, PixelFormat format, byte r, byte g, byte b, byte a)
