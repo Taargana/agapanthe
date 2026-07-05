@@ -125,11 +125,10 @@ public sealed class Renderer : IDisposable
                 DepthFormat = DepthFormat,
                 DepthTest = true,
                 // glTF winding is CCW; the Y-flipped Vulkan projection mirrors it to clockwise in framebuffer
-                // space, so Clockwise is the front face. Culling stays OFF in M4 (prudence: some sample
-                // models have inconsistent winding and there is no lighting yet to reveal flipped faces) —
-                // M5 turns on CullMode.Back once the winding is validated per model.
+                // space, so Clockwise is the front face. M5 (architect decision 7) enables back-face culling
+                // now that the winding is validated — halves fragment work and reveals any flipped faces.
                 FrontFace = FrontFace.Clockwise,
-                Cull = CullMode.None,
+                Cull = CullMode.Back,
             });
 
             for (var i = 0; i < _cameraUbos.Length; i++)
