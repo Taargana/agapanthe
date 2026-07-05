@@ -26,11 +26,12 @@ layout(set = 0, binding = 0) uniform CameraUbo {
     vec4 position; // xyz = eye position (world space), w = padding
 } camera;
 
-// LightsUbo: byte-identical to Agapanthe.Rendering.LightsUniforms (std140, 176 bytes = 11 vec4).
-//   offset  0  dirDirection      xyz = normalized travel direction (source -> surface), w padding
-//   offset 16  dirColorIntensity rgb = color, w = intensity
-//   offset 32  ambientPointCount rgb = constant ambient, w = active point count (read as int)
-//   offset 48  pointData[8]      pairs: [2i] = xyz position / w range, [2i+1] = rgb color / w intensity
+// LightsUbo: byte-identical to Agapanthe.Rendering.LightsUniforms (std140, 240 bytes = 11 vec4 + 1 mat4).
+//   offset   0  dirDirection      xyz = normalized travel direction (source -> surface), w padding
+//   offset  16  dirColorIntensity rgb = color, w = intensity
+//   offset  32  ambientPointCount rgb = constant ambient, w = active point count (read as int)
+//   offset  48  pointData[8]      pairs: [2i] = xyz position / w range, [2i+1] = rgb color / w intensity
+//   offset 176  lightViewProj     directional shadow map view·proj (world -> light clip, Y-flip + Z[0,1] baked)
 // The point lights are declared as a plain vec4[8] array rather than eight named vec4 fields BY DESIGN:
 // GLSL cannot index named struct members, and a std140 vec4[N] array has 16-byte-aligned contiguous
 // elements — byte-identical to the eight named Point{i}PositionRange/ColorIntensity fields (48 + 8*16 = 176).
@@ -39,7 +40,15 @@ layout(set = 0, binding = 1) uniform LightsUbo {
     vec4 dirColorIntensity;
     vec4 ambientPointCount;
     vec4 pointData[8];
+    mat4 lightViewProj;
 } lights;
+
+// Set 0, binding 2 = the directional shadow map (M6). A PLAIN sampler2D, not a sampler2DShadow: MoltenVK's
+// VK_KHR_portability_subset reports mutableComparisonSamplers = FALSE, so a hardware comparison sampler bound
+// through a descriptor write is rejected on Apple silicon. Instead we read the stored depth and compare it in
+// directionalShadow (manual 3x3 PCF). The sampler is Nearest (linear would blend raw depth before the compare)
+// with ClampToEdge; out-of-frustum lookups are rejected in the shader, so we never rely on the border color.
+layout(set = 0, binding = 2) uniform sampler2D shadowMap;
 
 // --- Set 1: per-material PBR (MaterialLayout, frozen) --------------------------------------------------
 layout(set = 1, binding = 0) uniform sampler2D baseColorTex;        // sRGB
@@ -72,6 +81,7 @@ const int DEBUG_ROUGHNESS = 5;
 const int DEBUG_OCCLUSION = 6;
 const int DEBUG_TANGENT = 7;          // xyz 0.5+0.5, handedness = green/red tint on w
 const int DEBUG_KEY_NDOTL = 8;        // NdotL of the directional light (final N)
+const int DEBUG_SHADOW = 9;           // directional shadow factor in greyscale (1 = lit, 0 = shadowed)
 
 // --- BRDF terms ---------------------------------------------------------------------------------------
 
@@ -127,6 +137,47 @@ vec3 shade(vec3 L, vec3 radiance, vec3 N, vec3 V, float NdotV,
     return (diffuse + specular) * radiance * NdotL;
 }
 
+// --- Directional shadow (M6) --------------------------------------------------------------------------
+// Manual PCF 3x3 lookup of the directional shadow map. Projects the world position into the light's clip
+// space, derives the [0,1] shadow-map UV and reference depth, then averages nine manually-compared taps.
+// Returns 1 = fully lit, 0 = fully shadowed. The test `reference <= stored` passes when the fragment's depth
+// is at/in front of the stored occluder depth = lit. The occluder depth already carries the shadow pipeline's
+// slope-scaled bias (a rasterizer state, applied when the shadow map was rendered), so no extra shader bias
+// is needed. (A hardware sampler2DShadow comparator would do this test in-sampler, but MoltenVK forbids
+// comparison samplers here — see the binding-2 declaration.)
+float directionalShadow(vec3 wp) {
+    // lightViewProj bakes the Vulkan Y-flip and Z[0,1] (OrthographicVulkan). Ortho w is 1, but the perspective
+    // divide is kept so this stays correct if a perspective light frustum is ever substituted.
+    vec4 clip = lights.lightViewProj * vec4(wp, 1.0);
+    vec3 ndc = clip.xyz / clip.w;
+
+    // Outside the light's depth range: nothing was rendered there, so treat as unshadowed (lit).
+    if (ndc.z < 0.0 || ndc.z > 1.0) {
+        return 1.0;
+    }
+
+    // NDC xy in [-1,1] (Vulkan y-down) -> shadow-map UV in [0,1]. The y-down clip space already matches the
+    // top-left texel origin, so v = ndc.y*0.5+0.5 directly, WITHOUT a 1-v flip (the ortho baked the flip).
+    vec2 uv = ndc.xy * 0.5 + 0.5;
+
+    // Outside the light frustum in XY: unshadowed. The plain sampler's border is opaque black (depth 0), which
+    // would read as a spurious occluder, so reject here rather than leaning on the border color.
+    if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) {
+        return 1.0;
+    }
+
+    float reference = ndc.z;
+    vec2 texel = 1.0 / vec2(textureSize(shadowMap, 0));
+    float sum = 0.0;
+    for (int y = -1; y <= 1; ++y) {
+        for (int x = -1; x <= 1; ++x) {
+            float stored = texture(shadowMap, uv + vec2(x, y) * texel).r;
+            sum += reference <= stored ? 1.0 : 0.0;
+        }
+    }
+    return sum / 9.0;
+}
+
 void main() {
     // --- Albedo + alpha mask (unchanged M4 semantics) -------------------------------------------------
     vec4 base = texture(baseColorTex, fragUv) * material.baseColorFactor * vec4(fragColor, 1.0);
@@ -168,11 +219,16 @@ void main() {
     // --- Direct lighting ------------------------------------------------------------------------------
     vec3 Lo = vec3(0.0);
 
+    // Directional shadow factor (M6): applied to the directional key light ONLY — point lights and the
+    // ambient term are unshadowed (single-cascade directional shadow map, spec §6 M6). Computed once here
+    // so the DEBUG_SHADOW visualization can echo the exact value fed into the lighting.
+    float shadow = directionalShadow(worldPos);
+
     // Directional key light: L = surface -> light = -travelDirection. radiance = color * intensity.
     {
         vec3 L = -normalize(lights.dirDirection.xyz);
         vec3 radiance = lights.dirColorIntensity.rgb * lights.dirColorIntensity.w;
-        Lo += shade(L, radiance, N, V, NdotV, albedo, metallic, alpha, f0);
+        Lo += shade(L, radiance, N, V, NdotV, albedo, metallic, alpha, f0) * shadow;
     }
 
     // Point lights: inverse-square falloff with the glTF KHR_lights_punctual range window.
@@ -225,7 +281,8 @@ void main() {
           : push.debugView == DEBUG_ROUGHNESS        ? vec3(roughness)
           : push.debugView == DEBUG_OCCLUSION        ? vec3(ao)
           : push.debugView == DEBUG_TANGENT          ? mix(vec3(1, 0, 0), vec3(0, 1, 0), step(0.0, worldTangent.w)) * (T * 0.5 + 0.5)
-          : /* DEBUG_KEY_NDOTL */                      vec3(max(dot(N, -normalize(lights.dirDirection.xyz)), 0.0));
+          : push.debugView == DEBUG_KEY_NDOTL        ? vec3(max(dot(N, -normalize(lights.dirDirection.xyz)), 0.0))
+          : /* DEBUG_SHADOW */                         vec3(shadow);
         outColor = vec4(debug, 1.0);
         return;
     }

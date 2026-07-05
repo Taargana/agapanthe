@@ -38,7 +38,7 @@ if (modelPath is null)
 var maxFrames = int.TryParse(Environment.GetEnvironmentVariable("AGAPANTHE_MAX_FRAMES"), out var mf) ? mf : -1;
 var renderedFrames = 0;
 
-using var window = new EngineWindow("Agapanthe — M5 PBR", 1280, 720);
+using var window = new EngineWindow("Agapanthe — M6 Shadows", 1280, 720);
 
 GraphicsDevice? device = null;
 Swapchain? swapchain = null;
@@ -147,7 +147,7 @@ window.KeyPressed += key =>
             break;
         // N: cycle the shading debug views (PBR -> normals -> basecolor -> ... , see mesh.frag).
         case Key.N when renderer is not null:
-            renderer.DebugView = (renderer.DebugView + 1) % 9;
+            renderer.DebugView = (renderer.DebugView + 1) % 10;
             Log.Info($"Debug view: {renderer.DebugView} ({DebugViews.Names[renderer.DebugView]})");
             break;
         // L: swing the key light around the vertical axis (lighting debug).
@@ -368,6 +368,6 @@ file static class DebugViews
     public static readonly string[] Names =
     [
         "PBR", "shaded normal", "geometric normal", "base color", "metallic",
-        "roughness", "occlusion", "tangent (+handedness)", "key NdotL",
+        "roughness", "occlusion", "tangent (+handedness)", "key NdotL", "shadow factor",
     ];
 }

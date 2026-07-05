@@ -100,8 +100,10 @@ public sealed class SceneLights
 
 /// <summary>
 /// Set 0, binding 1 — the per-frame lighting block, packed for std140 as eleven <see cref="Vector4"/> at
-/// contiguous 16-byte offsets (176 bytes total). Built from <see cref="SceneLights"/> via the constructor.
-/// The PBR fragment shader (M5-05) declares a matching <c>layout(std140) uniform</c> in this exact order.
+/// contiguous 16-byte offsets followed by the directional light's view-projection <see cref="Matrix4x4"/>
+/// (240 bytes total: 176 for the lights + 64 for the matrix). Built from <see cref="SceneLights"/> plus the
+/// light-space transform via the constructor. The PBR fragment shader (M5/M6) declares a matching
+/// <c>layout(std140) uniform</c> in this exact order.
 /// <para>
 /// <b>Packing</b> (values grouped four-to-a-vec4 so std140 does not pad each scalar to its own 16-byte slot):
 /// </para>
@@ -112,6 +114,11 @@ public sealed class SceneLights
 ///   as a float (the shader reads it as <c>int(w)</c> to bound its loop).</item>
 ///   <item>Then four point lights, each two vec4s: <c>PositionRange</c> (<c>xyz</c> world position,
 ///   <c>w</c> range) and <c>ColorIntensity</c> (<c>rgb</c> color, <c>w</c> intensity).</item>
+///   <item><see cref="LightViewProj"/> (offset 176) — the directional shadow map's view·proj transform
+///   (row-vector, so a world point maps to light-clip space as <c>p · LightViewProj</c>; std140 reads the
+///   <c>mat4</c> column-major, i.e. transposed, so the shader multiplies <c>lightViewProj * vec4(worldPos,1)</c>
+///   exactly like the camera's <c>proj * view</c>). The Vulkan Y-flip and Z[0,1] are baked in by
+///   <see cref="Agapanthe.Core.MathHelpers.OrthographicVulkan"/>.</item>
 /// </list>
 /// </summary>
 [StructLayout(LayoutKind.Sequential)]
@@ -151,12 +158,20 @@ public readonly struct LightsUniforms
     public readonly Vector4 Point3ColorIntensity;
 
     /// <summary>
-    /// Packs <paramref name="lights"/> into the std140 block. The directional direction is normalized here
-    /// (a degenerate zero direction falls back to straight down). All four point-light slots are copied from
-    /// <see cref="SceneLights.Points"/>; the shader ignores slots at or beyond <see cref="SceneLights.PointCount"/>.
-    /// No heap allocation: the result is a value type built on the stack.
+    /// Directional shadow map's light-space view·projection (offset 176, 64 bytes). Maps a world point into
+    /// the light's clip space; the fragment shader derives the shadow-map UV and reference depth from it.
+    /// Computed by the <see cref="Renderer"/> each frame from the scene bounds and the directional light.
     /// </summary>
-    public LightsUniforms(SceneLights lights)
+    public readonly Matrix4x4 LightViewProj;
+
+    /// <summary>
+    /// Packs <paramref name="lights"/> and <paramref name="lightViewProj"/> into the std140 block. The
+    /// directional direction is normalized here (a degenerate zero direction falls back to straight down).
+    /// All four point-light slots are copied from <see cref="SceneLights.Points"/>; the shader ignores slots
+    /// at or beyond <see cref="SceneLights.PointCount"/>. No heap allocation: the result is a value type
+    /// built on the stack.
+    /// </summary>
+    public LightsUniforms(SceneLights lights, Matrix4x4 lightViewProj)
     {
         ArgumentNullException.ThrowIfNull(lights);
 
@@ -176,5 +191,7 @@ public readonly struct LightsUniforms
         Point2ColorIntensity = new Vector4(p[2].Color, p[2].Intensity);
         Point3PositionRange = new Vector4(p[3].Position, p[3].Range);
         Point3ColorIntensity = new Vector4(p[3].Color, p[3].Intensity);
+
+        LightViewProj = lightViewProj;
     }
 }

@@ -8,16 +8,33 @@ namespace Agapanthe.Tests;
 public sealed class LightsUniformsTests
 {
     [Fact]
-    public void LightsUniforms_Is176BytesOfContiguousVec4s()
+    public void LightsUniforms_Is240BytesWithLightViewProjAt176()
     {
-        // 3 header vec4s + 4 point lights x 2 vec4s = 11 x 16 = 176. The shader declares the
-        // matching std140 block; any size drift breaks the GPU read silently.
-        Assert.Equal(176, Marshal.SizeOf<LightsUniforms>());
+        // 3 header vec4s + 4 point lights x 2 vec4s = 11 x 16 = 176, then a mat4 lightViewProj (64) = 240
+        // (M6, decision 6). The shader declares the matching std140 block; any size/offset drift breaks the
+        // GPU read silently. 240 is a multiple of 16, so std140 needs no trailing pad.
+        Assert.Equal(240, Marshal.SizeOf<LightsUniforms>());
         Assert.Equal(0, (int)Marshal.OffsetOf<LightsUniforms>(nameof(LightsUniforms.DirectionalDirection)));
         Assert.Equal(16, (int)Marshal.OffsetOf<LightsUniforms>(nameof(LightsUniforms.DirectionalColorIntensity)));
         Assert.Equal(32, (int)Marshal.OffsetOf<LightsUniforms>(nameof(LightsUniforms.AmbientPointCount)));
         Assert.Equal(48, (int)Marshal.OffsetOf<LightsUniforms>(nameof(LightsUniforms.Point0PositionRange)));
         Assert.Equal(160, (int)Marshal.OffsetOf<LightsUniforms>(nameof(LightsUniforms.Point3ColorIntensity)));
+        Assert.Equal(176, (int)Marshal.OffsetOf<LightsUniforms>(nameof(LightsUniforms.LightViewProj)));
+    }
+
+    [Fact]
+    public void LightsUniforms_StoresLightViewProjVerbatim()
+    {
+        var lights = new SceneLights();
+        var lvp = new Matrix4x4(
+            1f, 2f, 3f, 4f,
+            5f, 6f, 7f, 8f,
+            9f, 10f, 11f, 12f,
+            13f, 14f, 15f, 16f);
+
+        var packed = new LightsUniforms(lights, lvp);
+
+        Assert.Equal(lvp, packed.LightViewProj);
     }
 
     [Fact]
@@ -49,7 +66,7 @@ public sealed class LightsUniformsTests
         };
         lights.PointCount = 1;
 
-        var packed = new LightsUniforms(lights);
+        var packed = new LightsUniforms(lights, Matrix4x4.Identity);
 
         Assert.Equal(new Vector4(0f, -1f, 0f, 0f), packed.DirectionalDirection); // normalized
         Assert.Equal(3f, packed.DirectionalColorIntensity.W);
@@ -75,7 +92,7 @@ public sealed class LightsUniformsTests
             Directional = new DirectionalLight { Direction = Vector3.Zero, Color = Vector3.One, Intensity = 1f },
         };
 
-        var packed = new LightsUniforms(lights);
+        var packed = new LightsUniforms(lights, Matrix4x4.Identity);
         Assert.Equal(new Vector4(0f, -1f, 0f, 0f), packed.DirectionalDirection);
     }
 }
