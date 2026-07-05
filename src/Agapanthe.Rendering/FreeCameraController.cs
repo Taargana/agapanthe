@@ -36,16 +36,16 @@ public readonly struct CameraInput
     /// <summary>S — move opposite the look direction.</summary>
     public bool MoveBackward { get; }
 
-    /// <summary>A — strafe along -right.</summary>
+    /// <summary>A — strafe along the camera's -Right.</summary>
     public bool MoveLeft { get; }
 
-    /// <summary>D — strafe along +right.</summary>
+    /// <summary>D — strafe along the camera's +Right.</summary>
     public bool MoveRight { get; }
 
-    /// <summary>Space — move along world +Y.</summary>
+    /// <summary>Space — move along the camera's +Up (always orthogonal to Forward).</summary>
     public bool MoveUp { get; }
 
-    /// <summary>Ctrl — move along world -Y.</summary>
+    /// <summary>Ctrl / C — move along the camera's -Up.</summary>
     public bool MoveDown { get; }
 
     /// <summary>Shift — multiply speed by <see cref="FreeCameraController.SprintMultiplier"/>.</summary>
@@ -60,10 +60,11 @@ public readonly struct CameraInput
 }
 
 /// <summary>
-/// FPS-style controller: the mouse drives yaw/pitch, W/S travel along the camera's <b>look
-/// direction</b> (pitch included — aim up and W climbs), A/D strafe horizontally, Space/Ctrl
-/// move straight up/down along world Y, Shift sprints. Pitch is clamped to ±89° to keep the
-/// view matrix away from the gimbal poles.
+/// Fly controller in the camera's own referential: the mouse drives yaw/pitch, and W/S, A/D,
+/// Space/Ctrl travel along the camera's Forward, Right and Up axes respectively — the whole
+/// basis rotates with the view, so up/down is always orthogonal to the look direction (no
+/// world-Y bias). Shift sprints. Pitch is clamped to ±89° to keep the view matrix away from
+/// the gimbal poles.
 /// </summary>
 /// <remarks>
 /// Sign conventions (see also <see cref="Camera"/>):
@@ -114,8 +115,9 @@ public sealed class FreeCameraController
         camera.Pitch -= input.LookDelta.Y * LookSensitivityY;
         camera.Pitch = Math.Clamp(camera.Pitch, -MaxPitch, MaxPitch);
 
-        // --- Move: W/S travel along the full look direction (aim up + W climbs), A/D strafe in
-        // the horizontal plane, Space/Ctrl are pure world-vertical. ---
+        // --- Move: the whole camera basis is the travel referential. Forward = look axis,
+        // Right/Up = the camera's own orthonormal axes, so up/down stays perpendicular to the
+        // look direction whatever the rotation (true 6DOF fly referential, no world-Y bias). ---
         float strafe = (input.MoveRight ? 1f : 0f) - (input.MoveLeft ? 1f : 0f);
         float lift = (input.MoveUp ? 1f : 0f) - (input.MoveDown ? 1f : 0f);
         float advance = (input.MoveForward ? 1f : 0f) - (input.MoveBackward ? 1f : 0f);
@@ -125,11 +127,7 @@ public sealed class FreeCameraController
             return;
         }
 
-        // Strafe stays horizontal (yaw only) so A/D never gain a vertical component.
-        var forwardFlat = new Vector3(MathF.Sin(camera.Yaw), 0f, -MathF.Cos(camera.Yaw));
-        var right = new Vector3(-forwardFlat.Z, 0f, forwardFlat.X); // cross(forwardFlat, +Y)
-
-        var direction = (camera.Forward * advance) + (right * strafe) + (Vector3.UnitY * lift);
+        var direction = (camera.Forward * advance) + (camera.Right * strafe) + (camera.Up * lift);
         if (direction == Vector3.Zero)
         {
             return; // Opposing keys cancelled out.
