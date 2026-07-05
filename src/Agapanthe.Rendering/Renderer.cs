@@ -26,9 +26,13 @@ namespace Agapanthe.Rendering;
 /// </summary>
 public sealed class Renderer : IDisposable
 {
+    /// <summary>Depth attachment format the scene pass renders against; the pipeline declares the same.</summary>
+    public const PixelFormat DepthFormat = PixelFormat.D32Sfloat;
+
     // Per-frame-slot camera UBOs: host-visible, rewritten every frame (Write<T> is correct — no staging).
     private readonly GpuBuffer?[] _cameraUbos = new GpuBuffer?[GraphicsDevice.FramesInFlight];
 
+    private readonly GraphicsDevice _device;
     private ShaderCompiler? _shaderCompiler;
     private ShaderModule? _vertexShader;
     private ShaderModule? _fragmentShader;
@@ -36,6 +40,9 @@ public sealed class Renderer : IDisposable
     private DescriptorSetLayout? _materialSetLayout;
     private DescriptorAllocator? _materialAllocator;
     private GraphicsPipeline? _pipeline;
+    // Depth target, owned here now that the frame loop is attachment-agnostic. Swapchain-sized: (re)created
+    // behind a device wait when the SwapchainTarget extent changes, so DestroyImmediately (not deferred).
+    private GpuImage? _depthImage;
     private bool _disposed;
 
     /// <summary>
@@ -51,6 +58,8 @@ public sealed class Renderer : IDisposable
         ArgumentNullException.ThrowIfNull(device);
         ArgumentNullException.ThrowIfNull(swapchain);
         ArgumentNullException.ThrowIfNull(shaderDirectory);
+
+        _device = device;
 
         try
         {
@@ -79,7 +88,7 @@ public sealed class Renderer : IDisposable
                 SetLayouts = [_frameSetLayout, _materialSetLayout],
                 PushConstants = [new PushConstantRange(0, 64, ShaderStages.Vertex)], // 64B model matrix
                 ColorFormat = swapchain.ColorFormat,
-                DepthFormat = FrameRenderer.DepthFormat,
+                DepthFormat = DepthFormat,
                 DepthTest = true,
                 // glTF winding is CCW; the Y-flipped Vulkan projection mirrors it to clockwise in framebuffer
                 // space, so Clockwise is the front face. Culling stays OFF in M4 (prudence: some sample
@@ -107,18 +116,24 @@ public sealed class Renderer : IDisposable
     /// <summary>The frozen set-1 layout (<see cref="MaterialLayout"/>). Passed to <see cref="SceneBuilder"/>.</summary>
     public DescriptorSetLayout MaterialSetLayout => _materialSetLayout!;
 
+    /// <summary>Clear color for the scene pass (RGBA, linear). Default matches the M4 background.</summary>
+    public (float R, float G, float B, float A) ClearColor { get; set; } = (0.02f, 0.02f, 0.05f, 1f);
+
     /// <summary>
-    /// Records the draws for <paramref name="scene"/> from <paramref name="camera"/> into the active
-    /// dynamic-rendering scope. Meant to be the body of the <see cref="FrameRenderer.DrawFrame"/> callback:
-    /// <c>frameRenderer.DrawFrame((cmd, frame) => renderer.DrawScene(scene, camera, cmd, frame))</c>.
+    /// Opens the scene pass against the swapchain <paramref name="target"/> (color) plus this renderer's depth,
+    /// then records the draws for <paramref name="scene"/> from <paramref name="camera"/>. Meant to be the body
+    /// of the <see cref="FrameRenderer.DrawFrame"/> callback:
+    /// <c>frameRenderer.DrawFrame((cmd, frame, target) => renderer.DrawScene(scene, camera, cmd, frame, target))</c>.
     /// <para>
-    /// It updates this slot's camera UBO, allocates and binds the per-frame set 0, binds the pipeline, then
-    /// for each instance binds its material set 1 and mesh buffers, pushes the mesh world transform and issues
-    /// the indexed draw. Hot path: no managed allocation (index loop over the instance list, in-place span
-    /// write of the UBO, no LINQ, no closures).
+    /// It ensures a depth image matching the target extent (recreated behind a device wait on resize),
+    /// transitions it to a depth attachment (loadOp=Clear each frame), begins rendering, sets the viewport,
+    /// then updates this slot's camera UBO, binds the per-frame set 0 and the pipeline, and for each instance
+    /// binds its material set 1 and mesh buffers, pushes the mesh world transform and issues the indexed draw.
+    /// Hot path: no managed allocation (index loop over the instance list, in-place span write of the UBO, no
+    /// LINQ, no closures).
     /// </para>
     /// </summary>
-    public void DrawScene(Scene scene, Camera camera, CommandList cmd, FrameContext frame)
+    public void DrawScene(Scene scene, Camera camera, CommandList cmd, FrameContext frame, SwapchainTarget target)
     {
         ArgumentNullException.ThrowIfNull(scene);
         ArgumentNullException.ThrowIfNull(camera);
@@ -126,6 +141,32 @@ public sealed class Renderer : IDisposable
         ObjectDisposedException.ThrowIf(_disposed, this);
 
         var pipeline = _pipeline!;
+
+        // The depth target is owned here; keep it sized to the swapchain image handed in by the frame loop.
+        EnsureDepth(target.Width, target.Height);
+
+        // loadOp=Clear makes the prior depth contents irrelevant, so a fresh Undefined->attachment transition
+        // each frame is correct and cheaper than preserving the layout across frames.
+        cmd.TransitionImage(_depthImage!, ImageLayoutState.Undefined, ImageLayoutState.DepthAttachment);
+
+        cmd.BeginRendering(new RenderingAttachments
+        {
+            Color = new ColorAttachmentInfo
+            {
+                Target = target.View,
+                LoadOp = AttachmentLoadAction.Clear,
+                ClearColor = ClearColor,
+            },
+            Depth = new DepthAttachmentInfo
+            {
+                Target = new RenderTargetView(_depthImage!),
+                LoadOp = AttachmentLoadAction.Clear,
+                ClearDepth = 1f,
+            },
+            Width = target.Width,
+            Height = target.Height,
+        });
+        cmd.SetViewportScissor(target.Width, target.Height);
 
         // Write this frame slot's camera UBO in place (host-visible), then point a fresh per-frame set 0 at it.
         var ubo = _cameraUbos[frame.Slot]!;
@@ -154,6 +195,35 @@ public sealed class Renderer : IDisposable
             cmd.PushConstants(pipeline, ShaderStages.Vertex, in model);
             cmd.DrawIndexed(mesh.IndexCount);
         }
+
+        cmd.EndRendering();
+    }
+
+    /// <summary>
+    /// Ensures the owned depth image matches <paramref name="width"/>×<paramref name="height"/>. On the first
+    /// call it creates it; when the extent changes (resize) it waits for the GPU to idle, destroys the old
+    /// image synchronously and recreates it — the same pattern the frame loop used before the depth moved here.
+    /// The swapchain itself is already recreated behind a device wait by the frame loop, so this only reacts to
+    /// the new <see cref="SwapchainTarget"/> extent it observes here.
+    /// </summary>
+    private void EnsureDepth(uint width, uint height)
+    {
+        if (_depthImage is not null && _depthImage.Width == width && _depthImage.Height == height)
+        {
+            return;
+        }
+
+        if (_depthImage is not null)
+        {
+            // Recreation only: the old image may still be referenced by an in-flight frame, so idle first, then
+            // release it through the deferred deletion queue (the frame loop / FlushAll drains it — the internal
+            // immediate-destroy path isn't reachable from this assembly, and after the wait deferral is safe).
+            _device.WaitIdle();
+            _depthImage.Dispose();
+            _depthImage = null;
+        }
+
+        _depthImage = new GpuImage(_device, width, height, DepthFormat, ImageUsage.DepthAttachment);
     }
 
     /// <summary>
@@ -176,6 +246,10 @@ public sealed class Renderer : IDisposable
     // compiler. Every ?. is a real guard: on a failed construction only a prefix of these is assigned.
     private void DisposeResources()
     {
+        // Deferred release: the caller idles the GPU before Dispose (see the type remarks) and drains the
+        // deletion queue with FlushAll afterwards, so the depth image is freed before the leak check.
+        _depthImage?.Dispose();
+        _depthImage = null;
         _pipeline?.Dispose();
         _materialSetLayout?.Dispose();
         _frameSetLayout?.Dispose();

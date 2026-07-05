@@ -50,7 +50,7 @@ var resizePending = false;
 
 // Hoisted out of the render handler so the delegate is allocated once, not per frame
 // (spec §3.2.5, zero managed allocation on the hot path).
-Action<CommandList, FrameContext>? drawScene = null;
+Action<CommandList, FrameContext, SwapchainTarget>? drawScene = null;
 
 window.Loaded += () =>
 {
@@ -81,7 +81,7 @@ window.Loaded += () =>
 
     // Capturing 'scene'/'camera'/'renderer' (all assigned by now) exactly once — the delegate is built a
     // single time here, never per frame.
-    drawScene = (cmd, frame) => renderer!.DrawScene(scene!, camera, cmd, frame);
+    drawScene = (cmd, frame, target) => renderer!.DrawScene(scene!, camera, cmd, frame, target);
 
     Log.Info($"Sandbox: initialized on '{device.AdapterName}'. Rendering '{scene.Name}' — " +
              "clic pour capturer la souris, WASD + souris, Échap libère puis quitte.");
