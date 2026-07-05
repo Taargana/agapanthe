@@ -128,10 +128,15 @@ public sealed class Renderer : IDisposable
                 ColorFormat = HdrFormat,
                 DepthFormat = DepthFormat,
                 DepthTest = true,
-                // glTF winding is CCW; the Y-flipped Vulkan projection mirrors it to clockwise in framebuffer
-                // space, so Clockwise is the front face. M5 (architect decision 7) enables back-face culling
-                // now that the winding is validated — halves fragment work and reveals any flipped faces.
-                FrontFace = FrontFace.Clockwise,
+                // glTF winding is CCW viewed from outside. Our PerspectiveVulkan bakes the Y-flip
+                // into the projection, so the image is upright and a world-CCW triangle appears
+                // visually CCW on screen — and Vulkan's front-face formula (spec 'Basic Polygon
+                // Rasterization', note the leading minus sign compensating the y-down framebuffer)
+                // classifies visually-CCW as COUNTER-clockwise. The old Clockwise choice came from
+                // applying the negative-viewport-height folklore plus a shoelace computed without
+                // that sign — it culled every front face of DamagedHelmet (fixed after M5 visual
+                // debugging: Cull None restored the intact shell, the decisive experiment).
+                FrontFace = FrontFace.CounterClockwise,
                 Cull = CullMode.Back,
             });
 
@@ -210,6 +215,55 @@ public sealed class Renderer : IDisposable
     /// 5 roughness, 6 occlusion, 7 tangent (+handedness tint), 8 key-light NdotL.
     /// </summary>
     public int DebugView { get; set; }
+
+    /// <summary>
+    /// Debug capture: reads the HDR scene target back to the CPU, applies the same exposure +
+    /// ACES + sRGB chain as the tonemap pass, and writes a binary PPM (P6). Call after at least
+    /// one rendered frame, with the GPU idle (the caller WaitIdles). Stalls the queue — debug only.
+    /// </summary>
+    public void SaveHdrCapture(string path)
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        if (_hdrImage is null || !_hdrInitialized)
+        {
+            throw new InvalidOperationException("Nothing rendered yet — the HDR target is uninitialized.");
+        }
+
+        // 8 bytes/texel (Rgba16Sfloat); the image sits in ShaderReadOnly after the tonemap pass.
+        var bytes = GpuReadback.ReadImage(_device, _hdrImage, ImageLayoutState.ShaderReadOnly, bytesPerTexel: 8);
+        var width = (int)_hdrImage.Width;
+        var height = (int)_hdrImage.Height;
+
+        using var output = new FileStream(path, FileMode.Create, FileAccess.Write);
+        var header = System.Text.Encoding.ASCII.GetBytes($"P6\n{width} {height}\n255\n");
+        output.Write(header);
+
+        var halfs = System.Runtime.InteropServices.MemoryMarshal.Cast<byte, Half>(bytes);
+        var row = new byte[width * 3];
+        for (var y = 0; y < height; y++)
+        {
+            for (var x = 0; x < width; x++)
+            {
+                var i = ((y * width) + x) * 4;
+                row[(x * 3) + 0] = EncodeChannel((float)halfs[i + 0]);
+                row[(x * 3) + 1] = EncodeChannel((float)halfs[i + 1]);
+                row[(x * 3) + 2] = EncodeChannel((float)halfs[i + 2]);
+            }
+
+            output.Write(row);
+        }
+
+        Core.Log.Info($"Renderer: HDR capture saved to '{path}' ({width}x{height}).");
+
+        byte EncodeChannel(float value)
+        {
+            // Mirror tonemap.frag: exposure, ACES fitted (Narkowicz), then sRGB OETF.
+            var x = value * Exposure;
+            x = Math.Clamp((x * ((2.51f * x) + 0.03f)) / ((x * ((2.43f * x) + 0.59f)) + 0.14f), 0f, 1f);
+            var srgb = x <= 0.0031308f ? x * 12.92f : (1.055f * MathF.Pow(x, 1f / 2.4f)) - 0.055f;
+            return (byte)Math.Clamp((int)((srgb * 255f) + 0.5f), 0, 255);
+        }
+    }
 
     /// <summary>
     /// Records the two-pass HDR frame (architect decisions 2-3) into <paramref name="cmd"/>, resolving into the
@@ -385,7 +439,10 @@ public sealed class Renderer : IDisposable
             _hdrInitialized = false;
         }
 
-        _hdrImage = new GpuImage(_device, width, height, HdrFormat, ImageUsage.ColorAttachment | ImageUsage.Sampled);
+        // TransferSrc so debug captures (SaveHdrCapture) can read the target back.
+        _hdrImage = new GpuImage(
+            _device, width, height, HdrFormat,
+            ImageUsage.ColorAttachment | ImageUsage.Sampled | ImageUsage.TransferSrc);
         _depthImage = new GpuImage(_device, width, height, DepthFormat, ImageUsage.DepthAttachment);
     }
 

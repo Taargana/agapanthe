@@ -209,6 +209,14 @@ window.Rendered += _ =>
 
     if (maxFrames > 0 && ++renderedFrames >= maxFrames)
     {
+        // Headless debug capture: AGAPANTHE_CAPTURE=<path.ppm> dumps the tonemapped HDR target
+        // on the last frame, so rendering issues can be inspected without a windowed session.
+        if (Environment.GetEnvironmentVariable("AGAPANTHE_CAPTURE") is { Length: > 0 } capturePath && renderer is not null)
+        {
+            frameRenderer.WaitIdle();
+            renderer.SaveHdrCapture(capturePath);
+        }
+
         window.Close();
     }
 };
@@ -360,7 +368,20 @@ static void FrameCamera(Camera camera, FreeCameraController controller, Agapanth
     var distance = MathF.Max(diagonal * 1.5f, 0.001f);
 
     // Look at the model from the front (+Z) and slightly above. dir points from centre toward the camera.
+    // AGAPANTHE_VIEW="x,y,z" overrides the framing direction (debug: reproduce a reported
+    // angle in headless captures). dir points from the model center toward the camera.
     var dir = Vector3.Normalize(new Vector3(0f, 0.35f, 1f));
+    if (Environment.GetEnvironmentVariable("AGAPANTHE_VIEW") is { } viewSpec)
+    {
+        var parts = viewSpec.Split(',');
+        if (parts.Length == 3
+            && float.TryParse(parts[0], System.Globalization.CultureInfo.InvariantCulture, out var vx)
+            && float.TryParse(parts[1], System.Globalization.CultureInfo.InvariantCulture, out var vy)
+            && float.TryParse(parts[2], System.Globalization.CultureInfo.InvariantCulture, out var vz))
+        {
+            dir = Vector3.Normalize(new Vector3(vx, vy, vz));
+        }
+    }
     camera.Position = center + (dir * distance);
 
     // Orient yaw/pitch so Forward = (sy·cp, sp, -cy·cp) points from the eye to the centre (= -dir).
