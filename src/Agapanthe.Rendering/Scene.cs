@@ -1,3 +1,4 @@
+using System.Numerics;
 using Agapanthe.Graphics;
 
 namespace Agapanthe.Rendering;
@@ -34,7 +35,9 @@ public sealed class Scene : IDisposable
         GpuImage[] textures,
         GpuImage[] placeholders,
         SamplerCache samplerCache,
-        string name)
+        string name,
+        Vector3 boundsMin,
+        Vector3 boundsMax)
     {
         _instances = instances;
         _meshes = meshes;
@@ -43,6 +46,8 @@ public sealed class Scene : IDisposable
         _placeholders = placeholders;
         _samplerCache = samplerCache;
         Name = name;
+        BoundsMin = boundsMin;
+        BoundsMax = boundsMax;
     }
 
     /// <summary>The drawables, each a (mesh, resolved material) pair. Iteration order is the model's mesh order.</summary>
@@ -50,6 +55,23 @@ public sealed class Scene : IDisposable
 
     /// <summary>Model name for diagnostics.</summary>
     public string Name { get; }
+
+    /// <summary>
+    /// World-space axis-aligned bounding box over every mesh's transformed positions, computed once at
+    /// build time (<see cref="SceneBuilder.ComputeWorldBounds"/>). A model with no geometry yields the
+    /// degenerate box <c>(0,0,0)–(0,0,0)</c>. Consumers (camera framing, shadow ortho fit) read these
+    /// instead of re-folding vertices.
+    /// </summary>
+    public Vector3 BoundsMin { get; }
+
+    /// <inheritdoc cref="BoundsMin"/>
+    public Vector3 BoundsMax { get; }
+
+    /// <summary>Centre of the world-space AABB (<see cref="BoundsMin"/>/<see cref="BoundsMax"/> midpoint).</summary>
+    public Vector3 BoundsCenter => (BoundsMin + BoundsMax) * 0.5f;
+
+    /// <summary>Length of the AABB's space diagonal — a scale-independent "size" of the scene.</summary>
+    public float BoundsDiagonal => Vector3.Distance(BoundsMin, BoundsMax);
 
     /// <summary>Releases all owned GPU resources in reverse creation order.</summary>
     public void Dispose()

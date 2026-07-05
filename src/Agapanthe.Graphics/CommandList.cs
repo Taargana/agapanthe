@@ -82,25 +82,31 @@ public readonly unsafe struct CommandList
     /// </summary>
     public void BeginRendering(in RenderingAttachments attachments)
     {
-        var (r, g, b, a) = attachments.Color.ClearColor;
-        var colorAttachment = new RenderingAttachmentInfo
-        {
-            SType = StructureType.RenderingAttachmentInfo,
-            ImageView = attachments.Color.Target.View,
-            ImageLayout = ImageLayout.ColorAttachmentOptimal,
-            LoadOp = ToVkLoadOp(attachments.Color.LoadOp),
-            StoreOp = AttachmentStoreOp.Store,
-            ClearValue = new ClearValue { Color = new ClearColorValue(r, g, b, a) },
-        };
-
         var renderingInfo = new RenderingInfo
         {
             SType = StructureType.RenderingInfo,
             RenderArea = new Rect2D(default, new Extent2D(attachments.Width, attachments.Height)),
             LayerCount = 1,
-            ColorAttachmentCount = 1,
-            PColorAttachments = &colorAttachment,
         };
+
+        // Kept in scope until CmdBeginRendering returns; PColorAttachments points at it only when present.
+        // A depth-only pass (shadow map) leaves Color null → ColorAttachmentCount stays 0, PColorAttachments null.
+        var colorAttachment = default(RenderingAttachmentInfo);
+        if (attachments.Color is { } color)
+        {
+            var (r, g, b, a) = color.ClearColor;
+            colorAttachment = new RenderingAttachmentInfo
+            {
+                SType = StructureType.RenderingAttachmentInfo,
+                ImageView = color.Target.View,
+                ImageLayout = ImageLayout.ColorAttachmentOptimal,
+                LoadOp = ToVkLoadOp(color.LoadOp),
+                StoreOp = AttachmentStoreOp.Store,
+                ClearValue = new ClearValue { Color = new ClearColorValue(r, g, b, a) },
+            };
+            renderingInfo.ColorAttachmentCount = 1;
+            renderingInfo.PColorAttachments = &colorAttachment;
+        }
 
         // Kept in scope until CmdBeginRendering returns; PDepthAttachment points at it only when present.
         var depthAttachment = default(RenderingAttachmentInfo);
@@ -112,8 +118,9 @@ public readonly unsafe struct CommandList
                 ImageView = depth.Target.View,
                 ImageLayout = ImageLayout.DepthAttachmentOptimal,
                 LoadOp = ToVkLoadOp(depth.LoadOp),
-                // The depth buffer is a per-frame scratch target (loadOp=Clear each frame), never read back.
-                StoreOp = AttachmentStoreOp.DontCare,
+                // Scene depth is per-frame scratch (DontCare); a shadow map is sampled after the
+                // pass and must be stored.
+                StoreOp = depth.Store ? AttachmentStoreOp.Store : AttachmentStoreOp.DontCare,
                 ClearValue = new ClearValue { DepthStencil = new ClearDepthStencilValue(depth.ClearDepth, 0) },
             };
             renderingInfo.PDepthAttachment = &depthAttachment;

@@ -26,6 +26,37 @@ public enum SamplerAddressMode
 
     /// <summary>Mirror on every repeat.</summary>
     MirroredRepeat = 2,
+
+    /// <summary>
+    /// Clamp to the sampler's border color for coordinates outside <c>[0, 1]</c>. Paired with a
+    /// comparison sampler and a white border, a shadow lookup outside the light frustum reads 1.0
+    /// (fully lit) instead of leaking a spurious shadow from the edge texel.
+    /// </summary>
+    ClampToBorder = 3,
+}
+
+/// <summary>
+/// Depth-comparison mode for a <see cref="Sampler"/> (<c>sampler2DShadow</c>). <see cref="None"/> (the
+/// default) is a normal sampler; any other value enables <c>compareEnable</c> and maps to the matching
+/// <c>VkCompareOp</c>. Shadow maps use <see cref="LessOrEqual"/>: the sampled reference depth passes when it
+/// is less-or-equal to the stored depth (the fragment is at or in front of the occluder = lit).
+/// </summary>
+public enum SamplerCompare
+{
+    /// <summary>No comparison — an ordinary sampler (default).</summary>
+    None = 0,
+
+    /// <summary>Passes when reference &lt;= stored depth. The shadow-map default.</summary>
+    LessOrEqual = 1,
+
+    /// <summary>Passes when reference &lt; stored depth.</summary>
+    Less = 2,
+
+    /// <summary>Passes when reference &gt; stored depth.</summary>
+    Greater = 3,
+
+    /// <summary>Passes when reference &gt;= stored depth.</summary>
+    GreaterOrEqual = 4,
 }
 
 /// <summary>
@@ -42,12 +73,19 @@ public enum SamplerAddressMode
 /// enabled at device creation — see <see cref="Sampler"/>.
 /// </param>
 /// <param name="MipLodBias">LOD bias added when sampling mips. Default <c>0</c>.</param>
+/// <param name="Compare">
+/// Depth-comparison mode. <see cref="SamplerCompare.None"/> (default) is an ordinary sampler; any other value
+/// makes a comparison sampler (<c>sampler2DShadow</c>). When enabled the border color is forced to opaque
+/// white, so pair it with <see cref="SamplerAddressMode.ClampToBorder"/>: a lookup outside the light frustum
+/// then reads 1.0 (fully lit).
+/// </param>
 public readonly record struct SamplerDesc(
     SamplerFilter Filter = SamplerFilter.Linear,
     SamplerFilter MipFilter = SamplerFilter.Linear,
     SamplerAddressMode AddressMode = SamplerAddressMode.Repeat,
     float MaxAnisotropy = 0f,
-    float MipLodBias = 0f);
+    float MipLodBias = 0f,
+    SamplerCompare Compare = SamplerCompare.None);
 
 /// <summary>
 /// A texture sampler (<c>VkSampler</c>). Immutable once created; combined with a <see cref="GpuImage"/>
@@ -101,6 +139,9 @@ public sealed unsafe class Sampler : IDisposable
                 "Sampler: anisotropy requested but the samplerAnisotropy device feature is not enabled; sampling isotropically.");
         }
 
+        // A comparison sampler (sampler2DShadow) forces an opaque-white border so a shadow lookup outside the
+        // light frustum, with ClampToBorder addressing, reads 1.0 = fully lit (no spurious shadow).
+        var compareEnabled = desc.Compare != SamplerCompare.None;
         var info = new SamplerCreateInfo
         {
             SType = StructureType.SamplerCreateInfo,
@@ -113,11 +154,11 @@ public sealed unsafe class Sampler : IDisposable
             MipLodBias = desc.MipLodBias,
             AnisotropyEnable = anisotropyEnabled,
             MaxAnisotropy = maxAnisotropy,
-            CompareEnable = false,
-            CompareOp = CompareOp.Always,
+            CompareEnable = compareEnabled,
+            CompareOp = ToVkCompareOp(desc.Compare),
             MinLod = 0f,
             MaxLod = LodClampNone,
-            BorderColor = BorderColor.FloatOpaqueBlack,
+            BorderColor = compareEnabled ? BorderColor.FloatOpaqueWhite : BorderColor.FloatOpaqueBlack,
             UnnormalizedCoordinates = false,
         };
 
@@ -186,6 +227,17 @@ public sealed unsafe class Sampler : IDisposable
         SamplerAddressMode.Repeat => VkAddressMode.Repeat,
         SamplerAddressMode.ClampToEdge => VkAddressMode.ClampToEdge,
         SamplerAddressMode.MirroredRepeat => VkAddressMode.MirroredRepeat,
+        SamplerAddressMode.ClampToBorder => VkAddressMode.ClampToBorder,
         _ => throw new ArgumentOutOfRangeException(nameof(mode), mode, "Unknown sampler address mode."),
+    };
+
+    private static CompareOp ToVkCompareOp(SamplerCompare compare) => compare switch
+    {
+        SamplerCompare.None => CompareOp.Always,
+        SamplerCompare.LessOrEqual => CompareOp.LessOrEqual,
+        SamplerCompare.Less => CompareOp.Less,
+        SamplerCompare.Greater => CompareOp.Greater,
+        SamplerCompare.GreaterOrEqual => CompareOp.GreaterOrEqual,
+        _ => throw new ArgumentOutOfRangeException(nameof(compare), compare, "Unknown sampler compare op."),
     };
 }

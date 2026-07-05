@@ -22,7 +22,6 @@ public sealed unsafe class GraphicsPipeline : IDisposable
         ArgumentNullException.ThrowIfNull(device);
         ArgumentNullException.ThrowIfNull(desc);
         ArgumentNullException.ThrowIfNull(desc.VertexShader);
-        ArgumentNullException.ThrowIfNull(desc.FragmentShader);
         _device = device;
 
         var vk = device.Api;
@@ -108,6 +107,7 @@ public sealed unsafe class GraphicsPipeline : IDisposable
         var binding = default(VertexInputBindingDescription);
         try
         {
+            // A depth-only pipeline (shadow map) has no fragment shader: only the vertex stage is declared.
             var stages = stackalloc PipelineShaderStageCreateInfo[2];
             stages[0] = new PipelineShaderStageCreateInfo
             {
@@ -116,13 +116,18 @@ public sealed unsafe class GraphicsPipeline : IDisposable
                 Module = desc.VertexShader.Handle,
                 PName = entryPoint,
             };
-            stages[1] = new PipelineShaderStageCreateInfo
+            uint stageCount = 1;
+            if (desc.FragmentShader is { } fragment)
             {
-                SType = StructureType.PipelineShaderStageCreateInfo,
-                Stage = ShaderStageFlags.FragmentBit,
-                Module = desc.FragmentShader.Handle,
-                PName = entryPoint,
-            };
+                stages[1] = new PipelineShaderStageCreateInfo
+                {
+                    SType = StructureType.PipelineShaderStageCreateInfo,
+                    Stage = ShaderStageFlags.FragmentBit,
+                    Module = fragment.Handle,
+                    PName = entryPoint,
+                };
+                stageCount = 2;
+            }
 
             var vertexInput = new PipelineVertexInputStateCreateInfo
             {
@@ -165,6 +170,9 @@ public sealed unsafe class GraphicsPipeline : IDisposable
                 ViewportCount = 1,
                 ScissorCount = 1,
             };
+            // Depth bias is a static state here (not dynamic). Enabled when either factor is non-zero;
+            // slope-scaled bias fights shadow acne without pushing near-flat surfaces off the light.
+            var depthBiasEnable = desc.DepthBiasConstant != 0f || desc.DepthBiasSlope != 0f;
             var rasterizer = new PipelineRasterizationStateCreateInfo
             {
                 SType = StructureType.PipelineRasterizationStateCreateInfo,
@@ -173,6 +181,9 @@ public sealed unsafe class GraphicsPipeline : IDisposable
                 FrontFace = desc.FrontFace == FrontFace.CounterClockwise
                     ? Silk.NET.Vulkan.FrontFace.CounterClockwise
                     : Silk.NET.Vulkan.FrontFace.Clockwise,
+                DepthBiasEnable = depthBiasEnable,
+                DepthBiasConstantFactor = desc.DepthBiasConstant,
+                DepthBiasSlopeFactor = desc.DepthBiasSlope,
                 LineWidth = 1f,
             };
             var multisample = new PipelineMultisampleStateCreateInfo
@@ -187,6 +198,9 @@ public sealed unsafe class GraphicsPipeline : IDisposable
                 DepthWriteEnable = desc.DepthTest && desc.DepthWrite,
                 DepthCompareOp = CompareOp.LessOrEqual,
             };
+            // A depth-only pipeline (no color format) declares zero blend attachments; the color-blend state
+            // stays present but empty, which is legal when there are no color attachments.
+            var hasColor = desc.ColorFormat != PixelFormat.Undefined;
             var blendAttachment = new PipelineColorBlendAttachmentState
             {
                 ColorWriteMask = ColorComponentFlags.RBit | ColorComponentFlags.GBit
@@ -196,8 +210,8 @@ public sealed unsafe class GraphicsPipeline : IDisposable
             var colorBlend = new PipelineColorBlendStateCreateInfo
             {
                 SType = StructureType.PipelineColorBlendStateCreateInfo,
-                AttachmentCount = 1,
-                PAttachments = &blendAttachment,
+                AttachmentCount = hasColor ? 1u : 0u,
+                PAttachments = hasColor ? &blendAttachment : null,
             };
 
             var dynamicStates = stackalloc DynamicState[2] { DynamicState.Viewport, DynamicState.Scissor };
@@ -214,8 +228,8 @@ public sealed unsafe class GraphicsPipeline : IDisposable
             var renderingInfo = new PipelineRenderingCreateInfo
             {
                 SType = StructureType.PipelineRenderingCreateInfo,
-                ColorAttachmentCount = 1,
-                PColorAttachmentFormats = &colorFormat,
+                ColorAttachmentCount = hasColor ? 1u : 0u,
+                PColorAttachmentFormats = hasColor ? &colorFormat : null,
                 DepthAttachmentFormat = desc.DepthFormat == PixelFormat.Undefined ? Format.Undefined : depthFormat,
             };
 
@@ -223,7 +237,7 @@ public sealed unsafe class GraphicsPipeline : IDisposable
             {
                 SType = StructureType.GraphicsPipelineCreateInfo,
                 PNext = &renderingInfo,
-                StageCount = 2,
+                StageCount = stageCount,
                 PStages = stages,
                 PVertexInputState = &vertexInput,
                 PInputAssemblyState = &inputAssembly,

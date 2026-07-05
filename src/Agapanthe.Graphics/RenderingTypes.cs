@@ -100,16 +100,23 @@ public readonly struct DepthAttachmentInfo
 
     /// <summary>Clear depth used when <see cref="LoadOp"/> is <see cref="AttachmentLoadAction.Clear"/> ([0,1], Vulkan reversed-free).</summary>
     public float ClearDepth { get; init; }
+
+    /// <summary>
+    /// Whether the written depth survives the pass. Default <c>false</c> (per-frame scratch depth,
+    /// cheapest); a shadow-map pass sets <c>true</c> because the result is sampled afterwards.
+    /// </summary>
+    public bool Store { get; init; }
 }
 
 /// <summary>
-/// The attachment set for one dynamic-rendering scope: a color target, an optional depth target, and the
-/// render-area extent. Passed by <c>in</c> to <see cref="CommandList.BeginRendering"/>.
+/// The attachment set for one dynamic-rendering scope: an optional color target, an optional depth target,
+/// and the render-area extent. Passed by <c>in</c> to <see cref="CommandList.BeginRendering"/>. A depth-only
+/// pass (shadow map) leaves <see cref="Color"/> <c>null</c>.
 /// </summary>
 public readonly struct RenderingAttachments
 {
-    /// <summary>The color attachment (required).</summary>
-    public ColorAttachmentInfo Color { get; init; }
+    /// <summary>The color attachment, or <c>null</c> for a depth-only pass (shadow map).</summary>
+    public ColorAttachmentInfo? Color { get; init; }
 
     /// <summary>The depth attachment, or <c>null</c> for a color-only pass.</summary>
     public DepthAttachmentInfo? Depth { get; init; }

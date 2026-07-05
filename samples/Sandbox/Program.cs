@@ -72,14 +72,14 @@ window.Loaded += () =>
     LogModelStats(model, modelPath);
     scene = SceneBuilder.Build(device, model, renderer.MaterialAllocator, renderer.MaterialSetLayout);
 
-    // Frame the model: compute its world-space AABB, sit the camera back by 1.5x the diagonal along a
-    // slightly-raised front direction, and orient yaw/pitch to look at the centre.
-    FrameCamera(camera, controller, model);
+    // Frame the model: read the scene's world-space AABB (computed by SceneBuilder), sit the camera back
+    // by 1.5x the diagonal along a slightly-raised front direction, orient yaw/pitch to look at the centre.
+    FrameCamera(camera, controller, scene);
 
     // Default M5 lighting: a warm directional key (sun) plus a cool rim and a soft fill point
-    // light placed from the model bounds — a classic 3-point setup that reads PBR materials
+    // light placed from the scene bounds — a classic 3-point setup that reads PBR materials
     // well. HDR intensities (> 1) are expected; the ACES tonemap compresses them.
-    SetupLights(renderer.Lights, model);
+    SetupLights(renderer.Lights, scene);
 
     // The scene clear color lives on the Renderer now (it owns the scene pass); the FrameRenderer only
     // drives sync/acquire/present and no longer carries a clear color.
@@ -282,14 +282,12 @@ static void LogModelStats(Agapanthe.Assets.Model.ModelAsset model, string path)
              $"{model.Images.Count} image(s), {triangles} triangle(s).");
 }
 
-// Positions the camera to frame the whole model: world-space AABB over every mesh's transformed
-// positions, then sit back 1.5x the diagonal along a slightly-raised front direction and aim at the centre.
-// 3-point lighting from the model's world bounds: warm key (directional), cool rim point light
-// behind/above, soft warm fill point light front/below. Ranges scale with the model diagonal.
-static void SetupLights(SceneLights lights, Agapanthe.Assets.Model.ModelAsset model)
+// 3-point lighting from the scene's world bounds: warm key (directional), cool rim point light
+// behind/above, soft warm fill point light front/below. Ranges scale with the scene diagonal.
+static void SetupLights(SceneLights lights, Scene scene)
 {
-    var (center, diagonal) = ModelBounds(model);
-    var reach = MathF.Max(diagonal, 0.001f);
+    var center = scene.BoundsCenter;
+    var reach = MathF.Max(scene.BoundsDiagonal, 0.001f);
 
     lights.Directional = new DirectionalLight
     {
@@ -317,54 +315,20 @@ static void SetupLights(SceneLights lights, Agapanthe.Assets.Model.ModelAsset mo
     lights.Ambient = new Vector3(0.08f, 0.08f, 0.09f);
 }
 
-static (Vector3 Center, float Diagonal) ModelBounds(Agapanthe.Assets.Model.ModelAsset model)
+static void FrameCamera(Camera camera, FreeCameraController controller, Scene scene)
 {
-    var min = new Vector3(float.PositiveInfinity);
-    var max = new Vector3(float.NegativeInfinity);
-    foreach (var mesh in model.Meshes)
+    var center = scene.BoundsCenter;
+    var diagonal = scene.BoundsDiagonal;
+
+    if (diagonal <= 0f)
     {
-        foreach (var localPos in mesh.Positions)
-        {
-            var p = Vector3.Transform(localPos, mesh.WorldTransform);
-            min = Vector3.Min(min, p);
-            max = Vector3.Max(max, p);
-        }
-    }
-
-    return min.X > max.X
-        ? (Vector3.Zero, 1f)
-        : ((min + max) * 0.5f, Vector3.Distance(min, max));
-}
-
-static void FrameCamera(Camera camera, FreeCameraController controller, Agapanthe.Assets.Model.ModelAsset model)
-{
-    var min = new Vector3(float.PositiveInfinity);
-    var max = new Vector3(float.NegativeInfinity);
-    var any = false;
-
-    foreach (var mesh in model.Meshes)
-    {
-        var world = mesh.WorldTransform;
-        foreach (var localPos in mesh.Positions)
-        {
-            var p = Vector3.Transform(localPos, world);
-            min = Vector3.Min(min, p);
-            max = Vector3.Max(max, p);
-            any = true;
-        }
-    }
-
-    if (!any)
-    {
-        // Degenerate model (no geometry): keep a sane default so the app still runs.
+        // Degenerate scene (no geometry → collapsed AABB): keep a sane default so the app still runs.
         camera.Position = new Vector3(0f, 0f, 3f);
         camera.Yaw = 0f;
         camera.Pitch = 0f;
         return;
     }
 
-    var center = (min + max) * 0.5f;
-    var diagonal = Vector3.Distance(min, max);
     var distance = MathF.Max(diagonal * 1.5f, 0.001f);
 
     // Look at the model from the front (+Z) and slightly above. dir points from centre toward the camera.

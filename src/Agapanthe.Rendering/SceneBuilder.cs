@@ -72,7 +72,14 @@ public static class SceneBuilder
 
                 var instances = BuildInstances(model, meshes, materials, defaultMaterialIndex);
 
-                return new Scene(instances, meshes, materials, textures, placeholders, samplerCache, model.Name);
+                // World-space AABB folded from the CPU-side mesh positions (before upload frees nothing —
+                // the DTO arrays are still live). Consumed by the Renderer/Sandbox for camera framing and
+                // the shadow ortho fit, so it is computed once here rather than re-walking vertices per use.
+                var (boundsMin, boundsMax) = ComputeWorldBounds(model.Meshes);
+
+                return new Scene(
+                    instances, meshes, materials, textures, placeholders, samplerCache, model.Name,
+                    boundsMin, boundsMax);
             }
         }
         catch
@@ -84,6 +91,34 @@ public static class SceneBuilder
             samplerCache.Dispose();
             throw;
         }
+    }
+
+    /// <summary>
+    /// Folds a world-space axis-aligned bounding box over every mesh's positions, each transformed by its
+    /// <see cref="MeshAsset.WorldTransform"/>. Pure and GPU-free so it is unit-testable on synthetic meshes.
+    /// A model with no geometry (no meshes, or meshes with no positions) returns the degenerate box
+    /// <c>(0,0,0)–(0,0,0)</c> rather than the inverted infinities of an empty fold.
+    /// </summary>
+    public static (Vector3 Min, Vector3 Max) ComputeWorldBounds(IReadOnlyList<MeshAsset> meshes)
+    {
+        ArgumentNullException.ThrowIfNull(meshes);
+
+        var min = new Vector3(float.PositiveInfinity);
+        var max = new Vector3(float.NegativeInfinity);
+
+        foreach (var mesh in meshes)
+        {
+            var world = mesh.WorldTransform;
+            foreach (var localPos in mesh.Positions)
+            {
+                var p = Vector3.Transform(localPos, world);
+                min = Vector3.Min(min, p);
+                max = Vector3.Max(max, p);
+            }
+        }
+
+        // min.X > max.X only when the fold never ran (no vertices): collapse to a point at the origin.
+        return min.X > max.X ? (Vector3.Zero, Vector3.Zero) : (min, max);
     }
 
     /// <summary>

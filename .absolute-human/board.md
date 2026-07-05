@@ -1,129 +1,88 @@
-# Absolute-Human Board — Agapanthe Session 5 (M5 : PBR & Lumières)
+# Absolute-Human Board — Agapanthe Session 6 (M6 : Shadow Mapping)
 
-**Status**: completed
+**Status**: in-progress
 **Créé**: 2026-07-05
-**Spec**: docs/plans/2026-07-02-graphics-engine-design.md §3.3 (passes), §3.4, §5 (protocole visuel), §6 (M5)
+**Spec**: docs/plans/2026-07-02-graphics-engine-design.md §3.3 (passes), §3.4, §6 (M6)
 **Board persistence**: git-tracked
-**Sessions passées**: S1-S4 → .absolute-human/archive/
+**Sessions passées**: S1-S5 → .absolute-human/archive/
 
-## Intake (plan architecte S4 acté — pas de re-brainstorm)
+## Intake (10 décisions architecte S5 actées — pas de re-brainstorm)
 
-- **Problème**: M4 rend baseColor×facteur directement dans le swapchain, mono-passe, sans éclairage. M5 = éclairage physiquement correct + chaîne HDR.
-- **Cible de sortie (spec §6 M5)**: DamagedHelmet en PBR metallic-roughness complet (1 lumière directionnelle + N ponctuelles, normal mapping, AO, emissive), tone mapping — protocole visuel §5 validé (capture vs viewer Khronos même angle, image annotée docs/visual-checks/).
-- **Les 7 décisions architecte S4** (détail : archive board S4, section « Revue architecte M4-12 ») :
-  1. Multi-passes d'abord : CommandList.BeginRendering/EndRendering/TransitionImage/SetViewport publics ; FrameRenderer = acquire/submit/present/sync ; depth → Renderer ; callback (cmd, frame, swapchainTarget).
-  2. HDR target Rgba16Sfloat (ColorAttachment|Sampled) + depth possédés par Renderer, recréés au resize.
-  3. Tonemap fullscreen sans vertex buffer (Draw(3)), ACES/Reinhard + exposition, sortie swapchain sRGB, barrier HDR→ShaderReadOnly.
-  4. Set 0 : binding 1 UBO lumières (Fragment), caméra Vertex|Fragment, CameraUniforms += position.
-  5. mesh.vert : normal matrix = inverse-transpose.
-  6. MaterialAsset += NormalScale/OcclusionStrength (schéma les parse déjà) → mrno.z/.w.
-  7. Cull Back + validation visuelle du winding.
-- **Lumières M5**: 1 directionnelle + jusqu'à 4 ponctuelles (UBO fixe, count actif). Intensités HDR (> 1 autorisé).
-- **Anisotropie sampler**: activer la feature device (samplerAnisotropy) si supportée + flip Sampler.AnisotropyFeatureEnabled — dette S3, pertinente maintenant (qualité visuelle M5).
+- **Problème**: M5 éclaire mais rien ne bloque la lumière — pas d'ancrage au sol, pas de profondeur de scène. M6 = ombres portées de la lumière directionnelle.
+- **Cible de sortie (spec §6 M6)**: shadow mapping directionnel — depth D32 2048², slope-scaled bias, PCF 3×3, 1 cascade (CSM = phase 2). Ombres stables caméra en mouvement, pas d'acné visible.
+- **Les 10 décisions architecte S5** (détail : archive board S5, section « Revue architecte M5-07 ») :
+  1. `RenderingAttachments.Color` → nullable, émission conditionnelle (passe depth-only).
+  2. Pipeline depth-only : FragmentShader + ColorFormat optionnels, StageCount/blend conditionnels.
+  3. `GraphicsPipelineDesc` += DepthBias{Constant,Slope}.
+  4. `SamplerDesc` += CompareOp? → CompareEnable (sampler2DShadow), ClampToEdge + border blanc.
+  5. `MathHelpers.OrthographicVulkan` (Y-flip, Z [0,1], testé sans GPU).
+  6. Set 0 binding 2 = shadow sampler comparateur ; lightViewProj mat4 appended dans LightsUniforms (176→240, test std140 étendu).
+  7. **Passe shadow sans descriptor set** : model + lightViewProj = 128 o pile en push constants.
+  8. `Scene` expose une AABB monde (SceneBuilder) → fit ortho dans Renderer ; DirectionalLight reste pure ; réglages en Renderer.ShadowSettings.
+  9. Shadow map 2048² D32 DepthAttachment|Sampled créée UNE fois au ctor (invariante au resize, hors EnsureTargets).
+  10. Découper DrawScene en RecordShadowPass/RecordScenePass/RecordTonemapPass avant insertion.
+- **Leçon M5 à appliquer** : vérifier chaque étape visuellement via `AGAPANTHE_CAPTURE`/`AGAPANTHE_VIEW` — les captures headless sont désormais l'outil de validation de premier rang, avant même la validation layer.
 
 ## Project Conventions
 
-- .NET 10, xUnit, TreatWarningsAsErrors, aucun type Vk* hors Graphics, zéro alloc managée par frame, ResourceTracker, validation layer = juge de paix.
-- Run : `DYLD_LIBRARY_PATH=/opt/homebrew/lib dotnet run --project samples/Sandbox` (+ `AGAPANTHE_MAX_FRAMES=N`).
-- std140 : MaterialUniforms/CameraUniforms testés aux offsets — étendre les tests avec les nouveaux membres.
+- .NET 10, xUnit, TreatWarningsAsErrors, aucun type Vk* hors Graphics, zéro alloc managée par frame, ResourceTracker, validation layer + capture headless = juges de paix.
+- Run : `DYLD_LIBRARY_PATH=/opt/homebrew/lib dotnet run --project samples/Sandbox` (+ `AGAPANTHE_MAX_FRAMES`, `AGAPANTHE_CAPTURE=x.ppm`, `AGAPANTHE_VIEW="x,y,z"`).
+- FrontFace = CounterClockwise (leçon M5) — la passe shadow utilise le MÊME winding (front-face culling standard pour les ombres = garder Back… décision : Cull Back aussi en shadow pass, le bias gère l'acné ; Cull Front est une alternative si peter-panning — à trancher au run).
 
 ## Rollback Point
 
-`07f413e` (fin session 4 + doc avancement)
+`380bcf0` (fin session 5)
 
 ## Task Graph
 
 ```
-W1: M5-01 CommandList passes publiques + FrameRenderer réduit (couplés, un seul agent)
-W2: M5-02 Renderer multi-passes : HDR+depth ownership, passe scène → HDR, passe tonemap → swapchain
-W3: M5-03 Set 0 lumières + CameraUniforms position [dep 02]   M5-04 MaterialAsset scale/strength + aniso device [fichiers disjoints]
-W4: M5-05 Shader PBR complet (GGX, TBN, AO, emissive) + inverse-transpose + Cull Back [dep 03, 04]
-W5: M5-06 Sandbox lumières + exposition [dep 05]
-W6 (tail): M5-07 audits · M5-08 requirements · M5-09 verif + protocole visuel (partie humaine : capture utilisateur)
+W1: M6-01 Extensions Graphics (décisions 1-4)   M6-02 OrthographicVulkan + Scene AABB (décisions 5+8)
+W2: M6-03 Renderer passe shadow + shaders (décisions 6, 7, 9, 10) [dep 01, 02]
+W3: M6-04 Sandbox réglages ombre + captures headless [dep 03]
+W4 (tail): M6-05 audits · M6-06 requirements · M6-07 verif + protocole visuel
 ```
 
 ## Waves
 
 | Wave | Tâches | Exécution |
 |---|---|---|
-| 1 | M5-01 | agent graphics-3d (CommandList + FrameRenderer couplés) |
-| 2 | M5-02 | agent graphics-3d (Renderer + shaders tonemap) |
-| 3 | M5-03, M5-04 | parallèle (Rendering/set0 vs Assets+Graphics/sampler) |
-| 4 | M5-05 | agent graphics-3d (shaders PBR) |
-| 5 | M5-06 | Sandbox |
-| 6 | M5-07/08/09 | tail |
+| 1 | M6-01 (Graphics), M6-02 (Core+Rendering data) | parallèle (fichiers disjoints) |
+| 2 | M6-03 | agent graphics-3d |
+| 3 | M6-04 | orchestrateur (+captures) |
+| 4 | M6-05/06/07 | tail |
 
 ## Tâches
 
-### M5-01 — CommandList passes publiques + FrameRenderer réduit [code, M] — done — OWNER CommandList.cs + FrameRenderer.cs
-**Résultat**: RenderingTypes.cs (ImageLayoutState, AttachmentLoadAction, RenderTargetView — Vk internals cachés, ColorAttachmentInfo/DepthAttachmentInfo/RenderingAttachments, SwapchainTarget) ; CommandList.BeginRendering/EndRendering/SetViewportScissor/TransitionImage (mapping barrières byte-identique au M4, Undefined aspect-aware) ; FrameRenderer réduit (garde acquire/fences/flush/reset/submit/present + transitions swapchain), callback (cmd, frame, SwapchainTarget) ; depth + DepthFormat migrés au Renderer (EnsureDepth par comparaison d'extent, libération via Dispose différé — DestroyImmediately internal inaccessible depuis Rendering, drainé par FlushAll). FrameRenderer.ClearColor conservé mais superseded (contrainte signature-only Program) — **à nettoyer en M5-02**. Runs M4 intacts : 154 tests, helmet+box 0 validation 0 leak.
-CommandList gagne : `BeginRendering(in RenderingAttachments)` (struct moteur : color view/loadOp/clear, depth optionnel), `EndRendering()`, `TransitionImage(GpuImage, ImageLayoutState from, to)` (états typés moteur : Undefined/ColorAttachment/DepthAttachment/ShaderReadOnly/TransferSrc/TransferDst — mapping stages/access interne), `SetViewportScissor(w, h)`. Swapchain : la transition present reste dans FrameRenderer (il possède l'image swapchain — expose un type `SwapchainTarget { view, extent }` au callback). FrameRenderer : supprime depth (_depthImage, EnsureDepthImage, DepthFormat), BeginRenderingAndDraw, transitions depth ; callback devient `Action<CommandList, FrameContext, SwapchainTarget>` ; garde acquire/fence/submit/present/transitions swapchain (Undefined→ColorAttachment avant callback, →PresentSrc après). AC: build — Sandbox/Renderer M4 cassés temporairement INTERDIT : adapter Renderer.DrawScene + Program minimalement (passe unique vers swapchain via les nouvelles APIs, depth temporairement dans Renderer ou recréé à l'identique) pour que le run M4 reste clean en fin de tâche. Tests + run 0 validation 0 leak.
+### M6-01 — Extensions Graphics depth-only [code, M] — done — OWNER RenderingTypes/CommandList/GraphicsPipeline*/Sampler
+**Résultat**: (1) RenderingAttachments.Color nullable, émission conditionnelle. (2) FragmentShader nullable + ColorFormat défaut Undefined, stageCount 1/2, blend/rendering-info conditionnels. (3) DepthBiasConstant/Slope statiques (enable si ≠ 0). (4) SamplerCompare {None, LessOrEqual…} + ClampToBorder ajouté à SamplerAddressMode, bordure blanche forcée si comparateur (hors-frustum = lit 1.0 = éclairé). Capture avant/après **identique au byte près** (md5). **Gap flaggé par l'agent et réglé par l'orchestrateur** : depth StoreOp était DontCare en dur — `DepthAttachmentInfo.Store` ajouté (défaut false = scratch, shadow pass mettra true). Vérif W1 intégrée : 172 tests, run 0 validation 0 leak, capture propre.
+(1) `RenderingAttachments.Color` → `ColorAttachmentInfo?`, CommandList.BeginRendering émet ColorAttachmentCount=0/PColorAttachments=null si absent. (2) GraphicsPipelineDesc.FragmentShader + ColorFormat optionnels ; GraphicsPipeline : StageCount 1/2 conditionnel, blend/ColorAttachmentCount conditionnels, PipelineRenderingCreateInfo sans color format si absent. (3) GraphicsPipelineDesc += `float DepthBiasConstant`, `float DepthBiasSlope` (0 = off) → rasterizer DepthBiasEnable/ConstantFactor/SlopeFactor. (4) SamplerDesc += `SamplerCompareOp? Compare` (enum moteur : LessOrEqual suffit M6 + Never/Less/Greater… minimal) → CompareEnable/CompareOp + BorderColor FloatOpaqueWhite + doc (hors-frustum = pas d'ombre). AC: build 0 warning, tests existants verts, run M5 inchangé (aucun client des nouveautés).
 
-### M5-02 — Renderer multi-passes HDR + tonemap [code, L→M] — done — OWNER Renderer.cs + shaders tonemap
-**Résultat**: Renderer.HdrFormat = Rgba16Sfloat, Exposure public (défaut 1), EnsureTargets recrée HDR+depth ensemble (WaitIdle) ; DrawScene 2 passes : scène→HDR+depth (clear) → barrier ShaderReadOnly → tonemap→swapchain (DontCare, set per-frame, push constant exposition, Draw(3)) ; pipeline scène retargeté HDR. tonemap.vert fullscreen triangle gl_VertexIndex sans flip V (NDC y-bas cohérent, vérifié à l'endroit au run) ; tonemap.frag ACES fitted Narkowicz (Reinhard rejeté — délavé), pas de pow gamma (OETF par le format sRGB). **Fix WAR préventif** : HDR partagée entre frames in flight — acquire depuis ShaderReadOnly (pas Undefined/TopOfPipe) après la 1re frame, flag reset à la recréation ; sync-validation muette. FrameRenderer.ClearColor supprimé. 154 tests, helmet (75 ressources) + box (61) 0 validation 0 leak.
-Renderer possède : HDR GpuImage Rgba16Sfloat (ColorAttachment|Sampled, dedicated via seuil), depth D32 (déplacé), recréation au resize (WaitIdle), pipeline tonemap (VertexLayout null, ColorFormat swapchain, ni depth), layout set tonemap (1 combined sampler), sampler clamp, pipeline scène retargeté ColorFormat=Rgba16Sfloat. `DrawScene(scene, camera, cmd, frame, swapchainTarget)` : transition HDR→ColorAttachment, passe 1 (HDR+depth, clear) DrawScene existant, transition HDR→ShaderReadOnly, passe 2 (swapchain, no depth) bind tonemap + set (alloué per-frame via FrameContext.WriteCombinedImageSampler sur l'HDR) + Draw(3). shaders/tonemap.vert (fullscreen triangle par gl_VertexIndex) + tonemap.frag (exposition + ACES fitted ou Reinhard étendu — choisis ACES, documente ; PAS de pow gamma — le format swapchain sRGB s'en charge). Exposition : push constant ou UBO léger (choisis push constant float). AC: run M4 visuel identique (tonemap sur du LDR ≈ passthrough sombre léger acceptable — vérifie visuellement toi-même via headless + validation) 0 validation 0 leak, resize OK.
+### M6-02 — OrthographicVulkan + Scene AABB [code, S] — done — OWNER MathHelpers.cs + Scene/SceneBuilder
+**Résultat**: `OrthographicVulkan(width, height, near, far)` centré = CreateOrthographic + M22 négé (même geste que PerspectiveVulkan). Découverte : System.Numerics CreateOrthographic produit DÉJÀ Z [0,1] (convention DX native) — seul le Y-flip manquait. Test croisé : même point via ortho et perspective → même signe Y. Scene.BoundsMin/Max/Center/Diagonal, fold pur `SceneBuilder.ComputeWorldBounds(IReadOnlyList<MeshAsset>)` testable sans GPU, calculé avant upload. Program : ModelBounds supprimé, FrameCamera/SetupLights lisent scene.Bounds*. 172 tests (+13), capture headless : cadrage identique.
+(5) `MathHelpers.OrthographicVulkan(width, height, near, far)` ou (left,right,bottom,top,near,far) — row-vector, Y-flip, Z [0,1] ; tests sans GPU (coins connus → NDC attendus, cohérence avec PerspectiveVulkan sur le Y). (8) `Scene.BoundsMin/BoundsMax` (ou struct Aabb) calculée par SceneBuilder depuis les MeshAsset (positions × WorldTransform — le calcul existe dans Program.ModelBounds : le MIGRER dans SceneBuilder, Program consomme Scene.Bounds). AC: tests verts, Program simplifié.
 
-### M5-03 — Set 0 lumières + caméra position [code, M] — done (agent tué mi-course, complété par l'orchestrateur)
-**Résultat**: Lights.cs (DirectionalLight — Direction = sens de voyage, convention KHR_lights_punctual ; PointLight avec Range ; SceneLights 1+4 + Ambient 0.03, PointCount clampé, array fixe zéro-alloc) ; LightsUniforms 176 o std140 (11 vec4 : dir normalisée au packing avec fallback bas, count dans Ambient.w, 4×2 vec4 points — champs explicites, pas d'InlineArray) ; CameraUniforms += Position vec4 (144 o) ; Renderer : set 0 binding 0 Vertex|Fragment + binding 1 Fragment, UBOs lumières per-slot, `Lights` public mutable, double WriteUniformBuffer par frame. Tests layouts + packing + clamp. 159 tests verts, helmet (77 ressources) + box propres.
-`Lights.cs` : `DirectionalLight { Direction, Color, Intensity }`, `PointLight { Position, Color, Intensity, Range }`, `SceneLights` (1 dir + max 4 point, count). `LightsUniforms` std140 (vec4-packé, testé offsets). Renderer : binding 1 set 0 (UBO lumières per-slot, Fragment), caméra stages Vertex|Fragment, `CameraUniforms` += Position (vec4, 144 o — test offsets adapté), API `DrawScene(..., in SceneLights lights)` ou propriété Renderer.Lights (choisis propriété — moins de churn). AC: build, tests uniforms, run clean.
+### M6-03 — Renderer passe shadow + PCF [code, L→M] — pending — OWNER Renderer.cs + shaders
+(10) Découper DrawScene : RecordShadowPass / RecordScenePass / RecordTonemapPass. (9) Shadow map D32 2048² DepthAttachment|Sampled au ctor + sampler comparateur (ClampToEdge, border blanc, CompareOp LessOrEqual) + pipeline shadow (shadow.vert seul, VertexLayout position seule ? NON — stride complet 60, déclarer position uniquement = attribut 0 : OK validation car les autres ne sont pas déclarés au pipeline ; push constants 128 o = lightViewProj (0-64, Vertex) + model (64-128, Vertex) — ATTENTION : réutiliser le MÊME buffer vertex). (6) lightViewProj dans LightsUniforms (176→240, mat4 après les points ; test std140 étendu) + set 0 binding 2 shadow map (comparateur). (7) Passe shadow : BeginRendering depth-only 2048², SetViewportScissor(2048), par instance push model+lightVP, DrawIndexed ; transition shadow DepthAttachment→ShaderReadOnly avant la passe scène ; acquire ShaderReadOnly→DepthAttachment frame suivante (même pattern WAR que l'HDR). Fit ortho : centre AABB scène, rayon = demi-diagonale, vue = LookAt(centre − dir·rayon, centre), ortho couvrant le rayon, near/far serrés. mesh.frag : sampler2DShadow binding 2, coords = worldPos × lightViewProj → NDC → uv (x*0.5+0.5, y*0.5+0.5 — ATTENTION Y-flip déjà dans l'ortho), PCF 3×3 textureProj/textureOffset, ombre appliquée à la directionnelle seule. ShadowSettings {Resolution=2048, DepthBiasConstant~1.25, DepthBiasSlope~1.75} sur Renderer. AC: build, tests, run 0 validation, captures headless : ombre visible sous le casque (ajouter un sol ? NON — M6 minimal : l'auto-ombrage du casque suffit à valider ; le sol viendra avec une scène de test si besoin). Vérifier l'auto-ombrage par capture.
 
-### M5-04 — Matériau scale/strength + anisotropie device [code, S] — done (agent tué mi-course, complété par l'orchestrateur)
-**Résultat**: MaterialAsset.NormalScale/OcclusionStrength (défauts 1) ← normalTexture.scale/occlusionTexture.strength (accesseurs schéma existants), packés dans mrno.z/.w par SceneBuilder. Anisotropie : GetPhysicalDeviceFeatures → SamplerAnisotropy activée dans features2.Features si supportée + SamplerAnisotropyEnabled/MaxSamplerAnisotropy internes ; Sampler lit le device (const dormante supprimée), clamp au limit ; SamplerCache demande 8×. Test sampler par défaut ajusté (0→8).
-(a) MaterialAsset += NormalScale (défaut 1), OcclusionStrength (défaut 1) ; GltfLoader les lit (normalTexture.scale, occlusionTexture.strength — accesseurs calculés existants) ; SceneBuilder les packe dans mrno.z/.w ; test loader. (b) GraphicsDevice.CreateLogicalDevice : active samplerAnisotropy si le physical device la supporte ; Sampler : flip AnisotropyFeatureEnabled → détection runtime (propriété device), clamp maxSamplerAnisotropy (chemin dormant existant) ; SamplerCache/SceneBuilder : MaxAnisotropy 8 par défaut sur les textures de matériaux. AC: build, tests, run clean (aniso visible = mips moins baveux en angle rasant).
+### M6-04 — Sandbox réglages + captures [code, S] — pending — OWNER Program.cs
+Touche B : toggle debug view ombre (réutiliser DebugView — ajouter DEBUG_SHADOW = 9 : facteur d'ombre en niveaux de gris). L pivote déjà la lumière — vérifier que l'ombre suit. Captures : angle standard + lumière tournée, avec/sans ombre. AC: captures propres, auto-ombrage cohérent avec la direction lumière.
 
-### M5-05 — Shader PBR complet [code, M] — done — OWNER shaders/mesh.* + Renderer (Cull)
-**Résultat**: mesh.vert — normal matrix inverse-transpose (normal + tangent.xyz), worldPos varying, CameraUbo 144 o. mesh.frag — Cook-Torrance : D=GGX (α=roughness²), V=Smith height-correlated forme visibility (absorbe le dénominateur 4·NdotL·NdotV — documenté), F=Schlick F0=mix(0.04, albedo, metallic) ; kd=(1−F)(1−metallic) Lambert/π ; TBN Gram-Schmidt + handedness w, normalScale sur xy ; roughness floor 0.045, epsilons anti-NaN ; atténuation KHR_lights_punctual (1/d² fenêtré (1−(d/range)⁴)²) ; AO sur l'ambiant seul (mix par strength) ; emissive HDR ; sortie linéaire non clampée. **LightsUbo en `vec4 pointData[8]`** (arrayStride 16 → byte-identique aux champs nommés C#, offsets vérifiés par réflexion glslang : 144/64/176 tous confirmés). Cull None→Back. 159 tests, helmet+box 0 validation 0 leak.
-mesh.vert : normal matrix inverse-transpose (mat3), passe worldPos aux varyings. mesh.frag : Cook-Torrance GGX (D=GGX, G=Smith height-correlated, F=Schlick), diffus Lambert énergie-conservé (kd=(1-F)(1-metallic)), normal mapping TBN (tangente vertex + handedness w, normalScale appliqué), metallicRoughness (B=metallic, G=roughness), AO (R, strength), emissive (×factor×strength), lumières : 1 dir + boucle ponctuelles (atténuation inverse-carré avec Range), ambiant constant faible (placeholder IBL M7, p.ex. 0.03), alpha MASK conservé, sortie HDR linéaire (pas de clamp). Renderer : Cull = Back. AC: glslangValidator OK, run DamagedHelmet 0 validation — l'éclairage se juge au protocole visuel M5-09.
+### M6-05 — Self code review [test, S] — pending
+Audits csharp-lowlevel (hot path 3 passes, transitions shadow WAR, leaks) + architecte (prêt M7 : skybox entre scène et tonemap, gaps cubemap/compute tracés). AC: 0 critique.
 
-### M5-06 — Sandbox lumières + exposition [code, S] — done (orchestrateur) — OWNER Program.cs
-**Résultat**: SetupLights 3-points depuis les bounds monde — key directionnelle chaude (3), rim ponctuelle froide arrière-haut + fill chaude avant-bas (intensités × diagonale² pour compenser l'inverse-carré, Range 6× diagonale), ambiant placeholder. Touches : +/− exposition par tiers de stop (loggé en EV, clampé 1/64-64), L pivote la key light de π/8 (debug). Titre « Agapanthe — M5 PBR ». 159 tests, helmet+box 0 validation 0 leak.
+### M6-06 — Requirements validation [test, S] — pending
+Spec §6 M6 : D32 2048² ✓, slope-scaled bias ✓, PCF 3×3 ✓, stable caméra mouvement (capture 2 angles), pas d'acné (captures).
 
-### M5-07 — Self code review [test, S] — done (2× PASS, MOYEN corrigé)
-**csharp-lowlevel PASS (0 critique)** : std140 triple-vérifié (144/64/176, pointData[8] byte-identique, boucle bornée index max 7), hot path 2 passes zéro-alloc prouvé, sync saine (ownership transitions sans recouvrement, WAR HDR correct sur 2 frames in flight, depth Undefined reproduit M4), resize sans leak (_hdrInitialized reset), teardown ordonné, aniso câblée. **MOYEN-1 corrigé** : NaN TBN quand N ∥ tangente placeholder (faces ±X de BoxTextured — 0*NaN=NaN, la normal map neutre ne sauvait pas) → fallback axe ⊥N si résidu Gram-Schmidt < 1e-8. **MINEUR-2 corrigé** : early-out NdotL ≤ 0 dans shade() (évite l'antipode L=−V ET économise le BRDF dos à la lumière). MINEUR-4 doc « twelve→eleven » corrigé. MINEUR-3 (normale sommet nulle) accepté — glTF valide en fournit.
-**Architecte PASS** : section « décisions M6 » ci-dessus.
-
-### M5-08 — Requirements validation [test, S] — done
-Spec §3.3 : passes forward HDR → tonemap ✓ (shadow/skybox = M6/M7 par design) ; §3.4 : set 0 caméra+lumières ✓ (shadow/IBL placeholders différés M6/M7, acté par revue architecte — coût nul, layout transient) ; §6 M5 : PBR metallic-roughness ✓ (GGX/Smith/Schlick), 1 dir + N ponctuelles ✓ (4, KHR punctual), tone mapping ✓ (ACES), normal mapping ✓, AO ✓, emissive+strength ✓, exposition ✓. Protocole visuel §5 : gabarit prêt, capture humaine en attente.
-
-### M5-09 — Full verification + protocole visuel [test, S] — done (partie machine)
-```
-Build 0 Warning(s). Passed! 159/159.
-DamagedHelmet 120 frames : 0 validation, no leaks (77 ressources), EXIT=0.
-BoxTextured 60 frames : 0 validation, no leaks (63 ressources), EXIT=0.
-glslangValidator vulkan1.3 : mesh.frag OK (post-fix NaN).
-```
-**Partie humaine en attente** : docs/visual-checks/2026-07-05-m5-damagedhelmet.md (gabarit + critères + procédure viewer Khronos) — l'utilisateur capture et coche.
-
-## Revue architecte M5-07 (PASS) — décisions à acter au démarrage M6
-
-Multi-passes M5 = socle correct pour M6, insertion par extension, MAIS « trivial » était optimiste : 4 primitives manquent (toutes additives, ~1 champ chacune). Liste actionnable :
-
-1. `RenderingAttachments.Color` → nullable (depth-only pass), émission conditionnelle.
-2. Pipeline depth-only : FragmentShader + ColorFormat optionnels, StageCount/blend conditionnels (extension propre plutôt que shadow.frag trivial).
-3. `GraphicsPipelineDesc` += DepthBias{Constant,Slope} (slope-scaled bias, état statique — spec §6 M6).
-4. `SamplerDesc` += CompareOp? → CompareEnable câblé (sampler2DShadow) ; ClampToEdge + border blanc hors-frustum.
-5. `MathHelpers.OrthographicVulkan` (Y-flip, Z [0,1], testé sans GPU).
-6. Set 0 binding 2 = shadow sampler comparateur ; lightViewProj mat4 appended dans LightsUniforms (176→240, étendre test std140).
-7. **Passe shadow sans descriptor set** : model + lightViewProj = 128 o pile en push constants (budget garanti).
-8. `Scene` expose une AABB monde (calculée au SceneBuilder) → fit ortho dans le Renderer ; DirectionalLight reste pure ; réglages en Renderer.ShadowSettings.
-9. Shadow map 2048² D32 DepthAttachment|Sampled créée UNE fois au ctor (invariante au resize — hors EnsureTargets).
-10. Découper DrawScene en RecordShadowPass/RecordScenePass/RecordTonemapPass avant insertion (mécanique, interne).
-
-Ce qui marche déjà sans retouche : TransitionImage DepthAttachment→ShaderReadOnly (aspect dérivé), GpuImage DepthAttachment|Sampled, SetViewportScissor(2048²) dynamique.
-
-Gaps M7 tracés (non bloquants M6) : GpuImage 2D-only (cubemap → ArrayLayers + ViewType.Cube), CommandList sans dispatch compute (spec §3.3, IBL). Skybox = passe entre scène et tonemap dans la HDR (LoadOp Load, depth LessOrEqual sans write).
-
-Dette M5 acceptable : ACES fixe + exposition manuelle (auto-exposure hors phase 1 confirmé), ClearColor obsolète dès que le skybox couvre (M7), pas de frame graph (jamais demandé).
+### M6-07 — Full verification + protocole visuel [test, S] — pending
+build/tests/runs 2 fixtures + captures headless annotées dans docs/visual-checks/ (l'utilisateur confirme à l'écran).
 
 ## Deferred Work
 
-- Ombres → M6 (passe depth-only : l'infrastructure multi-passes M5-01/02 la rend triviale à insérer).
-- IBL/skybox → M7 (l'ambiant constant 0.03 est le placeholder).
-- Feel souris, upload async, hot reload → M8.
-- Instancing (transform sur MeshInstance) → phase 2.
+- CSM (cascades) → phase 2 (spec §6 : « 1 cascade, CSM ensuite »).
+- Sol/plan de test pour ombres portées inter-objets → si l'auto-ombrage ne suffit pas à valider.
+- Ombres des ponctuelles (cube maps) → phase 2.
+- Peter-panning vs acné : Cull Back + bias d'abord ; Cull Front en shadow pass si problème.
 
 ## Log
 
-- 2026-07-05: session 5 ouverte. Board S4 archivé. DAG 9 tâches, 6 vagues. Plan architecte S4 acté intégralement (7 décisions + aniso S3).
-- 2026-07-05: W1-W5 exécutées (a84ebac, 96f6946, 16e9163, 5b1b0e2+7651da6, 2d76b32). W3 : deux agents tués par limites de session, complétés par l'orchestrateur. M5-07 : 2× PASS, NaN TBN (BoxTextured ±X) + early-out NdotL corrigés. M5-08/09 machine : 159 tests, 2 fixtures 0 validation 0 leak. **Session 5 close — M5 atteint** (PBR Cook-Torrance + HDR/ACES sur GPU). Capture visuelle humaine : gabarit docs/visual-checks/. M6 : 10 décisions architecte actées (section dédiée).
-- 2026-07-05 (post-clôture): protocole visuel M5-09 exécuté par l'utilisateur — a révélé un BUG réel : FrontFace.Clockwise culait les faces avant (coque du casque absente, intérieur visible). Cause : dérivation du winding sans le signe moins de la formule Vulkan. Fix : CounterClockwise (0dd9ff1) + outillage capture headless (GpuReadback, SaveHdrCapture, AGAPANTHE_CAPTURE/VIEW) + vues debug shader (touche N) + plancher spéculaire f0 dans l'ambiant (a8cc15c). Validé visuellement par l'utilisateur. **M5 définitivement PASS.**
+- 2026-07-05: session 6 ouverte. Board S5 archivé. DAG 7 tâches, 4 vagues. Les 10 décisions architecte S5 actées.

@@ -21,6 +21,24 @@ public static class MathHelpers
         return m;
     }
 
+    /// <summary>
+    /// Right-handed, centred orthographic projection for Vulkan: depth [0, 1], Y flipped so world +Y
+    /// maps to up on screen despite Vulkan's Y-down clip space. Same convention as
+    /// <see cref="PerspectiveVulkan"/>.
+    /// <para>
+    /// The base <see cref="Matrix4x4.CreateOrthographic"/> already maps view-space depth to [0, 1]
+    /// (view z = -near → NDC z = 0, view z = -far → NDC z = 1; NOT the OpenGL [-1, 1] range), and leaves
+    /// Y unflipped (Y-up NDC). Negating M22 — exactly as <see cref="PerspectiveVulkan"/> does — turns it
+    /// into Vulkan's Y-down clip space, so a view-space +Y point projects to a negative NDC Y.
+    /// </para>
+    /// </summary>
+    public static Matrix4x4 OrthographicVulkan(float width, float height, float near, float far)
+    {
+        var m = Matrix4x4.CreateOrthographic(width, height, near, far);
+        m.M22 = -m.M22;
+        return m;
+    }
+
     /// <summary>Right-handed look-at view matrix (System.Numerics convention).</summary>
     public static Matrix4x4 LookAt(Vector3 eye, Vector3 target, Vector3 up)
         => Matrix4x4.CreateLookAt(eye, target, up);
