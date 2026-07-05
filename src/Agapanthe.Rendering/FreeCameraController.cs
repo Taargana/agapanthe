@@ -17,7 +17,8 @@ public readonly struct CameraInput
         bool moveRight,
         bool moveUp,
         bool moveDown,
-        Vector2 lookDelta)
+        Vector2 lookDelta,
+        bool sprint = false)
     {
         MoveForward = moveForward;
         MoveBackward = moveBackward;
@@ -26,25 +27,29 @@ public readonly struct CameraInput
         MoveUp = moveUp;
         MoveDown = moveDown;
         LookDelta = lookDelta;
+        Sprint = sprint;
     }
 
-    /// <summary>W — move along the camera's forward vector.</summary>
+    /// <summary>W — move along the camera's horizontal forward (yaw only, FPS style).</summary>
     public bool MoveForward { get; }
 
-    /// <summary>S — move opposite the forward vector.</summary>
+    /// <summary>S — move opposite the horizontal forward.</summary>
     public bool MoveBackward { get; }
 
-    /// <summary>A — move along -right.</summary>
+    /// <summary>A — strafe along -right.</summary>
     public bool MoveLeft { get; }
 
-    /// <summary>D — move along +right.</summary>
+    /// <summary>D — strafe along +right.</summary>
     public bool MoveRight { get; }
 
-    /// <summary>Space / E — move along world +Y.</summary>
+    /// <summary>Space — move along world +Y.</summary>
     public bool MoveUp { get; }
 
-    /// <summary>Ctrl / Q — move along world -Y.</summary>
+    /// <summary>Ctrl — move along world -Y.</summary>
     public bool MoveDown { get; }
+
+    /// <summary>Shift — multiply speed by <see cref="FreeCameraController.SprintMultiplier"/>.</summary>
+    public bool Sprint { get; }
 
     /// <summary>
     /// Mouse motion since the previous frame, in <b>pixels</b>. X is screen-right,
@@ -55,13 +60,14 @@ public readonly struct CameraInput
 }
 
 /// <summary>
-/// Fly-style controller: WASD moves in the view plane, Space/Ctrl (or E/Q) move
-/// vertically along world up, and mouse motion drives yaw/pitch. Pitch is clamped to
-/// ±89° to keep the view matrix away from the gimbal poles.
+/// Basic FPS controller: the mouse drives yaw/pitch, WASD moves in the <b>horizontal plane</b>
+/// (yaw only — looking up or down never changes the travel direction), Space/Ctrl move straight
+/// up/down along world Y, Shift sprints. Pitch is clamped to ±89° to keep the view matrix away
+/// from the gimbal poles.
 /// </summary>
 /// <remarks>
 /// Sign conventions (see also <see cref="Camera"/>):
-/// mouse-right (LookDelta.X &gt; 0) increases <see cref="Camera.Yaw"/> → turns toward +X;
+/// mouse-right (LookDelta.X &gt; 0) increases <see cref="Camera.Yaw"/> → turns right;
 /// mouse-up (LookDelta.Y &lt; 0) increases <see cref="Camera.Pitch"/> → looks up.
 /// <see cref="Update"/> performs no managed allocations.
 /// </remarks>
@@ -70,8 +76,15 @@ public sealed class FreeCameraController
     /// <summary>Hard pitch limit in radians (±89°), keeping the view off the poles.</summary>
     private const float MaxPitch = 89f * (MathF.PI / 180f);
 
-    /// <summary>Movement speed in world units per second.</summary>
+    /// <summary>
+    /// Movement speed in world units per second. Scale this to the scene (e.g. a fraction of the
+    /// model's bounding-box diagonal) — a fixed value feels absurdly fast on small models and
+    /// glacial on large ones.
+    /// </summary>
     public float MoveSpeed { get; set; } = 5f;
+
+    /// <summary>Speed factor applied while <see cref="CameraInput.Sprint"/> is held.</summary>
+    public float SprintMultiplier { get; set; } = 3f;
 
     /// <summary>Horizontal (yaw) look sensitivity in radians per pixel of mouse motion
     /// (default ≈ 0.057°/px, a mid-range FPS feel: a full turn ≈ 6300 px of travel).</summary>
@@ -101,15 +114,28 @@ public sealed class FreeCameraController
         camera.Pitch -= input.LookDelta.Y * LookSensitivityY;
         camera.Pitch = Math.Clamp(camera.Pitch, -MaxPitch, MaxPitch);
 
-        // --- Move: build a direction in the camera basis, normalize so diagonals aren't faster. ---
+        // --- Move (FPS style): W/S travel along the yaw heading projected on the ground plane,
+        // A/D strafe, Space/Ctrl are pure world-vertical. Pitch never bends the travel path. ---
         float strafe = (input.MoveRight ? 1f : 0f) - (input.MoveLeft ? 1f : 0f);
         float lift = (input.MoveUp ? 1f : 0f) - (input.MoveDown ? 1f : 0f);
         float advance = (input.MoveForward ? 1f : 0f) - (input.MoveBackward ? 1f : 0f);
 
-        Vector3 direction = (camera.Forward * advance) + (camera.Right * strafe) + (Vector3.UnitY * lift);
-        if (direction != Vector3.Zero)
+        if (strafe == 0f && lift == 0f && advance == 0f)
         {
-            camera.Position += Vector3.Normalize(direction) * (MoveSpeed * deltaSeconds);
+            return;
         }
+
+        // Horizontal heading from yaw alone — same formula as Camera.Forward with pitch = 0.
+        var forwardFlat = new Vector3(MathF.Sin(camera.Yaw), 0f, -MathF.Cos(camera.Yaw));
+        var right = new Vector3(-forwardFlat.Z, 0f, forwardFlat.X); // cross(forwardFlat, +Y)
+
+        var direction = (forwardFlat * advance) + (right * strafe) + (Vector3.UnitY * lift);
+        if (direction == Vector3.Zero)
+        {
+            return; // Opposing keys cancelled out.
+        }
+
+        var speed = MoveSpeed * (input.Sprint ? SprintMultiplier : 1f);
+        camera.Position += Vector3.Normalize(direction) * (speed * deltaSeconds);
     }
 }

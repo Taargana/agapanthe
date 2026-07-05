@@ -259,8 +259,12 @@ public sealed class EngineWindow : IDisposable
 
         var center = new Vector2(_window.Size.X / 2f, _window.Size.Y / 2f);
         _mouse.Position = center;
-        _lastMousePosition = center;
-        _hasLastMousePosition = true;
+        // Drop the reference instead of assuming the warp landed exactly at `center`: the next
+        // MouseMove (the warp's own synthetic event) re-establishes it at the cursor's *actual*
+        // reported position. Assuming the value invited a constant phantom delta every frame
+        // whenever warp coordinates didn't match move-event coordinates (camera drifting on its
+        // own while captured).
+        _hasLastMousePosition = false;
     }
 
     public void Dispose()

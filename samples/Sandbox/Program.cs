@@ -72,7 +72,7 @@ window.Loaded += () =>
 
     // Frame the model: compute its world-space AABB, sit the camera back by 1.5x the diagonal along a
     // slightly-raised front direction, and orient yaw/pitch to look at the centre.
-    FrameCamera(camera, model);
+    FrameCamera(camera, controller, model);
 
     frameRenderer = new FrameRenderer(device, swapchain, () => window.FramebufferSize)
     {
@@ -153,7 +153,8 @@ window.Updated += dt =>
         moveRight: window.IsKeyDown(Key.D),
         moveUp: window.IsKeyDown(Key.Space),
         moveDown: window.IsKeyDown(Key.ControlLeft),
-        lookDelta: window.MouseDelta);
+        lookDelta: window.MouseDelta,
+        sprint: window.IsKeyDown(Key.ShiftLeft));
     controller.Update(camera, (float)dt, in input);
 };
 
@@ -241,7 +242,7 @@ static void LogModelStats(Agapanthe.Assets.Model.ModelAsset model, string path)
 
 // Positions the camera to frame the whole model: world-space AABB over every mesh's transformed
 // positions, then sit back 1.5x the diagonal along a slightly-raised front direction and aim at the centre.
-static void FrameCamera(Camera camera, Agapanthe.Assets.Model.ModelAsset model)
+static void FrameCamera(Camera camera, FreeCameraController controller, Agapanthe.Assets.Model.ModelAsset model)
 {
     var min = new Vector3(float.PositiveInfinity);
     var max = new Vector3(float.NegativeInfinity);
@@ -284,4 +285,9 @@ static void FrameCamera(Camera camera, Agapanthe.Assets.Model.ModelAsset model)
     // Scale near/far to the model so nothing clips regardless of its absolute size.
     camera.Near = MathF.Max(diagonal * 0.01f, 0.01f);
     camera.Far = (distance + diagonal) * 4f;
+
+    // Scale the travel speed to the model too: crossing the whole bounding box should take a
+    // couple of seconds regardless of the model's absolute size (a fixed speed felt insane on
+    // a 1-unit helmet). Shift sprints at 3x.
+    controller.MoveSpeed = MathF.Max(diagonal * 0.5f, 0.01f);
 }
