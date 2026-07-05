@@ -6,7 +6,9 @@ using Agapanthe.Platform;
 using Agapanthe.Rendering;
 using Silk.NET.Input;
 
-// M4 validation app: loads a real glTF 2.0 model and renders it textured through the full pipeline
+// M5 validation app: loads a real glTF 2.0 model and renders it with full Cook-Torrance PBR
+// (3-point HDR lighting, ACES tonemap; +/- adjusts exposure, L swings the key light) through
+// GltfLoader (CPU DTOs) -> SceneBuilder -> Renderer. Original M4 pipeline description:
 // GltfLoader (CPU DTOs) -> SceneBuilder (GPU upload: meshes, textures + mip chains, per-material set 1)
 // -> Renderer.DrawScene (per-frame camera set 0, per-instance material set 1 + world transform).
 // The Sandbox no longer wires any Vulkan object by hand — the Renderer owns the mesh pipeline, both set
@@ -36,7 +38,7 @@ if (modelPath is null)
 var maxFrames = int.TryParse(Environment.GetEnvironmentVariable("AGAPANTHE_MAX_FRAMES"), out var mf) ? mf : -1;
 var renderedFrames = 0;
 
-using var window = new EngineWindow("Agapanthe — M4 glTF", 1280, 720);
+using var window = new EngineWindow("Agapanthe — M5 PBR", 1280, 720);
 
 GraphicsDevice? device = null;
 Swapchain? swapchain = null;
@@ -73,6 +75,11 @@ window.Loaded += () =>
     // Frame the model: compute its world-space AABB, sit the camera back by 1.5x the diagonal along a
     // slightly-raised front direction, and orient yaw/pitch to look at the centre.
     FrameCamera(camera, controller, model);
+
+    // Default M5 lighting: a warm directional key (sun) plus a cool rim and a soft fill point
+    // light placed from the model bounds — a classic 3-point setup that reads PBR materials
+    // well. HDR intensities (> 1) are expected; the ACES tonemap compresses them.
+    SetupLights(renderer.Lights, model);
 
     // The scene clear color lives on the Renderer now (it owns the scene pass); the FrameRenderer only
     // drives sync/acquire/present and no longer carries a clear color.
@@ -128,6 +135,27 @@ window.KeyPressed += key =>
         case Key.End:
             controller.LookSensitivityY = MathF.Max(controller.LookSensitivityY / sensStep, sensMin);
             LogSensitivity();
+            break;
+        // Exposure: +/- in thirds of a stop (x2^(1/3)), clamped to [1/64, 64].
+        case Key.Equal or Key.KeypadAdd when renderer is not null:
+            renderer.Exposure = MathF.Min(renderer.Exposure * 1.26f, 64f);
+            Log.Info($"Exposure: {renderer.Exposure:F3} ({MathF.Log2(renderer.Exposure):+0.0;-0.0} EV)");
+            break;
+        case Key.Minus or Key.KeypadSubtract when renderer is not null:
+            renderer.Exposure = MathF.Max(renderer.Exposure / 1.26f, 1f / 64f);
+            Log.Info($"Exposure: {renderer.Exposure:F3} ({MathF.Log2(renderer.Exposure):+0.0;-0.0} EV)");
+            break;
+        // L: swing the key light around the vertical axis (lighting debug).
+        case Key.L when renderer is not null:
+            var d = renderer.Lights.Directional;
+            var yawStep = MathF.PI / 8f;
+            var (sin, cos) = MathF.SinCos(yawStep);
+            d.Direction = new Vector3(
+                (d.Direction.X * cos) - (d.Direction.Z * sin),
+                d.Direction.Y,
+                (d.Direction.X * sin) + (d.Direction.Z * cos));
+            renderer.Lights.Directional = d;
+            Log.Info($"Key light direction: {d.Direction}");
             break;
     }
 
@@ -243,6 +271,56 @@ static void LogModelStats(Agapanthe.Assets.Model.ModelAsset model, string path)
 
 // Positions the camera to frame the whole model: world-space AABB over every mesh's transformed
 // positions, then sit back 1.5x the diagonal along a slightly-raised front direction and aim at the centre.
+// 3-point lighting from the model's world bounds: warm key (directional), cool rim point light
+// behind/above, soft warm fill point light front/below. Ranges scale with the model diagonal.
+static void SetupLights(SceneLights lights, Agapanthe.Assets.Model.ModelAsset model)
+{
+    var (center, diagonal) = ModelBounds(model);
+    var reach = MathF.Max(diagonal, 0.001f);
+
+    lights.Directional = new DirectionalLight
+    {
+        Direction = new Vector3(0.4f, -0.7f, -0.6f), // down, slightly right, toward the model front
+        Color = new Vector3(1f, 0.96f, 0.9f),        // warm sun
+        Intensity = 3f,
+    };
+    lights.Points[0] = new PointLight
+    {
+        Position = center + new Vector3(-0.8f, 0.9f, -1.1f) * reach, // rim: behind-left, above
+        Color = new Vector3(0.55f, 0.65f, 1f),                       // cool blue
+        Intensity = 4f * reach * reach,                              // inverse-square: scale by distance²
+        Range = 6f * reach,
+    };
+    lights.Points[1] = new PointLight
+    {
+        Position = center + new Vector3(0.9f, -0.2f, 1.2f) * reach,  // fill: front-right, slightly low
+        Color = new Vector3(1f, 0.85f, 0.7f),                        // warm
+        Intensity = 1.5f * reach * reach,
+        Range = 6f * reach,
+    };
+    lights.PointCount = 2;
+    lights.Ambient = new Vector3(0.03f, 0.03f, 0.035f);
+}
+
+static (Vector3 Center, float Diagonal) ModelBounds(Agapanthe.Assets.Model.ModelAsset model)
+{
+    var min = new Vector3(float.PositiveInfinity);
+    var max = new Vector3(float.NegativeInfinity);
+    foreach (var mesh in model.Meshes)
+    {
+        foreach (var localPos in mesh.Positions)
+        {
+            var p = Vector3.Transform(localPos, mesh.WorldTransform);
+            min = Vector3.Min(min, p);
+            max = Vector3.Max(max, p);
+        }
+    }
+
+    return min.X > max.X
+        ? (Vector3.Zero, 1f)
+        : ((min + max) * 0.5f, Vector3.Distance(min, max));
+}
+
 static void FrameCamera(Camera camera, FreeCameraController controller, Agapanthe.Assets.Model.ModelAsset model)
 {
     var min = new Vector3(float.PositiveInfinity);
