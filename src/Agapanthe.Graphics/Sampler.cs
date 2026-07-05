@@ -61,22 +61,15 @@ public readonly record struct SamplerDesc(
 /// used it leaves flight.
 /// </para>
 /// <para>
-/// <b>Anisotropy.</b> <see cref="SamplerDesc.MaxAnisotropy"/> is honoured only when the
-/// <c>samplerAnisotropy</c> device feature was enabled at logical-device creation. As of M3,
-/// <see cref="GraphicsDevice.CreateLogicalDevice"/> enables only <c>dynamicRendering</c> and
-/// <c>synchronization2</c> — <b>not</b> <c>samplerAnisotropy</c> — so anisotropy is <b>silently disabled</b>
-/// (a debug log notes it if requested). Enabling it is a device-creation change (out of this task's
-/// scope); flip <see cref="AnisotropyFeatureEnabled"/> once the feature is turned on and the clamp path
-/// below activates against the device limit.
+/// <b>Anisotropy.</b> <see cref="SamplerDesc.MaxAnisotropy"/> is honoured when the
+/// <c>samplerAnisotropy</c> device feature was enabled at logical-device creation (M5:
+/// <see cref="GraphicsDevice"/> enables it whenever the hardware supports it). The requested value is
+/// clamped to the device's <c>maxSamplerAnisotropy</c> limit; on hardware without the feature the
+/// sampler falls back to isotropic filtering with a debug log.
 /// </para>
 /// </summary>
 public sealed unsafe class Sampler : IDisposable
 {
-    // Tracks whether the samplerAnisotropy device feature is enabled at device creation. Kept as a
-    // constant because it mirrors GraphicsDevice.CreateLogicalDevice, which does not enable it in M3.
-    // Enabling anisotropy requires enabling the feature there first; then set this to true.
-    private const bool AnisotropyFeatureEnabled = false;
-
     // VK_LOD_CLAMP_NONE — sample the entire mip chain with no artificial max LOD.
     private const float LodClampNone = 1000f;
 
@@ -96,12 +89,11 @@ public sealed unsafe class Sampler : IDisposable
         // Anisotropy is only legal when the device feature is enabled; otherwise it MUST stay off and
         // MaxAnisotropy MUST be 1.0 (a validation error otherwise). See the class remarks.
         var anisotropyRequested = desc.MaxAnisotropy > 0f;
-        var anisotropyEnabled = AnisotropyFeatureEnabled && anisotropyRequested;
+        var anisotropyEnabled = device.SamplerAnisotropyEnabled && anisotropyRequested;
         var maxAnisotropy = 1f;
         if (anisotropyEnabled)
         {
-            var limits = vk.GetPhysicalDeviceProperties(device.PhysicalDevice).Limits;
-            maxAnisotropy = Math.Min(desc.MaxAnisotropy, limits.MaxSamplerAnisotropy);
+            maxAnisotropy = Math.Min(desc.MaxAnisotropy, device.MaxSamplerAnisotropy);
         }
         else if (anisotropyRequested)
         {

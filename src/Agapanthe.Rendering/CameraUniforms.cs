@@ -29,9 +29,14 @@ public readonly struct CameraUniforms
     /// <summary>Projection matrix (offset 64, 64 bytes).</summary>
     public readonly Matrix4x4 Proj;
 
-    public CameraUniforms(Matrix4x4 view, Matrix4x4 proj)
+    /// <summary>Eye position in world space: xyz + padding (offset 128, 16 bytes — total 144).
+    /// The PBR shader derives the view vector V from it (spec §3.4).</summary>
+    public readonly Vector4 Position;
+
+    public CameraUniforms(Matrix4x4 view, Matrix4x4 proj, Vector3 position)
     {
         View = view;
         Proj = proj;
+        Position = new Vector4(position, 0f);
     }
 }

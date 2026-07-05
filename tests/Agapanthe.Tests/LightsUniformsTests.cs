@@ -1,0 +1,81 @@
+using System.Numerics;
+using System.Runtime.InteropServices;
+using Agapanthe.Rendering;
+
+namespace Agapanthe.Tests;
+
+/// <summary>std140 layout contracts for the set-0 uniform blocks (camera + lights, M5).</summary>
+public sealed class LightsUniformsTests
+{
+    [Fact]
+    public void LightsUniforms_Is176BytesOfContiguousVec4s()
+    {
+        // 3 header vec4s + 4 point lights x 2 vec4s = 11 x 16 = 176. The shader declares the
+        // matching std140 block; any size drift breaks the GPU read silently.
+        Assert.Equal(176, Marshal.SizeOf<LightsUniforms>());
+        Assert.Equal(0, (int)Marshal.OffsetOf<LightsUniforms>(nameof(LightsUniforms.DirectionalDirection)));
+        Assert.Equal(16, (int)Marshal.OffsetOf<LightsUniforms>(nameof(LightsUniforms.DirectionalColorIntensity)));
+        Assert.Equal(32, (int)Marshal.OffsetOf<LightsUniforms>(nameof(LightsUniforms.AmbientPointCount)));
+        Assert.Equal(48, (int)Marshal.OffsetOf<LightsUniforms>(nameof(LightsUniforms.Point0PositionRange)));
+        Assert.Equal(160, (int)Marshal.OffsetOf<LightsUniforms>(nameof(LightsUniforms.Point3ColorIntensity)));
+    }
+
+    [Fact]
+    public void CameraUniforms_Is144BytesWithPositionAt128()
+    {
+        Assert.Equal(144, Marshal.SizeOf<CameraUniforms>());
+        Assert.Equal(128, (int)Marshal.OffsetOf<CameraUniforms>(nameof(CameraUniforms.Position)));
+    }
+
+    [Fact]
+    public void LightsUniforms_NormalizesDirectionAndPacksCount()
+    {
+        var lights = new SceneLights
+        {
+            Directional = new DirectionalLight
+            {
+                Direction = new Vector3(0f, -2f, 0f), // non-unit on purpose
+                Color = new Vector3(1f, 0.9f, 0.8f),
+                Intensity = 3f,
+            },
+            Ambient = new Vector3(0.05f, 0.05f, 0.05f),
+        };
+        lights.Points[0] = new PointLight
+        {
+            Position = new Vector3(1f, 2f, 3f),
+            Color = Vector3.One,
+            Intensity = 10f,
+            Range = 25f,
+        };
+        lights.PointCount = 1;
+
+        var packed = new LightsUniforms(lights);
+
+        Assert.Equal(new Vector4(0f, -1f, 0f, 0f), packed.DirectionalDirection); // normalized
+        Assert.Equal(3f, packed.DirectionalColorIntensity.W);
+        Assert.Equal(1f, packed.AmbientPointCount.W); // count in w
+        Assert.Equal(new Vector4(1f, 2f, 3f, 25f), packed.Point0PositionRange);
+        Assert.Equal(10f, packed.Point0ColorIntensity.W);
+    }
+
+    [Fact]
+    public void SceneLights_PointCountClampsToCapacity()
+    {
+        var lights = new SceneLights { PointCount = 99 };
+        Assert.Equal(SceneLights.MaxPointLights, lights.PointCount);
+        lights.PointCount = -3;
+        Assert.Equal(0, lights.PointCount);
+    }
+
+    [Fact]
+    public void LightsUniforms_ZeroDirectionFallsBackToStraightDown()
+    {
+        var lights = new SceneLights
+        {
+            Directional = new DirectionalLight { Direction = Vector3.Zero, Color = Vector3.One, Intensity = 1f },
+        };
+
+        var packed = new LightsUniforms(lights);
+        Assert.Equal(new Vector4(0f, -1f, 0f, 0f), packed.DirectionalDirection);
+    }
+}

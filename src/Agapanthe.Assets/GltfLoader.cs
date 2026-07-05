@@ -251,6 +251,8 @@ public static class GltfLoader
                     : Vector4.One,
                 MetallicFactor = pbr?.MetallicFactor ?? 1f,
                 RoughnessFactor = pbr?.RoughnessFactor ?? 1f,
+                NormalScale = material.NormalTexture?.Scale ?? 1f,
+                OcclusionStrength = material.OcclusionTexture?.Strength ?? 1f,
                 EmissiveFactor = material.EmissiveFactor is { Length: 3 } e ? new Vector3(e[0], e[1], e[2]) : Vector3.Zero,
                 EmissiveStrength = material.Extensions?.EmissiveStrength?.EmissiveStrength ?? 1f,
                 AlphaMode = alphaMode,

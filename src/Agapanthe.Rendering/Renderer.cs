@@ -38,6 +38,7 @@ public sealed class Renderer : IDisposable
 
     // Per-frame-slot camera UBOs: host-visible, rewritten every frame (Write<T> is correct — no staging).
     private readonly GpuBuffer?[] _cameraUbos = new GpuBuffer?[GraphicsDevice.FramesInFlight];
+    private readonly GpuBuffer?[] _lightsUbos = new GpuBuffer?[GraphicsDevice.FramesInFlight];
 
     private readonly GraphicsDevice _device;
     private ShaderCompiler? _shaderCompiler;
@@ -96,10 +97,14 @@ public sealed class Renderer : IDisposable
             _vertexShader = new ShaderModule(device, vertSpirv, ShaderStage.Vertex);
             _fragmentShader = new ShaderModule(device, fragSpirv, ShaderStage.Fragment);
 
-            // Set 0 = per-frame camera. Vertex-only: the M4 fragment shader does not sample the camera.
+            // Set 0 = per-frame data (spec §3.4): binding 0 camera (view/proj/position — the PBR
+            // fragment stage needs the eye position), binding 1 lights (M5, decision 4).
             _frameSetLayout = new DescriptorSetLayout(
                 device,
-                [new DescriptorBinding(0, DescriptorKind.UniformBuffer, ShaderStages.Vertex)]);
+                [
+                    new DescriptorBinding(0, DescriptorKind.UniformBuffer, ShaderStages.Vertex | ShaderStages.Fragment),
+                    new DescriptorBinding(1, DescriptorKind.UniformBuffer, ShaderStages.Fragment),
+                ]);
 
             // Set 1 = per-material, frozen 6-binding PBR shape. The allocator is public so SceneBuilder can
             // allocate persistent material sets against this layout.
@@ -130,6 +135,7 @@ public sealed class Renderer : IDisposable
             for (var i = 0; i < _cameraUbos.Length; i++)
             {
                 _cameraUbos[i] = new GpuBuffer(device, (ulong)Unsafe.SizeOf<CameraUniforms>(), BufferUsage.Uniform);
+                _lightsUbos[i] = new GpuBuffer(device, (ulong)Unsafe.SizeOf<LightsUniforms>(), BufferUsage.Uniform);
             }
 
             // --- Tonemap pass (decision 3): fullscreen triangle, samples the HDR target, writes the swapchain.
@@ -188,6 +194,12 @@ public sealed class Renderer : IDisposable
     /// 3). 1 is neutral; the Sandbox drives it in log2 steps. Pushed as a 4-byte fragment push constant.
     /// </summary>
     public float Exposure { get; set; } = 1f;
+
+    /// <summary>
+    /// Scene lighting state, packed into set 0 binding 1 every frame. Mutate it directly
+    /// (directional key light, up to 4 point lights, constant ambient placeholder until IBL M7).
+    /// </summary>
+    public SceneLights Lights { get; } = new();
 
     /// <summary>
     /// Records the two-pass HDR frame (architect decisions 2-3) into <paramref name="cmd"/>, resolving into the
@@ -264,11 +276,16 @@ public sealed class Renderer : IDisposable
 
         // Write this frame slot's camera UBO in place (host-visible), then point a fresh per-frame set 0 at it.
         var ubo = _cameraUbos[frame.Slot]!;
-        var uniforms = new CameraUniforms(camera.ViewMatrix, camera.ProjectionMatrix);
+        var uniforms = new CameraUniforms(camera.ViewMatrix, camera.ProjectionMatrix, camera.Position);
         ubo.Write(new ReadOnlySpan<CameraUniforms>(in uniforms));
+
+        var lightsUbo = _lightsUbos[frame.Slot]!;
+        var lightsUniforms = new LightsUniforms(Lights);
+        lightsUbo.Write(new ReadOnlySpan<LightsUniforms>(in lightsUniforms));
 
         var frameSet = frame.AllocateSet(_frameSetLayout!);
         frame.WriteUniformBuffer(frameSet, 0, ubo);
+        frame.WriteUniformBuffer(frameSet, 1, lightsUbo);
 
         cmd.BindPipeline(pipeline);
         cmd.BindDescriptorSet(pipeline, 0, frameSet); // set 0: per-frame camera
@@ -397,9 +414,10 @@ public sealed class Renderer : IDisposable
         _materialSetLayout?.Dispose();
         _frameSetLayout?.Dispose();
         _materialAllocator?.Dispose();
-        foreach (var ubo in _cameraUbos)
+        for (var i = 0; i < _cameraUbos.Length; i++)
         {
-            ubo?.Dispose();
+            _cameraUbos[i]?.Dispose();
+            _lightsUbos[i]?.Dispose();
         }
 
         _fragmentShader?.Dispose();

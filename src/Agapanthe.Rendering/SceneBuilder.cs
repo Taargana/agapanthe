@@ -204,11 +204,11 @@ public static class SceneBuilder
         var occlusion = Resolve(asset.OcclusionImage, slots.LinearWhite, textures);
         var emissive = Resolve(asset.EmissiveImage, slots.WhiteSrgb, textures);
 
-        // Packing must match MaterialUniforms / the M4-M5 fragment shader. normalScale and occlusionStrength
-        // are not in the DTO subset, so they default to 1.
+        // Packing must match MaterialUniforms / the M4-M5 fragment shader:
+        // mrno = (metallic, roughness, normalScale, occlusionStrength).
         var uniforms = new MaterialUniforms(
             asset.BaseColorFactor,
-            new Vector4(asset.MetallicFactor, asset.RoughnessFactor, 1f, 1f),
+            new Vector4(asset.MetallicFactor, asset.RoughnessFactor, asset.NormalScale, asset.OcclusionStrength),
             new Vector4(asset.EmissiveFactor, asset.EmissiveStrength),
             new Vector4(asset.AlphaCutoff, (float)(int)asset.AlphaMode, 0f, 0f));
 

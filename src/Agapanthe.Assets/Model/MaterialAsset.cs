@@ -32,6 +32,18 @@ public sealed record MaterialAsset
     /// <summary>Roughness scalar in [0,1]. glTF default <c>1</c>.</summary>
     public float RoughnessFactor { get; init; } = 1f;
 
+    /// <summary>
+    /// Scales the sampled tangent-space normal's X/Y (glTF <c>normalTexture.scale</c>). Default <c>1</c>
+    /// (no scaling); <c>&lt;1</c> flattens the surface detail. Applied by the M5 fragment shader.
+    /// </summary>
+    public float NormalScale { get; init; } = 1f;
+
+    /// <summary>
+    /// Interpolates ambient occlusion toward 1 (glTF <c>occlusionTexture.strength</c>): the shader uses
+    /// <c>1 + strength · (ao − 1)</c>. Default <c>1</c> (full occlusion); <c>0</c> disables the AO map.
+    /// </summary>
+    public float OcclusionStrength { get; init; } = 1f;
+
     /// <summary>Linear emissive color. glTF default <c>(0,0,0)</c>.</summary>
     public Vector3 EmissiveFactor { get; init; } = Vector3.Zero;
 

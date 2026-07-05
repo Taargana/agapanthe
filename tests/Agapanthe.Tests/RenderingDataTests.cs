@@ -88,7 +88,9 @@ public sealed class RenderingDataTests
         Assert.Equal(SamplerFilter.Linear, desc.Filter);
         Assert.Equal(SamplerFilter.Linear, desc.MipFilter);
         Assert.Equal(SamplerAddressMode.Repeat, desc.AddressMode);
-        Assert.Equal(0f, desc.MaxAnisotropy);
+        // M5: material samplers request 8x anisotropy; the device clamps to its limit and falls
+        // back to isotropic when the feature is unsupported.
+        Assert.Equal(8f, desc.MaxAnisotropy);
     }
 
     [Fact]

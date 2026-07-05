@@ -21,8 +21,8 @@ namespace Agapanthe.Rendering;
 ///   governs the close-up appearance.</item>
 ///   <item><b>MipFilter</b> ← <see cref="TextureSettings.MinFilter"/>. glTF's minification filter carries
 ///   the mip-sampling intent (Assets already collapsed the mipmap-aware GL modes to Linear/Nearest).</item>
-///   <item><b>MaxAnisotropy</b> = 0 (the <c>samplerAnisotropy</c> device feature is off as of M3),
-///   <b>MipLodBias</b> = 0.</item>
+///   <item><b>MaxAnisotropy</b> = 8 — the device clamps to its limit and falls back to isotropic
+///   when the <c>samplerAnisotropy</c> feature is unsupported. <b>MipLodBias</b> = 0.</item>
 /// </list>
 /// <b>Ownership.</b> Owns every sampler it created; <see cref="Dispose"/> disposes them all (deferred
 /// through the device DeletionQueue by <see cref="Sampler"/>). Owned by <see cref="Scene"/>.
@@ -62,7 +62,7 @@ public sealed class SamplerCache : IDisposable
         Filter: ToFilter(settings.MagFilter),
         MipFilter: ToFilter(settings.MinFilter),
         AddressMode: ToAddressMode(settings.WrapU),
-        MaxAnisotropy: 0f,
+        MaxAnisotropy: 8f,
         MipLodBias: 0f);
 
     private static SamplerFilter ToFilter(TextureFilter filter) => filter switch

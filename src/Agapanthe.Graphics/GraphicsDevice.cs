@@ -51,6 +51,8 @@ public sealed unsafe partial class GraphicsDevice : IDisposable
     private bool _debugUtilsEnabled;
     private bool _useVulkan13Features;
     private bool _hasPortabilitySubset;
+    private bool _samplerAnisotropyEnabled;
+    private float _maxSamplerAnisotropy = 1f;
     private GpuAllocator? _allocator;
     private bool _disposed;
 
@@ -145,6 +147,14 @@ public sealed unsafe partial class GraphicsDevice : IDisposable
     /// <summary>True when dynamicRendering/synchronization2 are enabled as Vulkan 1.3 core features
     /// (MoltenVK path); false when the KHR extensions are used (Vulkan 1.2 devices).</summary>
     internal bool HasVulkan13Core => _useVulkan13Features;
+
+    /// <summary>True when the <c>samplerAnisotropy</c> device feature was supported and enabled at logical-device
+    /// creation. When false, <see cref="Sampler"/> forces isotropic sampling regardless of the requested value.</summary>
+    internal bool SamplerAnisotropyEnabled => _samplerAnisotropyEnabled;
+
+    /// <summary>The device's <c>maxSamplerAnisotropy</c> limit; the ceiling a <see cref="Sampler"/> clamps to.
+    /// <c>1</c> when anisotropy is unavailable.</summary>
+    internal float MaxSamplerAnisotropy => _maxSamplerAnisotropy;
 
     /// <summary>Non-null only when <see cref="HasVulkan13Core"/> is false.</summary>
     internal KhrDynamicRendering? KhrDynamicRendering => _khrDynamicRendering;
@@ -536,10 +546,18 @@ public sealed unsafe partial class GraphicsDevice : IDisposable
             Synchronization2 = true,
             PNext = &dynamicRendering,
         };
+        // Anisotropic filtering: enable when the hardware has it (using it in a sampler without
+        // the feature is a VUID). Core 1.0 feature — lives in features2.Features, not a pNext.
+        _vk.GetPhysicalDeviceFeatures(_physicalDevice, out var supportedFeatures);
+        _samplerAnisotropyEnabled = supportedFeatures.SamplerAnisotropy;
+        _vk.GetPhysicalDeviceProperties(_physicalDevice, out var deviceProperties);
+        _maxSamplerAnisotropy = deviceProperties.Limits.MaxSamplerAnisotropy;
+
         var features2 = new PhysicalDeviceFeatures2
         {
             SType = StructureType.PhysicalDeviceFeatures2,
             PNext = _useVulkan13Features ? &vk13 : (void*)&synchronization2,
+            Features = new PhysicalDeviceFeatures { SamplerAnisotropy = _samplerAnisotropyEnabled },
         };
 
         var extensionNames = (byte**)SilkMarshal.StringArrayToPtr(extensions);
