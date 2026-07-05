@@ -99,7 +99,7 @@ public sealed class SceneLights
 }
 
 /// <summary>
-/// Set 0, binding 1 — the per-frame lighting block, packed for std140 as twelve <see cref="Vector4"/> at
+/// Set 0, binding 1 — the per-frame lighting block, packed for std140 as eleven <see cref="Vector4"/> at
 /// contiguous 16-byte offsets (176 bytes total). Built from <see cref="SceneLights"/> via the constructor.
 /// The PBR fragment shader (M5-05) declares a matching <c>layout(std140) uniform</c> in this exact order.
 /// <para>

@@ -1,6 +1,6 @@
 # Absolute-Human Board — Agapanthe Session 5 (M5 : PBR & Lumières)
 
-**Status**: in-progress
+**Status**: completed (capture visuelle humaine en attente — non bloquante pour M6)
 **Créé**: 2026-07-05
 **Spec**: docs/plans/2026-07-02-graphics-engine-design.md §3.3 (passes), §3.4, §5 (protocole visuel), §6 (M5)
 **Board persistence**: git-tracked
@@ -75,17 +75,45 @@ Renderer possède : HDR GpuImage Rgba16Sfloat (ColorAttachment|Sampled, dedicate
 **Résultat**: mesh.vert — normal matrix inverse-transpose (normal + tangent.xyz), worldPos varying, CameraUbo 144 o. mesh.frag — Cook-Torrance : D=GGX (α=roughness²), V=Smith height-correlated forme visibility (absorbe le dénominateur 4·NdotL·NdotV — documenté), F=Schlick F0=mix(0.04, albedo, metallic) ; kd=(1−F)(1−metallic) Lambert/π ; TBN Gram-Schmidt + handedness w, normalScale sur xy ; roughness floor 0.045, epsilons anti-NaN ; atténuation KHR_lights_punctual (1/d² fenêtré (1−(d/range)⁴)²) ; AO sur l'ambiant seul (mix par strength) ; emissive HDR ; sortie linéaire non clampée. **LightsUbo en `vec4 pointData[8]`** (arrayStride 16 → byte-identique aux champs nommés C#, offsets vérifiés par réflexion glslang : 144/64/176 tous confirmés). Cull None→Back. 159 tests, helmet+box 0 validation 0 leak.
 mesh.vert : normal matrix inverse-transpose (mat3), passe worldPos aux varyings. mesh.frag : Cook-Torrance GGX (D=GGX, G=Smith height-correlated, F=Schlick), diffus Lambert énergie-conservé (kd=(1-F)(1-metallic)), normal mapping TBN (tangente vertex + handedness w, normalScale appliqué), metallicRoughness (B=metallic, G=roughness), AO (R, strength), emissive (×factor×strength), lumières : 1 dir + boucle ponctuelles (atténuation inverse-carré avec Range), ambiant constant faible (placeholder IBL M7, p.ex. 0.03), alpha MASK conservé, sortie HDR linéaire (pas de clamp). Renderer : Cull = Back. AC: glslangValidator OK, run DamagedHelmet 0 validation — l'éclairage se juge au protocole visuel M5-09.
 
-### M5-06 — Sandbox lumières + exposition [code, S] — pending — OWNER Program.cs
-Lumières par défaut : 1 directionnelle (soleil chaud, intensité ~3, direction oblique), 2 ponctuelles d'appoint. Touches : +/- exposition (log2, push constant tonemap), L pour tourner la directionnelle (debug). Log des réglages. AC: run clean, contrôles fonctionnels.
+### M5-06 — Sandbox lumières + exposition [code, S] — done (orchestrateur) — OWNER Program.cs
+**Résultat**: SetupLights 3-points depuis les bounds monde — key directionnelle chaude (3), rim ponctuelle froide arrière-haut + fill chaude avant-bas (intensités × diagonale² pour compenser l'inverse-carré, Range 6× diagonale), ambiant placeholder. Touches : +/− exposition par tiers de stop (loggé en EV, clampé 1/64-64), L pivote la key light de π/8 (debug). Titre « Agapanthe — M5 PBR ». 159 tests, helmet+box 0 validation 0 leak.
 
-### M5-07 — Self code review [test, S] — pending
-Audits : csharp-lowlevel (hot path DrawScene 2 passes, transitions/barriers, resize, leaks) + architecte (prêt M6 ombres : insertion passe depth-only, ownership targets). AC: 0 critique.
+### M5-07 — Self code review [test, S] — done (2× PASS, MOYEN corrigé)
+**csharp-lowlevel PASS (0 critique)** : std140 triple-vérifié (144/64/176, pointData[8] byte-identique, boucle bornée index max 7), hot path 2 passes zéro-alloc prouvé, sync saine (ownership transitions sans recouvrement, WAR HDR correct sur 2 frames in flight, depth Undefined reproduit M4), resize sans leak (_hdrInitialized reset), teardown ordonné, aniso câblée. **MOYEN-1 corrigé** : NaN TBN quand N ∥ tangente placeholder (faces ±X de BoxTextured — 0*NaN=NaN, la normal map neutre ne sauvait pas) → fallback axe ⊥N si résidu Gram-Schmidt < 1e-8. **MINEUR-2 corrigé** : early-out NdotL ≤ 0 dans shade() (évite l'antipode L=−V ET économise le BRDF dos à la lumière). MINEUR-4 doc « twelve→eleven » corrigé. MINEUR-3 (normale sommet nulle) accepté — glTF valide en fournit.
+**Architecte PASS** : section « décisions M6 » ci-dessus.
 
-### M5-08 — Requirements validation [test, S] — pending
-Spec §3.3/§3.4/§6 M5 cochées vs code.
+### M5-08 — Requirements validation [test, S] — done
+Spec §3.3 : passes forward HDR → tonemap ✓ (shadow/skybox = M6/M7 par design) ; §3.4 : set 0 caméra+lumières ✓ (shadow/IBL placeholders différés M6/M7, acté par revue architecte — coût nul, layout transient) ; §6 M5 : PBR metallic-roughness ✓ (GGX/Smith/Schlick), 1 dir + N ponctuelles ✓ (4, KHR punctual), tone mapping ✓ (ACES), normal mapping ✓, AO ✓, emissive+strength ✓, exposition ✓. Protocole visuel §5 : gabarit prêt, capture humaine en attente.
 
-### M5-09 — Full verification + protocole visuel [test, S] — pending
-build 0 warning, tests, runs DamagedHelmet+BoxTextured clean, resize. **Partie humaine** : capture Sandbox vs viewer Khronos (https://github.khronos.org/glTF-Sample-Viewer-Release/) même angle/exposition, image annotée dans docs/visual-checks/2026-07-XX-m5-damagedhelmet.md — préparer le gabarit, l'utilisateur capture.
+### M5-09 — Full verification + protocole visuel [test, S] — done (partie machine)
+```
+Build 0 Warning(s). Passed! 159/159.
+DamagedHelmet 120 frames : 0 validation, no leaks (77 ressources), EXIT=0.
+BoxTextured 60 frames : 0 validation, no leaks (63 ressources), EXIT=0.
+glslangValidator vulkan1.3 : mesh.frag OK (post-fix NaN).
+```
+**Partie humaine en attente** : docs/visual-checks/2026-07-05-m5-damagedhelmet.md (gabarit + critères + procédure viewer Khronos) — l'utilisateur capture et coche.
+
+## Revue architecte M5-07 (PASS) — décisions à acter au démarrage M6
+
+Multi-passes M5 = socle correct pour M6, insertion par extension, MAIS « trivial » était optimiste : 4 primitives manquent (toutes additives, ~1 champ chacune). Liste actionnable :
+
+1. `RenderingAttachments.Color` → nullable (depth-only pass), émission conditionnelle.
+2. Pipeline depth-only : FragmentShader + ColorFormat optionnels, StageCount/blend conditionnels (extension propre plutôt que shadow.frag trivial).
+3. `GraphicsPipelineDesc` += DepthBias{Constant,Slope} (slope-scaled bias, état statique — spec §6 M6).
+4. `SamplerDesc` += CompareOp? → CompareEnable câblé (sampler2DShadow) ; ClampToEdge + border blanc hors-frustum.
+5. `MathHelpers.OrthographicVulkan` (Y-flip, Z [0,1], testé sans GPU).
+6. Set 0 binding 2 = shadow sampler comparateur ; lightViewProj mat4 appended dans LightsUniforms (176→240, étendre test std140).
+7. **Passe shadow sans descriptor set** : model + lightViewProj = 128 o pile en push constants (budget garanti).
+8. `Scene` expose une AABB monde (calculée au SceneBuilder) → fit ortho dans le Renderer ; DirectionalLight reste pure ; réglages en Renderer.ShadowSettings.
+9. Shadow map 2048² D32 DepthAttachment|Sampled créée UNE fois au ctor (invariante au resize — hors EnsureTargets).
+10. Découper DrawScene en RecordShadowPass/RecordScenePass/RecordTonemapPass avant insertion (mécanique, interne).
+
+Ce qui marche déjà sans retouche : TransitionImage DepthAttachment→ShaderReadOnly (aspect dérivé), GpuImage DepthAttachment|Sampled, SetViewportScissor(2048²) dynamique.
+
+Gaps M7 tracés (non bloquants M6) : GpuImage 2D-only (cubemap → ArrayLayers + ViewType.Cube), CommandList sans dispatch compute (spec §3.3, IBL). Skybox = passe entre scène et tonemap dans la HDR (LoadOp Load, depth LessOrEqual sans write).
+
+Dette M5 acceptable : ACES fixe + exposition manuelle (auto-exposure hors phase 1 confirmé), ClearColor obsolète dès que le skybox couvre (M7), pas de frame graph (jamais demandé).
 
 ## Deferred Work
 
@@ -97,3 +125,4 @@ build 0 warning, tests, runs DamagedHelmet+BoxTextured clean, resize. **Partie h
 ## Log
 
 - 2026-07-05: session 5 ouverte. Board S4 archivé. DAG 9 tâches, 6 vagues. Plan architecte S4 acté intégralement (7 décisions + aniso S3).
+- 2026-07-05: W1-W5 exécutées (a84ebac, 96f6946, 16e9163, 5b1b0e2+7651da6, 2d76b32). W3 : deux agents tués par limites de session, complétés par l'orchestrateur. M5-07 : 2× PASS, NaN TBN (BoxTextured ±X) + early-out NdotL corrigés. M5-08/09 machine : 159 tests, 2 fixtures 0 validation 0 leak. **Session 5 close — M5 atteint** (PBR Cook-Torrance + HDR/ACES sur GPU). Capture visuelle humaine : gabarit docs/visual-checks/. M6 : 10 décisions architecte actées (section dédiée).

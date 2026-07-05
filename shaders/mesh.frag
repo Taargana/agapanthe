@@ -86,8 +86,14 @@ vec3 fresnelSchlick(float cosTheta, vec3 f0) {
 // One light's outgoing radiance contribution for surface (N, V, NdotV, albedo, metallic, alpha, f0).
 vec3 shade(vec3 L, vec3 radiance, vec3 N, vec3 V, float NdotV,
            vec3 albedo, float metallic, float alpha, vec3 f0) {
-    vec3 H = normalize(L + V);
     float NdotL = clamp(dot(N, L), 0.0, 1.0);
+    if (NdotL <= 0.0) {
+        // Back-facing light: contributes nothing — and skipping early both saves the whole BRDF
+        // and dodges the L == -V antipode where normalize(L+V) would produce NaN (audit M5).
+        return vec3(0.0);
+    }
+
+    vec3 H = normalize(L + V);
     float NdotH = clamp(dot(N, H), 0.0, 1.0);
     float VdotH = clamp(dot(V, H), 0.0, 1.0);
 
@@ -114,10 +120,15 @@ void main() {
 
     // --- Tangent-space normal mapping (TBN) -----------------------------------------------------------
     // T re-orthogonalized against N (Gram-Schmidt); B from the glTF handedness (worldTangent.w = +/-1).
-    // Meshes without real tangents ship a placeholder tangent (1,0,0,1) plus a neutral (flat) normal map,
-    // so n_ts ~= (0,0,1) and N_final ~= N with no branch needed.
+    // When the tangent is (near-)parallel to N — e.g. the +/-X faces of a mesh carrying the
+    // placeholder tangent (1,0,0,1) — the Gram-Schmidt residual collapses to zero and
+    // normalize(0) would poison the whole lighting with NaN (0*NaN = NaN, so even a neutral
+    // normal map cannot recover). Fall back to any axis perpendicular to N (audit M5, MOYEN-1).
     vec3 N = normalize(worldNormal);
-    vec3 T = normalize(worldTangent.xyz - N * dot(N, worldTangent.xyz));
+    vec3 tRes = worldTangent.xyz - N * dot(N, worldTangent.xyz);
+    vec3 T = dot(tRes, tRes) > 1e-8
+        ? normalize(tRes)
+        : normalize(cross(N, abs(N.x) < 0.9 ? vec3(1.0, 0.0, 0.0) : vec3(0.0, 1.0, 0.0)));
     vec3 B = worldTangent.w * cross(N, T);
     vec3 nTs = texture(normalTex, fragUv).xyz * 2.0 - 1.0;
     nTs.xy *= material.mrno.z; // normalScale
