@@ -23,6 +23,12 @@ public enum ImageLayoutState
     /// <summary>Sampled from a shader through a combined image sampler (fragment stage, read).</summary>
     ShaderReadOnly,
 
+    /// <summary>
+    /// General layout for a storage image read/written by a compute kernel (compute stage, read+write).
+    /// Also valid for sampled access, so IBL kernels keep intermediates here across dispatches (spec §3.6).
+    /// </summary>
+    General,
+
     /// <summary>Source of a transfer/blit.</summary>
     TransferSrc,
 

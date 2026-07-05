@@ -26,6 +26,12 @@ public sealed unsafe class GpuImage : IDisposable
     private GpuAllocation _allocation;
     private bool _hasAllocation;
     private readonly ImageAspectFlags _aspect;
+    // Additional single-mip/layer-subrange views (storage-image write targets, M7) created on demand by
+    // CreateMipView and OWNED here: the default view above spans the whole resource, but a compute kernel
+    // writing one mip (or one cube face) of a cubemap needs a narrow view. Each is registered separately in
+    // the ResourceTracker as "VkImageView" and destroyed with the image — never in the 4-slot main payload
+    // (which is full: image, view, block id, packed offset), but each enqueued on its own deferred entry.
+    private readonly List<ImageView> _extraViews = new();
     private bool _disposed;
 
     /// <summary>
@@ -35,8 +41,15 @@ public sealed unsafe class GpuImage : IDisposable
     /// the view aspect. Memory comes from the device allocator (render targets get a dedicated block when
     /// large enough — decided by the free-list size threshold, nothing special here).
     /// </summary>
-    /// <exception cref="GraphicsException"><paramref name="usage"/> is empty, or a dimension/mip count is zero.</exception>
-    public GpuImage(GraphicsDevice device, uint width, uint height, PixelFormat format, ImageUsage usage, uint mipLevels = 1)
+    /// <param name="arrayLayers">Number of array layers (default 1). <see cref="ImageViewKind.Cube"/>
+    /// requires exactly 6; <see cref="ImageViewKind.Color2D"/> requires exactly 1.</param>
+    /// <param name="viewKind">Shape of the default view (and, for <see cref="ImageViewKind.Cube"/>, adds
+    /// <c>CUBE_COMPATIBLE</c> to the image). The default view spans every mip and every layer.</param>
+    /// <exception cref="GraphicsException"><paramref name="usage"/> is empty; a dimension/mip/layer count is
+    /// zero; a cube image does not have 6 layers; or a 2D view is asked for a layered image.</exception>
+    public GpuImage(
+        GraphicsDevice device, uint width, uint height, PixelFormat format, ImageUsage usage,
+        uint mipLevels = 1, uint arrayLayers = 1, ImageViewKind viewKind = ImageViewKind.Color2D)
     {
         ArgumentNullException.ThrowIfNull(device);
         if (usage == ImageUsage.None)
@@ -44,19 +57,39 @@ public sealed unsafe class GpuImage : IDisposable
             throw new GraphicsException("ImageUsage must specify at least one usage.");
         }
 
-        if (width == 0 || height == 0 || mipLevels == 0)
+        if (width == 0 || height == 0 || mipLevels == 0 || arrayLayers == 0)
         {
-            throw new GraphicsException("GpuImage width, height and mipLevels must all be non-zero.");
+            throw new GraphicsException("GpuImage width, height, mipLevels and arrayLayers must all be non-zero.");
+        }
+
+        // A cube view needs the 6 faces; a plain 2D view cannot address extra layers. Array2D is the only
+        // kind free to pick any layer count. Fail loudly rather than mint a view the driver rejects.
+        if (viewKind == ImageViewKind.Cube && arrayLayers != 6)
+        {
+            throw new GraphicsException($"ImageViewKind.Cube requires exactly 6 array layers, got {arrayLayers}.");
+        }
+
+        if (viewKind == ImageViewKind.Color2D && arrayLayers != 1)
+        {
+            throw new GraphicsException(
+                $"ImageViewKind.Color2D requires arrayLayers == 1, got {arrayLayers}; use Array2D for a layered image.");
         }
 
         _device = device;
         Width = width;
         Height = height;
         MipLevels = mipLevels;
+        ArrayLayers = arrayLayers;
         Format = format;
         Usage = usage;
         // DepthAttachment implies the depth aspect; every other usage is a color image.
         _aspect = (usage & ImageUsage.DepthAttachment) != 0 ? ImageAspectFlags.DepthBit : ImageAspectFlags.ColorBit;
+        var viewType = viewKind switch
+        {
+            ImageViewKind.Cube => ImageViewType.TypeCube,
+            ImageViewKind.Array2D => ImageViewType.Type2DArray,
+            _ => ImageViewType.Type2D,
+        };
         var vk = device.Api;
 
         try
@@ -68,10 +101,13 @@ public sealed unsafe class GpuImage : IDisposable
                 Format = format.ToVk(),
                 Extent = new Extent3D(width, height, 1),
                 MipLevels = mipLevels,
-                ArrayLayers = 1,
+                ArrayLayers = arrayLayers,
                 Samples = SampleCountFlags.Count1Bit,
                 Tiling = ImageTiling.Optimal,
                 Usage = ToVkUsage(usage),
+                // CUBE_COMPATIBLE lets a Type2DArray/TypeCube view address the 6 faces (core Vulkan; needs
+                // no imageCubeArray feature since a single-cube view is used, not a cube-array).
+                Flags = viewKind == ImageViewKind.Cube ? ImageCreateFlags.CreateCubeCompatibleBit : ImageCreateFlags.None,
                 SharingMode = SharingMode.Exclusive,
                 InitialLayout = ImageLayout.Undefined,
             };
@@ -94,9 +130,9 @@ public sealed unsafe class GpuImage : IDisposable
             {
                 SType = StructureType.ImageViewCreateInfo,
                 Image = _image,
-                ViewType = ImageViewType.Type2D,
+                ViewType = viewType,
                 Format = format.ToVk(),
-                SubresourceRange = new ImageSubresourceRange(_aspect, 0, mipLevels, 0, 1),
+                SubresourceRange = new ImageSubresourceRange(_aspect, 0, mipLevels, 0, arrayLayers),
             };
             ImageView view;
             VkCheck.ThrowIfFailed(vk.CreateImageView(device.Device, &viewInfo, null, &view), "vkCreateImageView");
@@ -134,6 +170,10 @@ public sealed unsafe class GpuImage : IDisposable
     /// <summary>Number of mip levels; the view covers <c>[0, MipLevels)</c>.</summary>
     public uint MipLevels { get; }
 
+    /// <summary>Number of array layers (6 for a cubemap, 1 for a plain 2D image); the default view covers
+    /// <c>[0, ArrayLayers)</c>.</summary>
+    public uint ArrayLayers { get; }
+
     /// <summary>The pixel format the image and its view were created with.</summary>
     public PixelFormat Format { get; }
 
@@ -161,6 +201,54 @@ public sealed unsafe class GpuImage : IDisposable
     internal ImageAspectFlags Aspect => _aspect;
 
     /// <summary>
+    /// Creates and <b>retains</b> an extra view over a single mip and a contiguous layer range — the write
+    /// target a compute kernel binds as a storage image (M7: one mip / one face of an IBL cubemap). The view
+    /// is <c>Type2DArray</c> when it spans more than one layer, else <c>Type2D</c>, aspect Color (extra views
+    /// are storage color targets; depth stays a plain 2D image). Ownership stays with this <see cref="GpuImage"/>:
+    /// the view lives until the image is disposed — do not destroy the returned handle yourself.
+    /// </summary>
+    /// <param name="mip">Mip level in <c>[0, MipLevels)</c>.</param>
+    /// <param name="baseLayer">First layer in <c>[0, ArrayLayers)</c>.</param>
+    /// <param name="layerCount">Layer count; 0 (default) means all remaining layers from
+    /// <paramref name="baseLayer"/>.</param>
+    /// <exception cref="GraphicsException">The mip or layer range is out of bounds.</exception>
+    public ImageMipView CreateMipView(uint mip, uint baseLayer = 0, uint layerCount = 0)
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        if (mip >= MipLevels)
+        {
+            throw new GraphicsException($"CreateMipView mip {mip} is out of range [0, {MipLevels}).");
+        }
+
+        if (baseLayer >= ArrayLayers)
+        {
+            throw new GraphicsException($"CreateMipView baseLayer {baseLayer} is out of range [0, {ArrayLayers}).");
+        }
+
+        var resolved = layerCount == 0 ? ArrayLayers - baseLayer : layerCount;
+        if (baseLayer + resolved > ArrayLayers)
+        {
+            throw new GraphicsException(
+                $"CreateMipView layer range [{baseLayer}, {baseLayer + resolved}) exceeds ArrayLayers {ArrayLayers}.");
+        }
+
+        var vk = _device.Api;
+        var viewInfo = new ImageViewCreateInfo
+        {
+            SType = StructureType.ImageViewCreateInfo,
+            Image = _image,
+            ViewType = resolved > 1 ? ImageViewType.Type2DArray : ImageViewType.Type2D,
+            Format = Format.ToVk(),
+            SubresourceRange = new ImageSubresourceRange(ImageAspectFlags.ColorBit, mip, 1, baseLayer, resolved),
+        };
+        ImageView view;
+        VkCheck.ThrowIfFailed(vk.CreateImageView(_device.Device, &viewInfo, null, &view), "vkCreateImageView");
+        _extraViews.Add(view);
+        ResourceTracker.Register("VkImageView");
+        return new ImageMipView(view);
+    }
+
+    /// <summary>
     /// Deferred disposal (default, spec §3.2.1): the image, view and its suballocation are released once
     /// the frame that used them leaves flight, so a resource freed mid-loop is never destroyed while a
     /// frame in flight may still reference it.
@@ -173,6 +261,16 @@ public sealed unsafe class GpuImage : IDisposable
         }
 
         _disposed = true;
+
+        // Extra views (CreateMipView) don't fit the full 4-slot main payload below, so each is enqueued on
+        // its OWN non-capturing entry first: Handle0 = the view alone, destructor = cached static
+        // DestroyViewDelegate (DestroyImageView + Unregister). No packing, no registry, correct deferral.
+        foreach (var extra in _extraViews)
+        {
+            _device.EnqueueDestroy(DestroyViewDelegate, new DeletionPayload(extra.Handle));
+        }
+
+        _extraViews.Clear();
 
         // Non-capturing deferred destroy (spec §3.2.5, zero managed allocation): the raw handles plus
         // the routing data needed to return the suballocation travel by value in the payload, and the
@@ -207,6 +305,17 @@ public sealed unsafe class GpuImage : IDisposable
         }
 
         _disposed = true;
+        var vk = _device.Api;
+        foreach (var extra in _extraViews)
+        {
+            if (extra.Handle != 0)
+            {
+                vk.DestroyImageView(_device.Device, extra, null);
+                ResourceTracker.Unregister("VkImageView");
+            }
+        }
+
+        _extraViews.Clear();
         DestroyHandles(_device, _image, _view, in _allocation, _hasAllocation);
         _image = default;
         _view = default;
@@ -216,6 +325,20 @@ public sealed unsafe class GpuImage : IDisposable
 
     // Allocated once per type: passing this reference on the deferred path costs no allocation.
     private static readonly Action<GraphicsDevice, DeletionPayload> DestroyDelegate = DestroyDeferred;
+
+    // Cached static destructor for a single extra view (CreateMipView) on the deferred path: Handle0 is the
+    // lone VkImageView, nothing else. Allocated once, so enqueuing an extra view costs no allocation.
+    private static readonly Action<GraphicsDevice, DeletionPayload> DestroyViewDelegate = DestroyDeferredView;
+
+    private static void DestroyDeferredView(GraphicsDevice device, DeletionPayload payload)
+    {
+        var view = new ImageView(payload.Handle0);
+        if (view.Handle != 0)
+        {
+            device.Api.DestroyImageView(device.Device, view, null);
+            ResourceTracker.Unregister("VkImageView");
+        }
+    }
 
     /// <summary>
     /// Deferred destructor for the non-capturing DeletionQueue path (<see cref="Dispose"/>): rebuilds the
@@ -346,8 +469,43 @@ public sealed unsafe class GpuImage : IDisposable
             flags |= ImageUsageFlags.TransferDstBit;
         }
 
+        if ((usage & ImageUsage.Storage) != 0)
+        {
+            flags |= ImageUsageFlags.StorageBit;
+        }
+
         return flags;
     }
+}
+
+/// <summary>
+/// Shape of a <see cref="GpuImage"/>'s default view (and, for <see cref="Cube"/>, of the image itself).
+/// The 2D path (<see cref="Color2D"/>) is the default and matches every image created before M7.
+/// </summary>
+public enum ImageViewKind
+{
+    /// <summary>A plain single-layer 2D view (<c>VK_IMAGE_VIEW_TYPE_2D</c>). Requires <c>arrayLayers == 1</c>.</summary>
+    Color2D,
+
+    /// <summary>A cubemap view (<c>VK_IMAGE_VIEW_TYPE_CUBE</c>); adds <c>CUBE_COMPATIBLE</c> and requires
+    /// <c>arrayLayers == 6</c>.</summary>
+    Cube,
+
+    /// <summary>A 2D-array view (<c>VK_IMAGE_VIEW_TYPE_2D_ARRAY</c>) over all layers.</summary>
+    Array2D,
+}
+
+/// <summary>
+/// A lightweight handle to an extra image view owned by a <see cref="GpuImage"/> (created via
+/// <see cref="GpuImage.CreateMipView"/>), covering one mip and a layer subrange. Bind it as a storage-image
+/// write target through the <c>WriteStorageImage(..., ImageMipView)</c> overloads. The wrapped
+/// <c>VkImageView</c> is owned and destroyed by the parent image — this struct never owns it.
+/// </summary>
+public readonly struct ImageMipView
+{
+    internal ImageMipView(ImageView view) => Handle = view;
+
+    internal ImageView Handle { get; }
 }
 
 /// <summary>
@@ -375,4 +533,8 @@ public enum ImageUsage
 
     /// <summary>Valid destination of a transfer/copy (staging upload, blit target).</summary>
     TransferDst = 1 << 4,
+
+    /// <summary>Readable and writable from shaders without a sampler (compute storage image, layout General;
+    /// M7 IBL cubemap generation).</summary>
+    Storage = 1 << 5,
 }

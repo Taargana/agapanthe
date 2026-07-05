@@ -171,6 +171,96 @@ public sealed unsafe partial class GraphicsDevice : IDisposable
     public void WaitIdle()
         => VkCheck.ThrowIfFailed(_vk.DeviceWaitIdle(_device), "vkDeviceWaitIdle");
 
+    /// <summary>
+    /// Records a one-shot command buffer through <paramref name="record"/> and submits it on the graphics
+    /// queue, blocking on a fence until the GPU finishes. Generalises <see cref="GpuUploader"/>'s one-shot
+    /// pattern so load-time batch work (IBL generation, M7-04) can drive a <see cref="CommandList"/> outside
+    /// the frame loop, where <see cref="CommandList"/> otherwise only exists inside the per-frame draw callback.
+    /// <para>
+    /// <b>Synchronous — never on the hot path.</b> A transient command pool and fence are created per call,
+    /// the work is submitted with synchronization2 (fence-only, no semaphores), the call blocks on that fence,
+    /// then the pool and fence are destroyed before returning. Intended for load-time work only, where the
+    /// per-call allocation and the full stall are acceptable (spec §3.2, same rationale as
+    /// <see cref="GpuUploader"/>). A per-call pool is chosen over a persistent one on purpose: it adds no
+    /// mutable state or teardown-ordering coupling to <see cref="GraphicsDevice"/>, and this is load-time.
+    /// Not thread-safe (phase-1 single-threaded).
+    /// </para>
+    /// </summary>
+    public void SubmitImmediate(Action<CommandList> record)
+    {
+        ArgumentNullException.ThrowIfNull(record);
+        ObjectDisposedException.ThrowIf(_disposed, this);
+
+        var poolInfo = new CommandPoolCreateInfo
+        {
+            SType = StructureType.CommandPoolCreateInfo,
+            // Transient: the pool backs a single one-shot buffer and is destroyed at the end of the call.
+            Flags = CommandPoolCreateFlags.TransientBit,
+            QueueFamilyIndex = GraphicsQueueFamily,
+        };
+        CommandPool pool;
+        VkCheck.ThrowIfFailed(_vk.CreateCommandPool(_device, &poolInfo, null, &pool), "vkCreateCommandPool");
+        ResourceTracker.Register("VkCommandPool");
+
+        Fence fence = default;
+        try
+        {
+            var allocInfo = new CommandBufferAllocateInfo
+            {
+                SType = StructureType.CommandBufferAllocateInfo,
+                CommandPool = pool,
+                Level = CommandBufferLevel.Primary,
+                CommandBufferCount = 1,
+            };
+            CommandBuffer cmd;
+            VkCheck.ThrowIfFailed(_vk.AllocateCommandBuffers(_device, &allocInfo, &cmd), "vkAllocateCommandBuffers");
+
+            var fenceInfo = new FenceCreateInfo { SType = StructureType.FenceCreateInfo };
+            Fence createdFence;
+            VkCheck.ThrowIfFailed(_vk.CreateFence(_device, &fenceInfo, null, &createdFence), "vkCreateFence");
+            fence = createdFence;
+            ResourceTracker.Register("VkFence");
+
+            var beginInfo = new CommandBufferBeginInfo
+            {
+                SType = StructureType.CommandBufferBeginInfo,
+                Flags = CommandBufferUsageFlags.OneTimeSubmitBit,
+            };
+            VkCheck.ThrowIfFailed(_vk.BeginCommandBuffer(cmd, &beginInfo), "vkBeginCommandBuffer");
+
+            record(new CommandList(this, cmd));
+
+            VkCheck.ThrowIfFailed(_vk.EndCommandBuffer(cmd), "vkEndCommandBuffer");
+
+            var cmdInfo = new CommandBufferSubmitInfo { SType = StructureType.CommandBufferSubmitInfo, CommandBuffer = cmd };
+            var submit = new SubmitInfo2
+            {
+                SType = StructureType.SubmitInfo2,
+                CommandBufferInfoCount = 1,
+                PCommandBufferInfos = &cmdInfo,
+            };
+            // synchronization2 submit: no semaphores — the fence is the only synchronization, and the wait
+            // below proves the GPU is done before the pool/fence are destroyed in the finally.
+            QueueSubmit2(GraphicsQueue, &submit, fence);
+
+            var waitFence = fence;
+            VkCheck.ThrowIfFailed(_vk.WaitForFences(_device, 1, &waitFence, true, ulong.MaxValue), "vkWaitForFences");
+        }
+        finally
+        {
+            if (fence.Handle != 0)
+            {
+                _vk.DestroyFence(_device, fence, null);
+                ResourceTracker.Unregister("VkFence");
+            }
+
+            // Destroys the allocated command buffer with the pool. Safe even if record() threw before submit:
+            // DestroyCommandPool is valid on a buffer left in the recording or executable state.
+            _vk.DestroyCommandPool(_device, pool, null);
+            ResourceTracker.Unregister("VkCommandPool");
+        }
+    }
+
     public void Dispose()
     {
         if (_disposed)

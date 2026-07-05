@@ -28,6 +28,8 @@ public sealed unsafe class FrameContext : IDisposable
     private const uint MaxSets = 64;
     private const uint MaxUniformBuffers = 64;
     private const uint MaxCombinedImageSamplers = 64;
+    // Storage images (compute write targets, M7): a handful at most per frame.
+    private const uint MaxStorageImages = 16;
 
     private readonly GraphicsDevice _device;
     private DescriptorPool _pool;
@@ -38,16 +40,17 @@ public sealed unsafe class FrameContext : IDisposable
         _device = device;
         Slot = slot;
 
-        var sizes = stackalloc DescriptorPoolSize[2]
+        var sizes = stackalloc DescriptorPoolSize[3]
         {
             new DescriptorPoolSize(DescriptorType.UniformBuffer, MaxUniformBuffers),
             new DescriptorPoolSize(DescriptorType.CombinedImageSampler, MaxCombinedImageSamplers),
+            new DescriptorPoolSize(DescriptorType.StorageImage, MaxStorageImages),
         };
         var poolInfo = new DescriptorPoolCreateInfo
         {
             SType = StructureType.DescriptorPoolCreateInfo,
             MaxSets = MaxSets,
-            PoolSizeCount = 2,
+            PoolSizeCount = 3,
             PPoolSizes = sizes,
         };
         DescriptorPool pool;
@@ -110,6 +113,32 @@ public sealed unsafe class FrameContext : IDisposable
         ArgumentNullException.ThrowIfNull(sampler);
         ObjectDisposedException.ThrowIf(_disposed, this);
         DescriptorWrites.CombinedImageSampler(_device, set.Set, binding, image, sampler);
+    }
+
+    /// <summary>
+    /// Points <paramref name="binding"/> of <paramref name="set"/> at <paramref name="image"/>'s default view
+    /// as a storage image (compute read/write, layout General, no sampler).
+    /// </summary>
+    public void WriteStorageImage(DescriptorSetHandle set, uint binding, GpuImage image)
+    {
+        ArgumentNullException.ThrowIfNull(image);
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        DescriptorWrites.StorageImage(_device, set.Set, binding, image.View);
+    }
+
+    /// <summary>
+    /// Points <paramref name="binding"/> of <paramref name="set"/> at a specific <paramref name="view"/>
+    /// (one mip / layer subrange from <see cref="GpuImage.CreateMipView"/>) as a storage image (layout General).
+    /// </summary>
+    public void WriteStorageImage(DescriptorSetHandle set, uint binding, ImageMipView view)
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        if (view.Handle.Handle == 0)
+        {
+            throw new GraphicsException("WriteStorageImage received a default ImageMipView; use one from CreateMipView.");
+        }
+
+        DescriptorWrites.StorageImage(_device, set.Set, binding, view.Handle);
     }
 
     /// <summary>Frees all sets from this frame's pool. Called by the frame loop right after

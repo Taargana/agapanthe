@@ -33,6 +33,13 @@ public readonly unsafe struct CommandList
         _device.Api.CmdBindPipeline(_buffer, PipelineBindPoint.Graphics, pipeline.Handle);
     }
 
+    /// <summary>Binds a compute pipeline at the compute bind point (dispatch, not draw).</summary>
+    public void BindPipeline(ComputePipeline pipeline)
+    {
+        ArgumentNullException.ThrowIfNull(pipeline);
+        _device.Api.CmdBindPipeline(_buffer, PipelineBindPoint.Compute, pipeline.Handle);
+    }
+
     public void BindVertexBuffer(GpuBuffer buffer, ulong offsetBytes = 0)
     {
         ArgumentNullException.ThrowIfNull(buffer);
@@ -55,6 +62,15 @@ public readonly unsafe struct CommandList
             _buffer, PipelineBindPoint.Graphics, pipeline.Layout, setIndex, 1, &vkSet, 0, null);
     }
 
+    /// <summary>Binds <paramref name="set"/> at set index <paramref name="setIndex"/> for a compute pipeline.</summary>
+    public void BindDescriptorSet(ComputePipeline pipeline, uint setIndex, DescriptorSetHandle set)
+    {
+        ArgumentNullException.ThrowIfNull(pipeline);
+        var vkSet = set.Set;
+        _device.Api.CmdBindDescriptorSets(
+            _buffer, PipelineBindPoint.Compute, pipeline.Layout, setIndex, 1, &vkSet, 0, null);
+    }
+
     /// <summary>Pushes <paramref name="value"/> as push-constant data. The pipeline must declare
     /// a matching <see cref="PushConstantRange"/> (same stages, offset and size).</summary>
     public void PushConstants<T>(GraphicsPipeline pipeline, ShaderStages stages, in T value, uint offsetBytes = 0)
@@ -68,6 +84,28 @@ public readonly unsafe struct CommandList
                 offsetBytes, (uint)Unsafe.SizeOf<T>(), p);
         }
     }
+
+    /// <summary>Pushes <paramref name="value"/> as push-constant data for a compute pipeline. The pipeline must
+    /// declare a matching <see cref="PushConstantRange"/> (same stages, offset and size).</summary>
+    public void PushConstants<T>(ComputePipeline pipeline, ShaderStages stages, in T value, uint offsetBytes = 0)
+        where T : unmanaged
+    {
+        ArgumentNullException.ThrowIfNull(pipeline);
+        fixed (T* p = &value)
+        {
+            _device.Api.CmdPushConstants(
+                _buffer, pipeline.Layout, DescriptorSetLayout.ToVkStages(stages),
+                offsetBytes, (uint)Unsafe.SizeOf<T>(), p);
+        }
+    }
+
+    /// <summary>
+    /// Dispatches a compute grid of <paramref name="groupCountX"/> × <paramref name="groupCountY"/> ×
+    /// <paramref name="groupCountZ"/> workgroups. A compute pipeline and its descriptor sets must be bound
+    /// first; the total invocation count is the group count times the shader's <c>local_size_*</c>.
+    /// </summary>
+    public void Dispatch(uint groupCountX, uint groupCountY = 1, uint groupCountZ = 1)
+        => _device.Api.CmdDispatch(_buffer, groupCountX, groupCountY, groupCountZ);
 
     public void Draw(uint vertexCount, uint instanceCount = 1, uint firstVertex = 0, uint firstInstance = 0)
         => _device.Api.CmdDraw(_buffer, vertexCount, instanceCount, firstVertex, firstInstance);
@@ -222,6 +260,20 @@ public readonly unsafe struct CommandList
             ImageLayout.ShaderReadOnlyOptimal,
             PipelineStageFlags2.FragmentShaderBit,
             AccessFlags2.ShaderReadBit),
+        // Storage image read/written by a compute kernel (IBL generation, spec §3.6). Compute→compute
+        // hazards between successive kernels are covered by a General→General transition here: both the
+        // source and destination scope are the compute stage with read+write access, so a RAW/WAR between
+        // two dispatches over the same image serializes correctly. The IBL generator keeps every
+        // intermediate (cubemap, irradiance, prefiltered mips) in General across its kernels — General is a
+        // valid layout for both storage and sampled access, so a later kernel can sample an earlier kernel's
+        // output without a layout change — and only transitions General→ShaderReadOnly at the final hand-off
+        // to the mesh fragment shader. A future case that must *sample* an image in ShaderReadOnlyOptimal
+        // from a compute kernel (fragment-only today) would need a stage-hinted TransitionImage overload; it
+        // is not required by M7.
+        ImageLayoutState.General => (
+            ImageLayout.General,
+            PipelineStageFlags2.ComputeShaderBit,
+            AccessFlags2.ShaderReadBit | AccessFlags2.ShaderWriteBit),
         ImageLayoutState.TransferSrc => (
             ImageLayout.TransferSrcOptimal,
             PipelineStageFlags2.TransferBit,

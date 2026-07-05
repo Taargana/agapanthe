@@ -15,6 +15,7 @@ public enum DescriptorKind
 {
     UniformBuffer,
     CombinedImageSampler, // used from M3 (textures)
+    StorageImage, // used from M7 (compute write targets, layout General, no sampler)
 }
 
 /// <summary>One binding within a descriptor set layout.</summary>

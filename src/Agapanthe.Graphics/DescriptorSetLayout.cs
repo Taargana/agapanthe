@@ -79,6 +79,7 @@ public sealed unsafe class DescriptorSetLayout : IDisposable
     {
         DescriptorKind.UniformBuffer => DescriptorType.UniformBuffer,
         DescriptorKind.CombinedImageSampler => DescriptorType.CombinedImageSampler,
+        DescriptorKind.StorageImage => DescriptorType.StorageImage,
         _ => throw new ArgumentOutOfRangeException(nameof(kind), kind, "Unknown descriptor kind."),
     };
 

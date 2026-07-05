@@ -25,6 +25,9 @@ public sealed unsafe class DescriptorAllocator : IDisposable
     private const uint SetsPerPool = 64;
     private const uint UniformBuffersPerPool = 64;
     private const uint CombinedImageSamplersPerPool = 64;
+    // Storage images are rare (compute write targets, M7): a handful of IBL views, not per-material. 16 per
+    // pool is ample and keeps the persistent pool from over-reserving descriptor memory.
+    private const uint StorageImagesPerPool = 16;
 
     private readonly GraphicsDevice _device;
     private readonly List<DescriptorPool> _pools = new();
@@ -100,6 +103,32 @@ public sealed unsafe class DescriptorAllocator : IDisposable
     }
 
     /// <summary>
+    /// Points <paramref name="binding"/> of <paramref name="set"/> at <paramref name="image"/>'s default view
+    /// as a storage image (compute read/write, layout General, no sampler).
+    /// </summary>
+    public void WriteStorageImage(DescriptorSetHandle set, uint binding, GpuImage image)
+    {
+        ArgumentNullException.ThrowIfNull(image);
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        DescriptorWrites.StorageImage(_device, set.Set, binding, image.View);
+    }
+
+    /// <summary>
+    /// Points <paramref name="binding"/> of <paramref name="set"/> at a specific <paramref name="view"/>
+    /// (one mip / layer subrange from <see cref="GpuImage.CreateMipView"/>) as a storage image (layout General).
+    /// </summary>
+    public void WriteStorageImage(DescriptorSetHandle set, uint binding, ImageMipView view)
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        if (view.Handle.Handle == 0)
+        {
+            throw new GraphicsException("WriteStorageImage received a default ImageMipView; use one from CreateMipView.");
+        }
+
+        DescriptorWrites.StorageImage(_device, set.Set, binding, view.Handle);
+    }
+
+    /// <summary>
     /// Destroys every pool synchronously. Only valid after <see cref="GraphicsDevice.WaitIdle"/>: the
     /// persistent sets are not deferred through the DeletionQueue, so no frame may still reference them.
     /// </summary>
@@ -150,16 +179,17 @@ public sealed unsafe class DescriptorAllocator : IDisposable
 
     private void CreatePool()
     {
-        var sizes = stackalloc DescriptorPoolSize[2]
+        var sizes = stackalloc DescriptorPoolSize[3]
         {
             new DescriptorPoolSize(DescriptorType.UniformBuffer, UniformBuffersPerPool),
             new DescriptorPoolSize(DescriptorType.CombinedImageSampler, CombinedImageSamplersPerPool),
+            new DescriptorPoolSize(DescriptorType.StorageImage, StorageImagesPerPool),
         };
         var poolInfo = new DescriptorPoolCreateInfo
         {
             SType = StructureType.DescriptorPoolCreateInfo,
             MaxSets = SetsPerPool,
-            PoolSizeCount = 2,
+            PoolSizeCount = 3,
             PPoolSizes = sizes,
         };
         DescriptorPool pool;
@@ -195,6 +225,27 @@ internal static unsafe class DescriptorWrites
             DescriptorCount = 1,
             DescriptorType = DescriptorType.UniformBuffer,
             PBufferInfo = &bufferInfo,
+        };
+        device.Api.UpdateDescriptorSets(device.Device, 1, &write, 0, null);
+    }
+
+    public static void StorageImage(GraphicsDevice device, DescriptorSet set, uint binding, ImageView view)
+    {
+        // Storage image: no sampler, layout General (the compute write layout, matching the transition the
+        // IBL generator records). DescriptorCount 1 — one view per binding.
+        var imageInfo = new DescriptorImageInfo
+        {
+            ImageView = view,
+            ImageLayout = ImageLayout.General,
+        };
+        var write = new WriteDescriptorSet
+        {
+            SType = StructureType.WriteDescriptorSet,
+            DstSet = set,
+            DstBinding = binding,
+            DescriptorCount = 1,
+            DescriptorType = DescriptorType.StorageImage,
+            PImageInfo = &imageInfo,
         };
         device.Api.UpdateDescriptorSets(device.Device, 1, &write, 0, null);
     }
