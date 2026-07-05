@@ -1,6 +1,6 @@
 # Absolute-Human Board — Agapanthe Session 6 (M6 : Shadow Mapping)
 
-**Status**: in-progress
+**Status**: completed
 **Créé**: 2026-07-05
 **Spec**: docs/plans/2026-07-02-graphics-engine-design.md §3.3 (passes), §3.4, §6 (M6)
 **Board persistence**: git-tracked
@@ -68,14 +68,48 @@ W4 (tail): M6-05 audits · M6-06 requirements · M6-07 verif + protocole visuel
 ### M6-04 — Sandbox réglages + captures [code, S] — done (orchestrateur) — OWNER Program.cs
 **Résultat**: cycle debug N étendu à 10 vues (« shadow factor » = DEBUG_SHADOW 9, ajouté par M6-03), titre « Agapanthe — M6 Shadows ». L pivote déjà la clé (l'ombre suit — lightViewProj recalculé chaque frame depuis Lights.Directional). Capture angle face : casque intact, ombrage sous les tuyaux/menton cohérent. 173 tests, 0 validation.
 
-### M6-05 — Self code review [test, S] — pending
-Audits csharp-lowlevel (hot path 3 passes, transitions shadow WAR, leaks) + architecte (prêt M7 : skybox entre scène et tonemap, gaps cubemap/compute tracés). AC: 0 critique.
+### M6-05 — Self code review [test, S] — done (2× PASS)
+**csharp-lowlevel PASS** (agent tué à la conclusion — audit terminé par l'orchestrateur sur ses traces) : ComputeLightViewProj pur struct (zéro alloc, gardes dir dégénérée → bas / scène vide → rayon 1 / up swap |dir.Y|>0.99) ; PCF borné (z [0,1] et uv [0,1] rejetés → lit, texelSize depuis textureSize 2048 jamais nul, comparaison manuelle sans division risquée) ; transitions depth correctes (DepthAttachment = Early|LateFragmentTests + DepthStencilWrite, ShaderReadOnly = FragmentShader+ShaderRead — pattern WAR identique à l'HDR prouvé M5) ; teardown 4 ressources shadow ordonné ; ResourceTracker équilibré (83 ressources, 0 leak).
+**Architecte PASS** : section « plan M7 » ci-dessous. Stabilité caméra confirmée par construction, immutable samplers → phase 2 avec CSM.
 
-### M6-06 — Requirements validation [test, S] — pending
-Spec §6 M6 : D32 2048² ✓, slope-scaled bias ✓, PCF 3×3 ✓, stable caméra mouvement (capture 2 angles), pas d'acné (captures).
+### M6-06 — Requirements validation [test, S] — done
+| Exigence spec §6 M6 | État |
+|---|---|
+| Depth D32_SFLOAT 2048² | ✓ ShadowMapResolution const, ctor |
+| Slope-scaled bias | ✓ 1.25/1.75 statique pipeline, captures sans acné |
+| PCF 3×3 | ✓ manuel (mutableComparisonSamplers=FALSE sur MoltenVK — hardware différé) |
+| 1 cascade (CSM phase 2) | ✓ fit global scène |
+| Stable caméra en mouvement | ✓ par construction : lightViewProj dépend UNIQUEMENT de (lumière, AABB scène) — pas de la caméra |
+| Pas d'acné visible | ✓ captures DEBUG_SHADOW : dôme uniformément lit, 2 angles |
 
-### M6-07 — Full verification + protocole visuel [test, S] — pending
-build/tests/runs 2 fixtures + captures headless annotées dans docs/visual-checks/ (l'utilisateur confirme à l'écran).
+### M6-07 — Full verification + protocole visuel [test, S] — done (partie machine)
+```
+Build 0 Warning(s). Passed! 173/173.
+DamagedHelmet 120 frames : 0 validation, no leaks (83 ressources), 256 MiB (4 blocs).
+BoxTextured 60 frames : 0 validation, no leaks (69 ressources).
+Captures 2 angles : casque intact, auto-ombrage cohérent avec la clé (creux/tuyaux/mâchoire sombres côté opposé).
+```
+Vérification écran par l'utilisateur : L pour pivoter la clé → l'ombre doit suivre ; N ×9 → vue « shadow factor ».
+
+## Revue architecte M6-05 (PASS) — plan M7 acté (9 points, 4 vagues)
+
+Aucun refactor bloquant. Les seams M7 étaient anticipés (ShaderStage.Compute déjà câblé bout en bout, DepthWrite existe, LessOrEqual déjà le compare op — parfait pour skybox z=w). Chemin critique = Graphics d'abord.
+
+**Vague 1 Graphics (API à figer d'abord)** :
+1. ImageUsage.Storage + DescriptorKind.StorageImage + tailles pools + DescriptorWrites.StorageImage (layout General).
+2. GpuImage cubemap : arrayLayers, ViewType 2D/Cube/2DArray, CubeCompatibleBit, **vues additionnelles par mip/face avec leur propre cycle de vie** (le payload deletion n'a que 4 handles — ne pas y empiler). Chemin 2D par défaut inchangé. La plus grosse pièce.
+3. ComputePipeline + CommandList.BindComputePipeline/Dispatch/BindDescriptorSet(Compute) + ImageLayoutState.General + stage ComputeShaderBit.
+4. `device.SubmitImmediate(Action<CommandList>)` — généralise le one-shot de GpuUploader (gap transverse : IBL = batch au chargement, CommandList n'existe que dans la boucle de frame).
+
+**Vague 2 Assets** : 5. Loader HDR float (ImageResultFloat de Stb → HdrImageAsset ; BytesPerTexel += R32G32B32A32Sfloat=16 ou conversion half CPU).
+
+**Vague 3 Rendering** : 6. Générateur IBL (equirect→cubemap→irradiance→prefiltered mips→BRDF LUT via SubmitImmediate). 7. Skybox pass (scene depth Store=true + barrière, ou fusion dans le scope scène ; DepthTest sans Write). 8. Set 0 bindings 3/4/5 + ambiant IBL dans mesh.frag (remplace la constante).
+
+**Vague 4 (déférable)** : 9. Cache disque IBL par hash HDRI (pattern ShaderCompiler SHA256) — optimisation de chargement, pas critère de sortie.
+
+**Immutable samplers (comparateur hardware)** : NON en M7 — zéro valeur pour l'IBL, coût = élargir DescriptorSetLayout + couplage cycle de vie. Phase 2 avec CSM.
+
+**Stabilité ombres confirmée par construction** : ComputeLightViewProj ne lit AUCUNE entrée caméra. Dettes documentées : pas de texel-snapping (lumière statique M6), fit AABB globale (résolu par CSM phase 2).
 
 ## Deferred Work
 
@@ -87,3 +121,4 @@ build/tests/runs 2 fixtures + captures headless annotées dans docs/visual-check
 ## Log
 
 - 2026-07-05: session 6 ouverte. Board S5 archivé. DAG 7 tâches, 4 vagues. Les 10 décisions architecte S5 actées.
+- 2026-07-05: W1-W3 (e41d740, 045adfd). Découverte plateforme : mutableComparisonSamplers=FALSE sur MoltenVK → PCF manuel. M6-05 : 2× PASS. M6-06/07 : 173 tests, 2 fixtures 0 validation 0 leak, captures 2 angles sans acné. **Session 6 close — M6 atteint.** M7 : plan 9 points / 4 vagues acté (section architecte).

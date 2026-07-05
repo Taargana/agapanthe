@@ -1,6 +1,6 @@
 # Agapanthe — Plan complet & état d'avancement
 
-**Mis à jour** : 2026-07-05 (fin session 5) · **Machine de dev** : macOS (Apple M3, MoltenVK) · **Cibles** : Windows / Linux / macOS
+**Mis à jour** : 2026-07-05 (fin session 6) · **Machine de dev** : macOS (Apple M3, MoltenVK) · **Cibles** : Windows / Linux / macOS
 
 ## Vision
 
@@ -42,8 +42,8 @@ Platform ──► Core   (fenêtre GLFW, input, capture souris)
 | M3 | GpuAllocator, staging uploads, textures + mipmaps + samplers | ✅ | S3 |
 | M4 | Loader glTF, tangentes, Scene/Material/Renderer, fixtures Khronos | ✅ | S4 |
 | M5 | PBR Cook-Torrance + 3 lumières HDR + ACES tone mapping | ✅ validé visuellement | S5 |
-| **M6** | **Shadow mapping directionnel (D32 2048², PCF 3×3, slope-scaled bias)** | ⏳ prochain | S6 |
-| M7 | IBL compute (cubemap, irradiance, prefiltered, BRDF LUT) + skybox | ○ | S7 |
+| M6 | Shadow mapping directionnel (D32 2048², PCF 3×3 manuel, slope-scaled bias) | ✅ | S6 |
+| **M7** | **IBL compute (cubemap, irradiance, prefiltered, BRDF LUT) + skybox** | ⏳ prochain | S7 |
 | M8 | Hot reload shaders (+includes), labels RenderDoc, audit perf/leaks final | ○ | S8 |
 
 Chaque jalon clôt sur : Sandbox propre (0 message validation, 0 leak), tests verts, double audit agent (csharp-lowlevel + architecte) PASS, board archivé.
@@ -69,20 +69,18 @@ Chaque jalon clôt sur : Sandbox propre (0 message validation, 0 leak), tests ve
 
 **Dette consciente** : upload async (M8), feel souris (M8), WrapU/V séparés si fixture l'exige, instancing multi-mesh (phase 2), MikkTSpace si artefacts, auto-exposure (hors phase 1), ClearColor obsolète dès le skybox M7.
 
-## Plan M6 — Shadow mapping (prochaine session, 10 décisions architecte actées au board S5)
+## Fin session 6 — M6 livré
 
-Critère de sortie (spec §6) : ombres directionnelles stables caméra en mouvement, pas d'acné visible. D32 2048², PCF 3×3, slope-scaled bias.
+Passe shadow depth-only sans descriptor set (push constants 128 o pile), fit ortho sur l'AABB de scène (stable caméra par construction), PCF 3×3, bias 1.25/1.75 sans acné (captures). Découverte plateforme : MoltenVK interdit les samplers comparateurs mutables (portability subset) → PCF manuel, comparateur hardware différé phase 2 (immutable samplers, avec CSM). 173 tests.
 
-1. `RenderingAttachments.Color` nullable (passe depth-only), émission conditionnelle.
-2. Pipeline depth-only : FragmentShader/ColorFormat optionnels, StageCount/blend conditionnels.
-3. `GraphicsPipelineDesc` += DepthBias{Constant,Slope} (état statique du pipeline shadow).
-4. `SamplerDesc` += CompareOp? (sampler2DShadow), ClampToEdge + border blanc hors-frustum.
-5. `MathHelpers.OrthographicVulkan` (Y-flip, Z [0,1], testé sans GPU).
-6. Set 0 binding 2 = shadow sampler comparateur ; lightViewProj appended dans LightsUniforms (176→240).
-7. Passe shadow SANS descriptor set : model + lightViewProj = 128 o pile en push constants.
-8. `Scene` expose une AABB monde (SceneBuilder) → fit ortho dans le Renderer ; réglages en Renderer.ShadowSettings.
-9. Shadow map 2048² créée une fois au ctor (invariante au resize, hors EnsureTargets).
-10. Découper DrawScene en RecordShadowPass/RecordScenePass/RecordTonemapPass avant insertion.
+## Plan M7 — IBL & skybox (prochaine session, 9 points architecte actés au board S6)
+
+Critère de sortie (spec §5/§6) : protocole visuel sur MetalRoughSpheres (rangée metallic correcte). L'IBL remplace l'ambiant constant — le vrai remède au métal sombre.
+
+1. **Graphics d'abord** : ImageUsage.Storage + DescriptorKind.StorageImage ; GpuImage cubemap (layers, ViewType.Cube, vues par mip/face à cycle de vie propre — la plus grosse pièce) ; ComputePipeline + CommandList.Dispatch ; device.SubmitImmediate.
+2. **Assets** : loader HDR float (equirect .hdr).
+3. **Rendering** : générateur IBL compute (equirect→cubemap→irradiance→prefiltered→BRDF LUT), skybox pass (scene depth Store + DepthTest sans Write), set 0 bindings 3/4/5 + ambiant IBL dans mesh.frag.
+4. **Déférable** : cache disque des maps par hash HDRI.
 
 ## Après M6
 
