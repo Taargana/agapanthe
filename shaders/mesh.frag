@@ -56,6 +56,23 @@ layout(set = 1, binding = 5) uniform MaterialUbo {
     vec4 alphaCutoffFlags;       // x cutoff, y alphaMode (0 = Opaque, 1 = Mask), zw reserved
 } material;
 
+// Debug visualization selector (0 = PBR); pushed by the Renderer after the vertex-stage model
+// matrix. Rendering intermediate quantities as colors is the fastest way to localize a shading
+// bug: a broken input shows exactly where and which.
+layout(push_constant) uniform PushConstants {
+    layout(offset = 64) int debugView;
+} push;
+
+const int DEBUG_NONE = 0;
+const int DEBUG_SHADED_NORMAL = 1;   // final N (normal map applied), 0.5+0.5
+const int DEBUG_GEOMETRIC_NORMAL = 2; // interpolated vertex normal only
+const int DEBUG_BASECOLOR = 3;
+const int DEBUG_METALLIC = 4;
+const int DEBUG_ROUGHNESS = 5;
+const int DEBUG_OCCLUSION = 6;
+const int DEBUG_TANGENT = 7;          // xyz 0.5+0.5, handedness = green/red tint on w
+const int DEBUG_KEY_NDOTL = 8;        // NdotL of the directional light (final N)
+
 // --- BRDF terms ---------------------------------------------------------------------------------------
 
 // GGX / Trowbridge-Reitz normal distribution. alpha = roughness^2 (perceptual -> physical remap).
@@ -130,6 +147,7 @@ void main() {
         ? normalize(tRes)
         : normalize(cross(N, abs(N.x) < 0.9 ? vec3(1.0, 0.0, 0.0) : vec3(0.0, 1.0, 0.0)));
     vec3 B = worldTangent.w * cross(N, T);
+    vec3 geometricN = N;
     vec3 nTs = texture(normalTex, fragUv).xyz * 2.0 - 1.0;
     nTs.xy *= material.mrno.z; // normalScale
     N = normalize(mat3(T, B, N) * nTs);
@@ -195,5 +213,22 @@ void main() {
     vec3 emissive = texture(emissiveTex, fragUv).rgb * material.emissiveFactorStrength.rgb * material.emissiveFactorStrength.w;
 
     vec3 color = Lo + ambient + emissive;
+
+    // Debug visualizations bypass the lighting result. Values are divided by the exposure the
+    // tonemap will multiply back, so debug colors reach the screen (almost) linearly readable.
+    if (push.debugView != DEBUG_NONE) {
+        vec3 debug =
+            push.debugView == DEBUG_SHADED_NORMAL    ? N * 0.5 + 0.5
+          : push.debugView == DEBUG_GEOMETRIC_NORMAL ? geometricN * 0.5 + 0.5
+          : push.debugView == DEBUG_BASECOLOR        ? albedo
+          : push.debugView == DEBUG_METALLIC         ? vec3(metallic)
+          : push.debugView == DEBUG_ROUGHNESS        ? vec3(roughness)
+          : push.debugView == DEBUG_OCCLUSION        ? vec3(ao)
+          : push.debugView == DEBUG_TANGENT          ? mix(vec3(1, 0, 0), vec3(0, 1, 0), step(0.0, worldTangent.w)) * (T * 0.5 + 0.5)
+          : /* DEBUG_KEY_NDOTL */                      vec3(max(dot(N, -normalize(lights.dirDirection.xyz)), 0.0));
+        outColor = vec4(debug, 1.0);
+        return;
+    }
+
     outColor = vec4(color, base.a);
 }

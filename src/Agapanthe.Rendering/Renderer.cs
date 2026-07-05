@@ -118,7 +118,11 @@ public sealed class Renderer : IDisposable
                 // Full 5-attribute layout — mesh.vert consumes every one (see the shader header note).
                 VertexLayout = Vertex.Layout,
                 SetLayouts = [_frameSetLayout, _materialSetLayout],
-                PushConstants = [new PushConstantRange(0, 64, ShaderStages.Vertex)], // 64B model matrix
+                PushConstants =
+                [
+                    new PushConstantRange(0, 64, ShaderStages.Vertex),   // model matrix
+                    new PushConstantRange(64, 4, ShaderStages.Fragment), // debug view selector
+                ],
                 // Scene renders into the HDR target (decision 2), not the swapchain: the tonemap pass owns
                 // the sRGB swapchain write.
                 ColorFormat = HdrFormat,
@@ -199,6 +203,13 @@ public sealed class Renderer : IDisposable
     /// (directional key light, up to 4 point lights, constant ambient placeholder until IBL M7).
     /// </summary>
     public SceneLights Lights { get; } = new();
+
+    /// <summary>
+    /// Shading debug visualization (0 = normal PBR). Values map to the DEBUG_* selector in
+    /// <c>mesh.frag</c>: 1 shaded normal, 2 geometric normal, 3 base color, 4 metallic,
+    /// 5 roughness, 6 occlusion, 7 tangent (+handedness tint), 8 key-light NdotL.
+    /// </summary>
+    public int DebugView { get; set; }
 
     /// <summary>
     /// Records the two-pass HDR frame (architect decisions 2-3) into <paramref name="cmd"/>, resolving into the
@@ -288,6 +299,9 @@ public sealed class Renderer : IDisposable
 
         cmd.BindPipeline(pipeline);
         cmd.BindDescriptorSet(pipeline, 0, frameSet); // set 0: per-frame camera
+
+        var debugView = DebugView;
+        cmd.PushConstants(pipeline, ShaderStages.Fragment, in debugView, offsetBytes: 64);
 
         // Index loop over IReadOnlyList<MeshInstance>: the indexer returns the struct by value with no
         // enumerator/boxing allocation (foreach on the interface would box the enumerator).

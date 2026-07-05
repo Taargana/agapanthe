@@ -145,6 +145,11 @@ window.KeyPressed += key =>
             renderer.Exposure = MathF.Max(renderer.Exposure / 1.26f, 1f / 64f);
             Log.Info($"Exposure: {renderer.Exposure:F3} ({MathF.Log2(renderer.Exposure):+0.0;-0.0} EV)");
             break;
+        // N: cycle the shading debug views (PBR -> normals -> basecolor -> ... , see mesh.frag).
+        case Key.N when renderer is not null:
+            renderer.DebugView = (renderer.DebugView + 1) % 9;
+            Log.Info($"Debug view: {renderer.DebugView} ({DebugViews.Names[renderer.DebugView]})");
+            break;
         // L: swing the key light around the vertical axis (lighting debug).
         case Key.L when renderer is not null:
             var d = renderer.Lights.Directional;
@@ -371,4 +376,13 @@ static void FrameCamera(Camera camera, FreeCameraController controller, Agapanth
     // couple of seconds regardless of the model's absolute size (a fixed speed felt insane on
     // a 1-unit helmet). Shift sprints at 3x.
     controller.MoveSpeed = MathF.Max(diagonal * 0.5f, 0.01f);
+}
+
+file static class DebugViews
+{
+    public static readonly string[] Names =
+    [
+        "PBR", "shaded normal", "geometric normal", "base color", "metallic",
+        "roughness", "occlusion", "tangent (+handedness)", "key NdotL",
+    ];
 }
