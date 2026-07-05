@@ -1,6 +1,6 @@
 # Absolute-Human Board — Agapanthe Session 5 (M5 : PBR & Lumières)
 
-**Status**: completed (capture visuelle humaine en attente — non bloquante pour M6)
+**Status**: completed
 **Créé**: 2026-07-05
 **Spec**: docs/plans/2026-07-02-graphics-engine-design.md §3.3 (passes), §3.4, §5 (protocole visuel), §6 (M5)
 **Board persistence**: git-tracked
@@ -126,3 +126,4 @@ Dette M5 acceptable : ACES fixe + exposition manuelle (auto-exposure hors phase 
 
 - 2026-07-05: session 5 ouverte. Board S4 archivé. DAG 9 tâches, 6 vagues. Plan architecte S4 acté intégralement (7 décisions + aniso S3).
 - 2026-07-05: W1-W5 exécutées (a84ebac, 96f6946, 16e9163, 5b1b0e2+7651da6, 2d76b32). W3 : deux agents tués par limites de session, complétés par l'orchestrateur. M5-07 : 2× PASS, NaN TBN (BoxTextured ±X) + early-out NdotL corrigés. M5-08/09 machine : 159 tests, 2 fixtures 0 validation 0 leak. **Session 5 close — M5 atteint** (PBR Cook-Torrance + HDR/ACES sur GPU). Capture visuelle humaine : gabarit docs/visual-checks/. M6 : 10 décisions architecte actées (section dédiée).
+- 2026-07-05 (post-clôture): protocole visuel M5-09 exécuté par l'utilisateur — a révélé un BUG réel : FrontFace.Clockwise culait les faces avant (coque du casque absente, intérieur visible). Cause : dérivation du winding sans le signe moins de la formule Vulkan. Fix : CounterClockwise (0dd9ff1) + outillage capture headless (GpuReadback, SaveHdrCapture, AGAPANTHE_CAPTURE/VIEW) + vues debug shader (touche N) + plancher spéculaire f0 dans l'ambiant (a8cc15c). Validé visuellement par l'utilisateur. **M5 définitivement PASS.**

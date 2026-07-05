@@ -1,6 +1,23 @@
 # Protocole visuel M5 — DamagedHelmet (spec §5)
 
-**Statut : EN ATTENTE DE CAPTURE (revue humaine requise)**
+**Statut : PASS (revue humaine du 2026-07-05)**
+
+## Déroulé effectif
+
+La comparaison côte à côte avec le viewer Khronos (Debug Channels : Normal Texture, Geometry
+Normal, Base Color, Metallic, Roughness, Geometry Tangent) a révélé un **vrai bug** : la coque
+externe du casque manquait, exposant la structure interne et le HUD (« on voit l'intérieur du
+modèle »). Diagnostic par captures headless (`AGAPANTHE_CAPTURE`/`AGAPANTHE_VIEW`, outillage créé
+pour l'occasion) : le back-face culling supprimait les faces avant — `FrontFace.Clockwise` était
+faux (signe manquant dans la dérivation du winding vs la formule Vulkan). Corrigé en
+`CounterClockwise` (commit `0dd9ff1`), casque fermé identique au viewer Khronos, validé par
+l'utilisateur (« nikel »).
+
+Les vues debug moteur (touche N) correspondent aux Debug Channels du viewer Khronos :
+normales/baseColor/metallic/roughness/tangentes cohérentes des deux côtés.
+
+Écart résiduel attendu : pas d'IBL avant M7 → zones hors éclairage direct plus sombres que le
+viewer (ambiant constant + plancher spéculaire f0 pour les métaux).
 
 ## Procédure
 
