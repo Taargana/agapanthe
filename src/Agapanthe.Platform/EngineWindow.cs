@@ -252,18 +252,27 @@ public sealed class EngineWindow : IDisposable
     /// </summary>
     private void RecenterCursor()
     {
-        if (!_mouseCaptured || !_recenterCapture || _mouse is null)
+        if (!_mouseCaptured || !_recenterCapture || _mouse is null || !_hasLastMousePosition)
         {
             return;
         }
 
+        // Warp only when the cursor enters the outer 25% band of the window, not every tick:
+        // macOS coalesces mouse events to roughly one per frame, so dropping the delta
+        // reference each tick would eat every single event and deaden the mouse entirely.
+        // Between warps, deltas accumulate normally; on warp the reference is dropped so the
+        // warp's own move event re-establishes it at the cursor's actual reported position
+        // (never assumed — a mismatch there caused phantom drift).
         var center = new Vector2(_window.Size.X / 2f, _window.Size.Y / 2f);
+        var offset = _lastMousePosition - center;
+        var limitX = _window.Size.X * 0.375f; // 75% of the half-width
+        var limitY = _window.Size.Y * 0.375f;
+        if (MathF.Abs(offset.X) < limitX && MathF.Abs(offset.Y) < limitY)
+        {
+            return;
+        }
+
         _mouse.Position = center;
-        // Drop the reference instead of assuming the warp landed exactly at `center`: the next
-        // MouseMove (the warp's own synthetic event) re-establishes it at the cursor's *actual*
-        // reported position. Assuming the value invited a constant phantom delta every frame
-        // whenever warp coordinates didn't match move-event coordinates (camera drifting on its
-        // own while captured).
         _hasLastMousePosition = false;
     }
 
