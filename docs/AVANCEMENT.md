@@ -41,8 +41,8 @@ Platform ──► Core   (fenêtre GLFW, input, capture souris)
 | M2 | Mesh 3D : depth, descriptors, UBO caméra, push constants, caméra libre | ✅ | S2 |
 | M3 | GpuAllocator, staging uploads, textures + mipmaps + samplers | ✅ | S3 |
 | M4 | Loader glTF, tangentes, Scene/Material/Renderer, fixtures Khronos | ✅ | S4 |
-| **M5** | **PBR + lumières (dir + ponctuelles) + HDR/tone mapping** | ⏳ prochain | S5 |
-| M6 | Shadow mapping directionnel (D32 2048², PCF 3×3, slope-scaled bias) | ○ | S6 |
+| M5 | PBR Cook-Torrance + 3 lumières HDR + ACES tone mapping | ✅ (capture visuelle humaine en attente) | S5 |
+| **M6** | **Shadow mapping directionnel (D32 2048², PCF 3×3, slope-scaled bias)** | ⏳ prochain | S6 |
 | M7 | IBL compute (cubemap, irradiance, prefiltered, BRDF LUT) + skybox | ○ | S7 |
 | M8 | Hot reload shaders (+includes), labels RenderDoc, audit perf/leaks final | ○ | S8 |
 
