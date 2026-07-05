@@ -64,13 +64,6 @@ public sealed unsafe class FrameRenderer : IDisposable
     }
 
     /// <summary>
-    /// Default clear color (RGBA, linear). Retained for source compatibility: the clear is now applied by the
-    /// pass owner via <see cref="CommandList.BeginRendering"/> (the draw callback), which supplies its own
-    /// clear color — this value is not consumed by the loop and is superseded in M5-02.
-    /// </summary>
-    public (float R, float G, float B, float A) ClearColor { get; set; } = (0f, 0f, 0f, 1f);
-
-    /// <summary>
     /// Records and presents one frame. The loop transitions the acquired swapchain image to
     /// ColorAttachment, invokes <paramref name="record"/> (which opens its own rendering scope against the
     /// <see cref="SwapchainTarget"/>), then transitions to PresentSrc. A frame is silently skipped when the

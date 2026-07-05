@@ -74,10 +74,9 @@ window.Loaded += () =>
     // slightly-raised front direction, and orient yaw/pitch to look at the centre.
     FrameCamera(camera, controller, model);
 
-    frameRenderer = new FrameRenderer(device, swapchain, () => window.FramebufferSize)
-    {
-        ClearColor = (0.02f, 0.02f, 0.05f, 1f),
-    };
+    // The scene clear color lives on the Renderer now (it owns the scene pass); the FrameRenderer only
+    // drives sync/acquire/present and no longer carries a clear color.
+    frameRenderer = new FrameRenderer(device, swapchain, () => window.FramebufferSize);
 
     // Capturing 'scene'/'camera'/'renderer' (all assigned by now) exactly once — the delegate is built a
     // single time here, never per frame.
