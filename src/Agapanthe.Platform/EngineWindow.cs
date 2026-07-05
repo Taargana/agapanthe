@@ -140,15 +140,24 @@ public sealed class EngineWindow : IDisposable
         var cursor = _mouse.Cursor;
         if (captured)
         {
+            // Raw (unaccelerated) when the platform has it; otherwise Disabled — the cursor is
+            // hidden, OS-confined to the window and reports unbounded virtual coordinates, so it
+            // can never wander off and click other windows. (An earlier revision distrusted
+            // Disabled on macOS, but the edge-pinning it was blamed for came from grabbing the
+            // cursor before the window had focus; capture now only ever happens on click, with
+            // focus guaranteed.) Hidden+recenter remains as a last-resort fallback only.
             if (cursor.IsSupported(CursorMode.Raw))
             {
                 cursor.CursorMode = CursorMode.Raw;
                 _recenterCapture = false;
             }
+            else if (cursor.IsSupported(CursorMode.Disabled))
+            {
+                cursor.CursorMode = CursorMode.Disabled;
+                _recenterCapture = false;
+            }
             else
             {
-                // CursorMode.Disabled is not trustworthy everywhere (macOS keeps a real,
-                // screen-clamped cursor), so use the deterministic classic: hide + warp.
                 cursor.CursorMode = CursorMode.Hidden;
                 _recenterCapture = true;
             }
