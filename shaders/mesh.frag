@@ -184,8 +184,12 @@ void main() {
 
     // --- Ambient (IBL placeholder) + AO ---------------------------------------------------------------
     // AO occludes only the ambient/indirect term (standard); direct light is unshadowed by the AO map.
+    // Pre-IBL ambient: metals have no diffuse, so a pure albedo ambient leaves them pitch black
+    // between specular highlights (they read as holes in the model). Standard placeholder until
+    // IBL (M7): give the ambient a base specular term via f0 — dielectrics get their albedo,
+    // metals get their tinted reflectance floor.
     float ao = mix(1.0, texture(occlusionTex, fragUv).r, material.mrno.w);
-    vec3 ambient = lights.ambientPointCount.rgb * albedo * ao;
+    vec3 ambient = lights.ambientPointCount.rgb * ((1.0 - metallic) * albedo + f0) * ao;
 
     // --- Emissive (added HDR, no tonemap here) --------------------------------------------------------
     vec3 emissive = texture(emissiveTex, fragUv).rgb * material.emissiveFactorStrength.rgb * material.emissiveFactorStrength.w;

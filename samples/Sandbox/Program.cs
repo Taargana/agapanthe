@@ -299,7 +299,9 @@ static void SetupLights(SceneLights lights, Agapanthe.Assets.Model.ModelAsset mo
         Range = 6f * reach,
     };
     lights.PointCount = 2;
-    lights.Ambient = new Vector3(0.03f, 0.03f, 0.035f);
+    // Slightly above the 0.03 engine default: without IBL (M7) the ambient is the only thing
+    // keeping unlit metal from reading as a void, so the Sandbox favors legibility.
+    lights.Ambient = new Vector3(0.08f, 0.08f, 0.09f);
 }
 
 static (Vector3 Center, float Diagonal) ModelBounds(Agapanthe.Assets.Model.ModelAsset model)
