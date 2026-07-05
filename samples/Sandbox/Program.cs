@@ -152,7 +152,9 @@ window.Updated += dt =>
         moveLeft: window.IsKeyDown(Key.A),
         moveRight: window.IsKeyDown(Key.D),
         moveUp: window.IsKeyDown(Key.Space),
-        moveDown: window.IsKeyDown(Key.ControlLeft),
+        // ControlLeft is intercepted by macOS in some setups (Ctrl+click = right click), so C
+        // doubles as the descend key.
+        moveDown: window.IsKeyDown(Key.ControlLeft) || window.IsKeyDown(Key.C),
         lookDelta: window.MouseDelta,
         sprint: window.IsKeyDown(Key.ShiftLeft));
     controller.Update(camera, (float)dt, in input);

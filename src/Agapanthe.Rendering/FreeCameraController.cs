@@ -30,10 +30,10 @@ public readonly struct CameraInput
         Sprint = sprint;
     }
 
-    /// <summary>W — move along the camera's horizontal forward (yaw only, FPS style).</summary>
+    /// <summary>W — move along the camera's look direction (pitch included).</summary>
     public bool MoveForward { get; }
 
-    /// <summary>S — move opposite the horizontal forward.</summary>
+    /// <summary>S — move opposite the look direction.</summary>
     public bool MoveBackward { get; }
 
     /// <summary>A — strafe along -right.</summary>
@@ -60,10 +60,10 @@ public readonly struct CameraInput
 }
 
 /// <summary>
-/// Basic FPS controller: the mouse drives yaw/pitch, WASD moves in the <b>horizontal plane</b>
-/// (yaw only — looking up or down never changes the travel direction), Space/Ctrl move straight
-/// up/down along world Y, Shift sprints. Pitch is clamped to ±89° to keep the view matrix away
-/// from the gimbal poles.
+/// FPS-style controller: the mouse drives yaw/pitch, W/S travel along the camera's <b>look
+/// direction</b> (pitch included — aim up and W climbs), A/D strafe horizontally, Space/Ctrl
+/// move straight up/down along world Y, Shift sprints. Pitch is clamped to ±89° to keep the
+/// view matrix away from the gimbal poles.
 /// </summary>
 /// <remarks>
 /// Sign conventions (see also <see cref="Camera"/>):
@@ -114,8 +114,8 @@ public sealed class FreeCameraController
         camera.Pitch -= input.LookDelta.Y * LookSensitivityY;
         camera.Pitch = Math.Clamp(camera.Pitch, -MaxPitch, MaxPitch);
 
-        // --- Move (FPS style): W/S travel along the yaw heading projected on the ground plane,
-        // A/D strafe, Space/Ctrl are pure world-vertical. Pitch never bends the travel path. ---
+        // --- Move: W/S travel along the full look direction (aim up + W climbs), A/D strafe in
+        // the horizontal plane, Space/Ctrl are pure world-vertical. ---
         float strafe = (input.MoveRight ? 1f : 0f) - (input.MoveLeft ? 1f : 0f);
         float lift = (input.MoveUp ? 1f : 0f) - (input.MoveDown ? 1f : 0f);
         float advance = (input.MoveForward ? 1f : 0f) - (input.MoveBackward ? 1f : 0f);
@@ -125,11 +125,11 @@ public sealed class FreeCameraController
             return;
         }
 
-        // Horizontal heading from yaw alone — same formula as Camera.Forward with pitch = 0.
+        // Strafe stays horizontal (yaw only) so A/D never gain a vertical component.
         var forwardFlat = new Vector3(MathF.Sin(camera.Yaw), 0f, -MathF.Cos(camera.Yaw));
         var right = new Vector3(-forwardFlat.Z, 0f, forwardFlat.X); // cross(forwardFlat, +Y)
 
-        var direction = (forwardFlat * advance) + (right * strafe) + (Vector3.UnitY * lift);
+        var direction = (camera.Forward * advance) + (right * strafe) + (Vector3.UnitY * lift);
         if (direction == Vector3.Zero)
         {
             return; // Opposing keys cancelled out.
