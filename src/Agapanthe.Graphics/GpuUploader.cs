@@ -472,6 +472,7 @@ public sealed unsafe class GpuUploader : IDisposable
     {
         PixelFormat.Rgba8Srgb or PixelFormat.Rgba8Unorm or PixelFormat.Bgra8Srgb => 4,
         PixelFormat.Rgba16Sfloat => 8,
+        PixelFormat.R32G32B32A32Sfloat => 16,
         _ => throw new GraphicsException($"Format {format} is not an uploadable color format for image staging."),
     };
 }
