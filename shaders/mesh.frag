@@ -50,6 +50,13 @@ layout(set = 0, binding = 1) uniform LightsUbo {
 // with ClampToEdge; out-of-frustum lookups are rejected in the shader, so we never rely on the border color.
 layout(set = 0, binding = 2) uniform sampler2D shadowMap;
 
+// Set 0, bindings 3-5 = image-based lighting (M7). Generated once by IblGenerator from the HDRI:
+//   3 irradiance cubemap (diffuse ambient), 4 prefiltered specular cubemap (roughness across its mip chain),
+//   5 environment BRDF LUT (RG = split-sum scale/bias). Together they replace the constant ambient placeholder.
+layout(set = 0, binding = 3) uniform samplerCube irradianceMap;
+layout(set = 0, binding = 4) uniform samplerCube prefilteredMap;
+layout(set = 0, binding = 5) uniform sampler2D brdfLut;
+
 // --- Set 1: per-material PBR (MaterialLayout, frozen) --------------------------------------------------
 layout(set = 1, binding = 0) uniform sampler2D baseColorTex;        // sRGB
 layout(set = 1, binding = 1) uniform sampler2D normalTex;           // linear tangent-space normal map
@@ -108,6 +115,14 @@ vec3 fresnelSchlick(float cosTheta, vec3 f0) {
     float m = clamp(1.0 - cosTheta, 0.0, 1.0);
     float m2 = m * m;
     return f0 + (1.0 - f0) * (m2 * m2 * m); // (1-cos)^5
+}
+
+// Roughness-aware Schlick Fresnel for the IBL ambient (Karis): the reflectance ceiling is raised toward
+// (1 - roughness) so rough surfaces don't reflect a hard white rim at grazing angles.
+vec3 fresnelSchlickRoughness(float cosTheta, vec3 f0, float roughness) {
+    float m = clamp(1.0 - cosTheta, 0.0, 1.0);
+    float m2 = m * m;
+    return f0 + (max(vec3(1.0 - roughness), f0) - f0) * (m2 * m2 * m);
 }
 
 // One light's outgoing radiance contribution for surface (N, V, NdotV, albedo, metallic, alpha, f0).
@@ -256,14 +271,25 @@ void main() {
         Lo += shade(L, radiance, N, V, NdotV, albedo, metallic, alpha, f0);
     }
 
-    // --- Ambient (IBL placeholder) + AO ---------------------------------------------------------------
+    // --- Ambient (image-based lighting) + AO ----------------------------------------------------------
     // AO occludes only the ambient/indirect term (standard); direct light is unshadowed by the AO map.
-    // Pre-IBL ambient: metals have no diffuse, so a pure albedo ambient leaves them pitch black
-    // between specular highlights (they read as holes in the model). Standard placeholder until
-    // IBL (M7): give the ambient a base specular term via f0 — dielectrics get their albedo,
-    // metals get their tinted reflectance floor.
+    // IBL (M7) replaces the old constant-ambient placeholder: the diffuse term comes from the irradiance
+    // cubemap, the specular term from the split-sum of the prefiltered environment (sampled at a roughness-
+    // driven mip) and the BRDF LUT. This is what finally gives metals something to reflect in unlit areas.
     float ao = mix(1.0, texture(occlusionTex, fragUv).r, material.mrno.w);
-    vec3 ambient = lights.ambientPointCount.rgb * ((1.0 - metallic) * albedo + f0) * ao;
+
+    vec3 F_ambient = fresnelSchlickRoughness(NdotV, f0, roughness);
+    vec3 kdAmbient = (1.0 - F_ambient) * (1.0 - metallic); // metals have no diffuse
+    vec3 diffuseIbl = texture(irradianceMap, N).rgb * albedo;
+
+    // Prefiltered specular: the mip encodes roughness (mip 0 = mirror, last mip = fully rough).
+    float maxMip = float(textureQueryLevels(prefilteredMap) - 1);
+    vec3 R = reflect(-V, N);
+    vec3 prefilteredColor = textureLod(prefilteredMap, R, roughness * maxMip).rgb;
+    vec2 envBrdf = texture(brdfLut, vec2(NdotV, roughness)).rg;
+    vec3 specularIbl = prefilteredColor * (f0 * envBrdf.x + envBrdf.y);
+
+    vec3 ambient = (kdAmbient * diffuseIbl + specularIbl) * ao;
 
     // --- Emissive (added HDR, no tonemap here) --------------------------------------------------------
     vec3 emissive = texture(emissiveTex, fragUv).rgb * material.emissiveFactorStrength.rgb * material.emissiveFactorStrength.w;

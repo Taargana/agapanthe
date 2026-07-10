@@ -38,7 +38,7 @@ if (modelPath is null)
 var maxFrames = int.TryParse(Environment.GetEnvironmentVariable("AGAPANTHE_MAX_FRAMES"), out var mf) ? mf : -1;
 var renderedFrames = 0;
 
-using var window = new EngineWindow("Agapanthe — M6 Shadows", 1280, 720);
+using var window = new EngineWindow("Agapanthe — M7 IBL", 1280, 720);
 
 GraphicsDevice? device = null;
 Swapchain? swapchain = null;
@@ -91,6 +91,18 @@ window.Loaded += () =>
     // light placed from the scene bounds — a classic 3-point setup that reads PBR materials
     // well. HDR intensities (> 1) are expected; the ACES tonemap compresses them.
     SetupLights(renderer.Lights, scene);
+
+    // Load the HDRI environment and generate IBL (M7). The renderer needs an environment before it can draw
+    // (the ambient and skybox both sample it). The fixture is copied into models/ next to the executable.
+    var iblHdrPath = Path.Combine(modelsDir, "studio_small_1k.hdr");
+    if (File.Exists(iblHdrPath))
+    {
+        renderer.SetEnvironment(HdrImageLoader.Load(iblHdrPath));
+    }
+    else
+    {
+        Log.Error($"Sandbox: HDRI environment '{iblHdrPath}' not found; the M7 renderer requires one to draw.");
+    }
 
     // The scene clear color lives on the Renderer now (it owns the scene pass); the FrameRenderer only
     // drives sync/acquire/present and no longer carries a clear color.

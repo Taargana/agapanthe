@@ -119,6 +119,21 @@ public sealed class Renderer : IDisposable
     // serializes after that read.
     private bool _shadowInitialized;
 
+    // Image-based lighting (M7). The generator builds the maps from an HDRI supplied via SetEnvironment; the
+    // maps feed set 0 bindings 3/4/5 (irradiance, prefiltered, BRDF LUT) every frame and the skybox pass. All
+    // three sample through one linear/clamp sampler (the prefiltered map walks its mip chain for roughness).
+    private IblGenerator? _iblGenerator;
+    private IblMaps? _iblMaps;
+    private Sampler? _iblSampler;
+
+    // Skybox pass (M7): a vertex-buffer-less fullscreen triangle at the far plane sampling the environment
+    // cubemap, drawn INSIDE the scene pass after the meshes (depth test LessOrEqual, no depth write) so it
+    // fills only the background. Its own set 0 = camera UBO (ray reconstruction) + environment cubemap.
+    private ShaderModule? _skyboxVertexShader;
+    private ShaderModule? _skyboxFragmentShader;
+    private DescriptorSetLayout? _skyboxSetLayout;
+    private GraphicsPipeline? _skyboxPipeline;
+
     private bool _disposed;
 
     /// <summary>
@@ -154,6 +169,10 @@ public sealed class Renderer : IDisposable
                     new DescriptorBinding(0, DescriptorKind.UniformBuffer, ShaderStages.Vertex | ShaderStages.Fragment),
                     new DescriptorBinding(1, DescriptorKind.UniformBuffer, ShaderStages.Fragment),
                     new DescriptorBinding(2, DescriptorKind.CombinedImageSampler, ShaderStages.Fragment),
+                    // M7 IBL: irradiance (3), prefiltered specular (4), BRDF LUT (5) — all fragment-sampled.
+                    new DescriptorBinding(3, DescriptorKind.CombinedImageSampler, ShaderStages.Fragment),
+                    new DescriptorBinding(4, DescriptorKind.CombinedImageSampler, ShaderStages.Fragment),
+                    new DescriptorBinding(5, DescriptorKind.CombinedImageSampler, ShaderStages.Fragment),
                 ]);
 
             // Set 1 = per-material, frozen 6-binding PBR shape. The allocator is public so SceneBuilder can
@@ -275,6 +294,42 @@ public sealed class Renderer : IDisposable
                 // The triangle is a screen-space quad; face orientation is meaningless, so cull nothing.
                 Cull = CullMode.None,
             });
+
+            // --- Image-based lighting + skybox (M7) ---------------------------------------------------------
+            // The generator is reusable across HDRIs; the maps themselves are produced later by SetEnvironment.
+            // One linear/clamp sampler serves the irradiance, prefiltered (mip-walked for roughness) and BRDF
+            // LUT reads, and the skybox's environment sample.
+            _iblGenerator = new IblGenerator(device, shaderDirectory);
+            _iblSampler = new Sampler(device, new SamplerDesc(
+                Filter: SamplerFilter.Linear, MipFilter: SamplerFilter.Linear, AddressMode: SamplerAddressMode.ClampToEdge));
+
+            var skyboxVertSpirv = _shaderCompiler.CompileFile(Path.Combine(shaderDirectory, "skybox.vert"), ShaderStage.Vertex);
+            var skyboxFragSpirv = _shaderCompiler.CompileFile(Path.Combine(shaderDirectory, "skybox.frag"), ShaderStage.Fragment);
+            _skyboxVertexShader = new ShaderModule(device, skyboxVertSpirv, ShaderStage.Vertex);
+            _skyboxFragmentShader = new ShaderModule(device, skyboxFragSpirv, ShaderStage.Fragment);
+
+            // Skybox set 0: camera UBO (vertex, ray reconstruction) + environment cubemap (fragment).
+            _skyboxSetLayout = new DescriptorSetLayout(
+                device,
+                [
+                    new DescriptorBinding(0, DescriptorKind.UniformBuffer, ShaderStages.Vertex),
+                    new DescriptorBinding(1, DescriptorKind.CombinedImageSampler, ShaderStages.Fragment),
+                ]);
+
+            _skyboxPipeline = new GraphicsPipeline(device, new GraphicsPipelineDesc
+            {
+                VertexShader = _skyboxVertexShader,
+                FragmentShader = _skyboxFragmentShader,
+                VertexLayout = null, // fullscreen triangle generated from gl_VertexIndex
+                SetLayouts = [_skyboxSetLayout],
+                ColorFormat = HdrFormat,
+                DepthFormat = DepthFormat,
+                // Test against the scene depth but never write: the far-plane triangle (z=w=1) passes the
+                // LessOrEqual test only where the cleared background depth (1.0) survived, i.e. no geometry.
+                DepthTest = true,
+                DepthWrite = false,
+                Cull = CullMode.None,
+            });
         }
         catch
         {
@@ -386,12 +441,32 @@ public sealed class Renderer : IDisposable
     /// passed <c>in</c> to the sub-passes to avoid recomputing it.
     /// </para>
     /// </summary>
+    /// <summary>
+    /// Generates the image-based-lighting maps from <paramref name="environment"/> (an equirectangular HDR,
+    /// e.g. from <see cref="Agapanthe.Assets.HdrImageLoader"/>) and adopts them: the scene ambient and the
+    /// skybox sample these from the next frame on. Replaces any previously-set environment (the old maps are
+    /// released, deferred). Must be called at load time before the first <see cref="DrawScene"/> — the M7
+    /// renderer has no ambient until an environment is set. Synchronous (runs the compute generator).
+    /// </summary>
+    public void SetEnvironment(Agapanthe.Assets.Model.HdrImageAsset environment)
+    {
+        ArgumentNullException.ThrowIfNull(environment);
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        _iblMaps?.Dispose();
+        _iblMaps = _iblGenerator!.Generate(environment);
+    }
+
     public void DrawScene(Scene scene, Camera camera, CommandList cmd, FrameContext frame, SwapchainTarget target)
     {
         ArgumentNullException.ThrowIfNull(scene);
         ArgumentNullException.ThrowIfNull(camera);
         ArgumentNullException.ThrowIfNull(frame);
         ObjectDisposedException.ThrowIf(_disposed, this);
+        if (_iblMaps is null)
+        {
+            throw new InvalidOperationException(
+                "Renderer has no environment; call SetEnvironment before DrawScene (M7 IBL feeds the ambient and skybox).");
+        }
 
         // HDR-color and depth targets are owned here; keep them sized to the swapchain image handed in by the
         // frame loop (recreated together behind a device wait when the extent changes). The shadow map is
@@ -559,6 +634,13 @@ public sealed class Renderer : IDisposable
         // declared layout; sampled through the comparison sampler for PCF in mesh.frag.
         frame.WriteCombinedImageSampler(frameSet, 2, _shadowMap!, _shadowSampler!);
 
+        // IBL maps (M7): irradiance (3), prefiltered specular (4), BRDF LUT (5). All left in ShaderReadOnly by
+        // the generator. Non-null here: DrawScene rejects an unset environment before reaching this pass.
+        var ibl = _iblMaps!;
+        frame.WriteCombinedImageSampler(frameSet, 3, ibl.Irradiance, _iblSampler!);
+        frame.WriteCombinedImageSampler(frameSet, 4, ibl.Prefiltered, _iblSampler!);
+        frame.WriteCombinedImageSampler(frameSet, 5, ibl.BrdfLut, _iblSampler!);
+
         cmd.BindPipeline(pipeline);
         cmd.BindDescriptorSet(pipeline, 0, frameSet); // set 0: per-frame camera + lights + shadow map
 
@@ -581,6 +663,16 @@ public sealed class Renderer : IDisposable
             cmd.PushConstants(pipeline, ShaderStages.Vertex, in model);
             cmd.DrawIndexed(mesh.IndexCount);
         }
+
+        // Skybox (M7): fill the background with the environment cubemap inside this same pass, AFTER the meshes
+        // so its far-plane depth test (LessOrEqual, no write) only paints pixels no mesh covered. The camera
+        // UBO written above is reused for the view-ray reconstruction.
+        var skyboxSet = frame.AllocateSet(_skyboxSetLayout!);
+        frame.WriteUniformBuffer(skyboxSet, 0, ubo);
+        frame.WriteCombinedImageSampler(skyboxSet, 1, _iblMaps!.Environment, _iblSampler!);
+        cmd.BindPipeline(_skyboxPipeline!);
+        cmd.BindDescriptorSet(_skyboxPipeline!, 0, skyboxSet);
+        cmd.Draw(3);
 
         cmd.EndRendering();
     }
@@ -689,6 +781,23 @@ public sealed class Renderer : IDisposable
         _depthImage?.Dispose();
         _hdrImage = null;
         _depthImage = null;
+
+        // Image-based lighting + skybox (M7): the maps, the reusable generator (owns its own compiler/shaders),
+        // the shared sampler, and the skybox pipeline/layout/shaders.
+        _iblMaps?.Dispose();
+        _iblGenerator?.Dispose();
+        _iblSampler?.Dispose();
+        _skyboxPipeline?.Dispose();
+        _skyboxSetLayout?.Dispose();
+        _skyboxFragmentShader?.Dispose();
+        _skyboxVertexShader?.Dispose();
+        _iblMaps = null;
+        _iblGenerator = null;
+        _iblSampler = null;
+        _skyboxPipeline = null;
+        _skyboxSetLayout = null;
+        _skyboxFragmentShader = null;
+        _skyboxVertexShader = null;
 
         // Directional shadow pass: pipeline, comparison sampler, shadow map, then the depth-only vertex shader.
         _shadowPipeline?.Dispose();
