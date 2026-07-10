@@ -192,14 +192,18 @@ public readonly unsafe struct CommandList
     public void TransitionImage(GpuImage image, ImageLayoutState from, ImageLayoutState to)
     {
         ArgumentNullException.ThrowIfNull(image);
-        TransitionImage(image.Handle, image.Aspect, from, to);
+        // Cover EVERY mip and layer: a single-mip/single-layer image (swapchain, HDR, depth, shadow) reduces to
+        // the (0,1,0,1) range the frame loop always used, but an IBL cubemap (6 layers) or a prefiltered mip
+        // chain must transition all its subresources in one barrier, so the range follows the image (M7).
+        TransitionImage(image.Handle, image.Aspect, image.MipLevels, image.ArrayLayers, from, to);
     }
 
     /// <summary>Transitions a <see cref="RenderTargetView"/> (used by the frame loop for swapchain images).</summary>
     internal void TransitionImage(RenderTargetView target, ImageLayoutState from, ImageLayoutState to)
-        => TransitionImage(target.Image, target.Aspect, from, to);
+        => TransitionImage(target.Image, target.Aspect, 1, 1, from, to);
 
-    private void TransitionImage(Image image, ImageAspectFlags aspect, ImageLayoutState from, ImageLayoutState to)
+    private void TransitionImage(
+        Image image, ImageAspectFlags aspect, uint mipLevels, uint arrayLayers, ImageLayoutState from, ImageLayoutState to)
     {
         var (oldLayout, srcStage, srcAccess) = MapState(from, aspect);
         var (newLayout, dstStage, dstAccess) = MapState(to, aspect);
@@ -216,7 +220,7 @@ public readonly unsafe struct CommandList
             SrcQueueFamilyIndex = Vk.QueueFamilyIgnored,
             DstQueueFamilyIndex = Vk.QueueFamilyIgnored,
             Image = image,
-            SubresourceRange = new ImageSubresourceRange(aspect, 0, 1, 0, 1),
+            SubresourceRange = new ImageSubresourceRange(aspect, 0, mipLevels, 0, arrayLayers),
         };
         var dependency = new DependencyInfo
         {
@@ -259,6 +263,14 @@ public readonly unsafe struct CommandList
         ImageLayoutState.ShaderReadOnly => (
             ImageLayout.ShaderReadOnlyOptimal,
             PipelineStageFlags2.FragmentShaderBit,
+            AccessFlags2.ShaderReadBit),
+        // Same layout as ShaderReadOnly but scoped to the compute stage: hands an IBL kernel's storage-image
+        // output to the next kernel that SAMPLES it (equirect cubemap → irradiance/prefilter convolutions).
+        // The read is in ComputeShader, so a General→ShaderReadOnly(fragment) barrier would leave the compute
+        // read unsynchronized against the write; this makes the dependency compute→compute (spec §3.6).
+        ImageLayoutState.ShaderReadOnlyCompute => (
+            ImageLayout.ShaderReadOnlyOptimal,
+            PipelineStageFlags2.ComputeShaderBit,
             AccessFlags2.ShaderReadBit),
         // Storage image read/written by a compute kernel (IBL generation, spec §3.6). Compute→compute
         // hazards between successive kernels are covered by a General→General transition here: both the

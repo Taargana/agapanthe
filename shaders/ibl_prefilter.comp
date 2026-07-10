@@ -1,0 +1,91 @@
+#version 450
+
+// IBL kernel 3/4 (M7-04): pre-filtered specular environment. Each mip of the output cubemap holds the
+// environment convolved with the GGX lobe for one roughness (mip 0 = mirror, last mip = rough), so the
+// lighting shader samples LOD = roughness * (mipCount - 1) for the split-sum specular. Dispatched once per
+// mip; the roughness for the current mip arrives as a push constant. Approximation N = V = R (Karis 2013):
+// the view direction is assumed equal to the surface normal, dropping the stretched-highlight anisotropy but
+// making the map view-independent. Input is the environment cubemap; output is one storage mip (image2DArray).
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+layout(set = 0, binding = 0) uniform samplerCube envMap;
+layout(set = 0, binding = 1, rgba16f) uniform writeonly image2DArray prefiltered;
+
+layout(push_constant) uniform PushConstants {
+    float roughness;
+} push;
+
+const float PI = 3.14159265359;
+const uint SAMPLE_COUNT = 256u;
+
+vec3 faceDirection(int face, vec2 uv) {
+    if (face == 0) return vec3( 1.0, -uv.y, -uv.x);
+    if (face == 1) return vec3(-1.0, -uv.y,  uv.x);
+    if (face == 2) return vec3( uv.x,  1.0,  uv.y);
+    if (face == 3) return vec3( uv.x, -1.0, -uv.y);
+    if (face == 4) return vec3( uv.x, -uv.y,  1.0);
+    return                vec3(-uv.x, -uv.y, -1.0);
+}
+
+// Van der Corput radical inverse -> Hammersley low-discrepancy 2D point.
+float radicalInverseVdC(uint bits) {
+    bits = (bits << 16u) | (bits >> 16u);
+    bits = ((bits & 0x55555555u) << 1u) | ((bits & 0xAAAAAAAAu) >> 1u);
+    bits = ((bits & 0x33333333u) << 2u) | ((bits & 0xCCCCCCCCu) >> 2u);
+    bits = ((bits & 0x0F0F0F0Fu) << 4u) | ((bits & 0xF0F0F0F0u) >> 4u);
+    bits = ((bits & 0x00FF00FFu) << 8u) | ((bits & 0xFF00FF00u) >> 8u);
+    return float(bits) * 2.3283064365386963e-10; // / 2^32
+}
+
+vec2 hammersley(uint i, uint n) {
+    return vec2(float(i) / float(n), radicalInverseVdC(i));
+}
+
+// Importance-sample the GGX distribution: map a uniform point Xi to a half-vector around N for roughness a.
+vec3 importanceSampleGGX(vec2 Xi, vec3 N, float roughness) {
+    float a = roughness * roughness;
+    float phi = 2.0 * PI * Xi.x;
+    float cosTheta = sqrt((1.0 - Xi.y) / (1.0 + (a * a - 1.0) * Xi.y));
+    float sinTheta = sqrt(1.0 - cosTheta * cosTheta);
+
+    vec3 h = vec3(cos(phi) * sinTheta, sin(phi) * sinTheta, cosTheta);
+
+    vec3 up = abs(N.z) < 0.999 ? vec3(0.0, 0.0, 1.0) : vec3(1.0, 0.0, 0.0);
+    vec3 tangent = normalize(cross(up, N));
+    vec3 bitangent = cross(N, tangent);
+    return normalize(tangent * h.x + bitangent * h.y + N * h.z);
+}
+
+void main() {
+    ivec3 gid = ivec3(gl_GlobalInvocationID);
+    ivec2 size = imageSize(prefiltered).xy;
+    if (gid.x >= size.x || gid.y >= size.y) {
+        return;
+    }
+
+    vec2 uv = (vec2(gid.xy) + 0.5) / vec2(size) * 2.0 - 1.0;
+    vec3 N = normalize(faceDirection(gid.z, uv));
+    vec3 R = N;
+    vec3 V = N;
+
+    float roughness = push.roughness;
+    vec3 prefilteredColor = vec3(0.0);
+    float totalWeight = 0.0;
+
+    for (uint i = 0u; i < SAMPLE_COUNT; ++i) {
+        vec2 Xi = hammersley(i, SAMPLE_COUNT);
+        vec3 H = importanceSampleGGX(Xi, N, roughness);
+        vec3 L = normalize(2.0 * dot(V, H) * H - V);
+
+        float NdotL = max(dot(N, L), 0.0);
+        if (NdotL > 0.0) {
+            // Weight by NdotL: samples grazing the surface contribute less, which also softens fireflies.
+            prefilteredColor += texture(envMap, L).rgb * NdotL;
+            totalWeight += NdotL;
+        }
+    }
+
+    prefilteredColor /= max(totalWeight, 1e-4);
+    imageStore(prefiltered, gid, vec4(prefilteredColor, 1.0));
+}

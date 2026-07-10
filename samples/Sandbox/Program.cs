@@ -63,6 +63,17 @@ window.Loaded += () =>
     swapchain = new Swapchain(device, width, height);
     camera.AspectRatio = (float)width / height;
 
+    // Headless IBL-generation check (M7-04): AGAPANTHE_IBL_TEST=<prefix> generates IBL maps from the HDRI
+    // fixture, dumps the environment cube faces + irradiance + BRDF LUT as PPMs, then closes — no scene, no
+    // render loop. Lets the compute path be validated (0 validation, 0 leak) before the skybox/mesh
+    // integration (M7-05) exists.
+    if (Environment.GetEnvironmentVariable("AGAPANTHE_IBL_TEST") is { Length: > 0 } iblPrefix)
+    {
+        RunIblTest(device, shaderDir, modelsDir, iblPrefix);
+        window.Close();
+        return;
+    }
+
     // Renderer owns the mesh pipeline, both descriptor set layouts, the material allocator and the
     // per-frame camera UBOs. It exposes MaterialAllocator/MaterialSetLayout for the SceneBuilder.
     renderer = new Renderer(device, swapchain, shaderDir);
@@ -268,6 +279,95 @@ static string? ResolveModelPath(string[] args, string modelsDir)
 
     var underModels = Path.Combine(modelsDir, arg);
     return File.Exists(underModels) ? underModels : null;
+}
+
+// Headless IBL generation + capture (M7-04 verification). Loads the HDRI fixture, runs the compute generator,
+// and writes tonemapped PPMs of the environment cube faces, one irradiance face and the BRDF LUT so the result
+// can be eyeballed without the (not-yet-built) skybox pass.
+static void RunIblTest(GraphicsDevice device, string shaderDir, string modelsDir, string prefix)
+{
+    var hdrPath = Path.Combine(modelsDir, "studio_small_1k.hdr");
+    if (!File.Exists(hdrPath))
+    {
+        Log.Error($"Sandbox IBL test: HDRI fixture not found at '{hdrPath}'.");
+        return;
+    }
+
+    var hdr = HdrImageLoader.Load(hdrPath);
+    Log.Info($"Sandbox IBL test: loaded HDRI {hdr.Width}x{hdr.Height} from '{hdrPath}'.");
+
+    using var generator = new IblGenerator(device, shaderDir);
+    var maps = generator.Generate(hdr);
+    try
+    {
+        for (var face = 0u; face < 6; face++)
+        {
+            var bytes = GpuReadback.ReadImage(device, maps.Environment, ImageLayoutState.ShaderReadOnly, 8, face);
+            WriteHalfPpm($"{prefix}_env_f{face}.ppm", bytes, maps.Environment.Width, maps.Environment.Height);
+        }
+
+        var irr = GpuReadback.ReadImage(device, maps.Irradiance, ImageLayoutState.ShaderReadOnly, 8, 4);
+        WriteHalfPpm($"{prefix}_irradiance_f4.ppm", irr, maps.Irradiance.Width, maps.Irradiance.Height);
+
+        var lut = GpuReadback.ReadImage(device, maps.BrdfLut, ImageLayoutState.ShaderReadOnly, 4);
+        WriteRgHalfPpm($"{prefix}_brdf_lut.ppm", lut, maps.BrdfLut.Width, maps.BrdfLut.Height);
+
+        Log.Info($"Sandbox IBL test: wrote captures with prefix '{prefix}'.");
+    }
+    finally
+    {
+        maps.Dispose();
+    }
+}
+
+// Writes an RGBA16F texel buffer as an 8-bit PPM with a simple Reinhard tonemap + sRGB encode (viewable).
+static void WriteHalfPpm(string path, byte[] bytes, uint width, uint height)
+{
+    var halfs = System.Runtime.InteropServices.MemoryMarshal.Cast<byte, Half>(bytes);
+    using var output = new FileStream(path, FileMode.Create, FileAccess.Write);
+    output.Write(System.Text.Encoding.ASCII.GetBytes($"P6\n{width} {height}\n255\n"));
+    var row = new byte[width * 3];
+    for (var y = 0; y < height; y++)
+    {
+        for (var x = 0; x < width; x++)
+        {
+            var i = ((y * (int)width) + x) * 4;
+            row[(x * 3) + 0] = EncodeTonemapped((float)halfs[i + 0]);
+            row[(x * 3) + 1] = EncodeTonemapped((float)halfs[i + 1]);
+            row[(x * 3) + 2] = EncodeTonemapped((float)halfs[i + 2]);
+        }
+
+        output.Write(row);
+    }
+
+    static byte EncodeTonemapped(float v)
+    {
+        var x = Math.Max(v, 0f);
+        x /= 1f + x; // Reinhard
+        var srgb = x <= 0.0031308f ? x * 12.92f : (1.055f * MathF.Pow(x, 1f / 2.4f)) - 0.055f;
+        return (byte)Math.Clamp((int)((srgb * 255f) + 0.5f), 0, 255);
+    }
+}
+
+// Writes an RG16F texel buffer as a PPM (R->red, G->green, blue 0); the values are in [0,1], no tonemap.
+static void WriteRgHalfPpm(string path, byte[] bytes, uint width, uint height)
+{
+    var halfs = System.Runtime.InteropServices.MemoryMarshal.Cast<byte, Half>(bytes);
+    using var output = new FileStream(path, FileMode.Create, FileAccess.Write);
+    output.Write(System.Text.Encoding.ASCII.GetBytes($"P6\n{width} {height}\n255\n"));
+    var row = new byte[width * 3];
+    for (var y = 0; y < height; y++)
+    {
+        for (var x = 0; x < width; x++)
+        {
+            var i = ((y * (int)width) + x) * 2;
+            row[(x * 3) + 0] = (byte)Math.Clamp((int)(((float)halfs[i + 0] * 255f) + 0.5f), 0, 255);
+            row[(x * 3) + 1] = (byte)Math.Clamp((int)(((float)halfs[i + 1] * 255f) + 0.5f), 0, 255);
+            row[(x * 3) + 2] = 0;
+        }
+
+        output.Write(row);
+    }
 }
 
 static void LogModelStats(Agapanthe.Assets.Model.ModelAsset model, string path)

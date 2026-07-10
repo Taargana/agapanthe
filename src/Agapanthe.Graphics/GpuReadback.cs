@@ -13,13 +13,15 @@ namespace Agapanthe.Graphics;
 public static unsafe class GpuReadback
 {
     /// <summary>
-    /// Reads back mip 0 of <paramref name="image"/> as tightly-packed texel bytes
-    /// (row-major, no padding). <paramref name="currentLayout"/> is the layout the image is
-    /// known to be in; it is restored before returning. <paramref name="bytesPerTexel"/> must
-    /// match the image format (e.g. 8 for Rgba16Sfloat, 4 for Rgba8*).
+    /// Reads back mip 0 (layer <paramref name="baseArrayLayer"/>) of <paramref name="image"/> as
+    /// tightly-packed texel bytes (row-major, no padding). <paramref name="currentLayout"/> is the layout the
+    /// image is known to be in; it is restored before returning. <paramref name="bytesPerTexel"/> must match
+    /// the image format (e.g. 8 for Rgba16Sfloat, 4 for Rgba8*). <paramref name="baseArrayLayer"/> selects one
+    /// face of a cubemap (0 default; a plain 2D image has only layer 0).
     /// </summary>
     public static byte[] ReadImage(
-        GraphicsDevice device, GpuImage image, ImageLayoutState currentLayout, int bytesPerTexel)
+        GraphicsDevice device, GpuImage image, ImageLayoutState currentLayout, int bytesPerTexel,
+        uint baseArrayLayer = 0)
     {
         ArgumentNullException.ThrowIfNull(device);
         ArgumentNullException.ThrowIfNull(image);
@@ -87,7 +89,7 @@ public static unsafe class GpuReadback
                 BufferOffset = 0,
                 BufferRowLength = 0,   // tightly packed
                 BufferImageHeight = 0,
-                ImageSubresource = new ImageSubresourceLayers(image.Aspect, 0, 0, 1),
+                ImageSubresource = new ImageSubresourceLayers(image.Aspect, 0, baseArrayLayer, 1),
                 ImageOffset = default,
                 ImageExtent = new Extent3D(image.Width, image.Height, 1),
             };

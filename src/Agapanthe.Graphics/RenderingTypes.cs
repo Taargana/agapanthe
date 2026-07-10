@@ -24,6 +24,15 @@ public enum ImageLayoutState
     ShaderReadOnly,
 
     /// <summary>
+    /// Sampled from a <b>compute</b> shader through a combined image sampler (compute stage, read). Same
+    /// Vulkan layout as <see cref="ShaderReadOnly"/> (ShaderReadOnlyOptimal), but the barrier's stage/access
+    /// scope is compute, so a <c>General→ShaderReadOnlyCompute</c> transition orders a storage-image write in
+    /// one IBL kernel before a sampled read in the next one (spec §3.6): the plain <see cref="ShaderReadOnly"/>
+    /// maps to the fragment stage and would not synchronize a following compute read.
+    /// </summary>
+    ShaderReadOnlyCompute,
+
+    /// <summary>
     /// General layout for a storage image read/written by a compute kernel (compute stage, read+write).
     /// Also valid for sampled access, so IBL kernels keep intermediates here across dispatches (spec §3.6).
     /// </summary>

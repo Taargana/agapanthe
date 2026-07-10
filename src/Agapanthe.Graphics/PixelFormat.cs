@@ -19,6 +19,9 @@ public enum PixelFormat
     // HDR render target (M5)
     Rgba16Sfloat,
 
+    // Two-channel half-float (M7 IBL BRDF integration LUT: RG = scale/bias for the split-sum approximation)
+    Rg16Sfloat,
+
     // Depth
     D32Sfloat,
 
@@ -36,6 +39,7 @@ internal static class PixelFormatExtensions
         PixelFormat.Rgba8Srgb => Format.R8G8B8A8Srgb,
         PixelFormat.Rgba8Unorm => Format.R8G8B8A8Unorm,
         PixelFormat.Rgba16Sfloat => Format.R16G16B16A16Sfloat,
+        PixelFormat.Rg16Sfloat => Format.R16G16Sfloat,
         PixelFormat.D32Sfloat => Format.D32Sfloat,
         PixelFormat.R32G32Sfloat => Format.R32G32Sfloat,
         PixelFormat.R32G32B32Sfloat => Format.R32G32B32Sfloat,
@@ -50,6 +54,7 @@ internal static class PixelFormatExtensions
         Format.R8G8B8A8Srgb => PixelFormat.Rgba8Srgb,
         Format.R8G8B8A8Unorm => PixelFormat.Rgba8Unorm,
         Format.R16G16B16A16Sfloat => PixelFormat.Rgba16Sfloat,
+        Format.R16G16Sfloat => PixelFormat.Rg16Sfloat,
         Format.D32Sfloat => PixelFormat.D32Sfloat,
         Format.R32G32Sfloat => PixelFormat.R32G32Sfloat,
         Format.R32G32B32Sfloat => PixelFormat.R32G32B32Sfloat,
