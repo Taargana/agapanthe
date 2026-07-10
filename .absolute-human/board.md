@@ -72,25 +72,33 @@ Skybox pass : DANS le scope scène (option architecte « fusionner ») ou passe 
 **Résultat**: HDRI par défaut `studio_small_1k.hdr` (déjà copié dans models/ par la glob fixtures), override par `AGAPANTHE_HDRI=<path.hdr>`. Captures propres à cadrage/expo par défaut sauvées dans docs/visual-checks : `2026-07-10-m7-damagedhelmet-agapanthe.png` (reflets env + ciel) et `2026-07-10-m7-metalroughspheres-agapanthe.png` (grille metallic×roughness). Doc protocole `2026-07-10-m7-ibl.md` (critères + procédure viewer Khronos, verdict à remplir = M7-09). 0 leak (136/142 ressources).
 HDRI par défaut (fixture copiée à l'output), arg pour en changer. Captures MetalRoughSpheres : rangée metallic (haut = miroir teinté ciel, bas = diélectrique) + helmet. AC: captures propres.
 
-### M7-07 — Self code review [test, S] — pending
-Audits csharp-lowlevel (cycle de vie vues cubemap, SubmitImmediate leaks, hot path inchangé) + architecte (prêt M8). AC: 0 critique.
+### M7-07 — Self code review [test, S] — done — 0 CRITIQUE
+**csharp-lowlevel**: 0 critique, 2 MEDIUM + 1 MINEUR CORRIGÉS (M1 fuite 4 GpuImages hors try → déplacés dans try + catch null-safe ; M2 ToHalf +Inf/NaN sur HDRI brillants → clamp Half.MaxValue + scrub NaN ; m3 SetEnvironment maps pendantes si Generate throw → temp-swap). Autres MINEUR laissés (m4 11 vues retenues = gaspillage acceptable ; m5 marge pool descripteurs = auto-grow ; m6 env en ShaderReadOnlyCompute samplé fragment = layout Vulkan concordant, sync par WaitIdle). Hot path zéro-alloc CONFIRMÉ, barrière full-subresource sans régression CONFIRMÉE. Fixes vérifiés : 180 tests, capture helmet BYTE-IDENTIQUE (hardening pur), 0 leak.
+**engine-architect**: PASS with CONCERNS (0 critique). F1 commentaire General périmé → CORRIGÉ. Reste = dette M8 tracée (voir Deferred Work) : F3 dédup PipelineLayoutBuilder (extraire début M8), F5 DrawScene hard-require env (acté, placeholder 1×1 si mode sans-HDRI apparaît), F6 seam par-passe pour hot reload M8, F2 overload transition sub-range si cas réel. Skybox fusionné + placement IBL = design validés.
 
-### M7-08 — Requirements validation [test, S] — pending
-Spec §3.6 IBL + §6 M7 cochées.
+### M7-08 — Requirements validation [test, S] — done
+Spec §3.6 IBL : equirect HDR → cubemap env ✓ → irradiance diffuse ✓ → prefiltered specular (mips par roughness) ✓ → BRDF LUT (une fois, indépendante env) ✓ ; généré au chargement via compute ✓. Cache disque par hash HDRI = DÉFÉRÉ (gén. 135 ms ≪ 2 s, board). Spec §6 M7 : IBL complet compute ✓ + skybox ✓. §3.4 set 0 maps IBL : câblées bindings 3/4/5 (le placeholder 1×1 de la spec non implémenté — DrawScene exige un env à la place, déviation actée F5).
 
 ### M7-09 — Full verification + protocole visuel [test, S] — pending
 build/tests/runs + captures MetalRoughSpheres vs viewer Khronos (IBL ON cette fois — même environnement impossible, juger le CARACTÈRE metallic/roughness) annotées docs/visual-checks/. Cache disque IBL : si le temps de génération loggé est < ~2 s, déférer définitivement (M8/phase 2).
 
 ## Deferred Work
 
-- Cache disque IBL par hash HDRI → M8/phase 2 si génération rapide.
+- Cache disque IBL par hash HDRI → DÉFÉRÉ DÉFINITIVEMENT (gén. 135 ms ≪ 2 s ; M8/phase 2 seulement si utile).
 - Immutable samplers (comparateur hardware) → phase 2 avec CSM.
 - KHR_lights_punctual parsing glTF (lumières depuis le fichier) → phase 2.
 - Texel-snapping ombres → phase 2 (lumière statique).
+- **[audit M7-07 architecte] Extraire PipelineLayoutBuilder partagé (Graphics)** → DÉBUT M8, avant le hot reload (dédup ComputePipeline/GraphicsPipeline, contrainte owner-lock M7-02 levée).
+- **[audit M7-07 architecte] Seam par-passe (ShadowPass/SkyboxPass/IblResources)** → M8, pour donner au hot reload un point d'accroche par pipeline (Renderer = 845 lignes, God-object naissant).
+- **[audit M7-07 architecte] Debug labels sur la génération IBL** (4 kernels + transitions du SubmitImmediate) → M8 (item RenderDoc explicite).
+- **[audit M7-07 architecte] DrawScene exige un environnement (throw)** → déviation actée vs placeholder 1×1 spec §3.4 ; implémenter le placeholder si un mode sans-HDRI apparaît (éditeur/scène vide).
+- **[audit M7-07 architecte] Prefilter échantillonne env single-mip** → fireflies specular possibles sur HDRI très contrasté ; mip-chain sur l'env = raffinement phase 2.
+- **[audit M7-07 architecte] Overload TransitionImage sub-range (baseMip/mipCount/baseLayer/layerCount)** → seulement quand un cas réel l'exige (mip-chain par blits, phase 2) ; full-subresource reste le défaut.
 
 ## Log
 
 - 2026-07-05: session 7 ouverte. Board S6 archivé. DAG 9 tâches, 6 vagues. Plan architecte S6 acté.
 - 2026-07-10: W3/M7-04 done — générateur IBL compute (4 kernels) + IblMaps/IblGenerator. 166 ms, 0 validation, 0 leak, captures OK, 180 tests, M6 intact.
 - 2026-07-10: W4/M7-05 done — skybox (fusionné scène) + set 0 IBL 3/4/5 + ambiant IBL mesh.frag. Captures helmet (reflets+ciel) et MetalRoughSpheres OK, 0 validation, 0 leak, 180 tests.
-- 2026-07-10: W5/M7-06 done — override AGAPANTHE_HDRI, captures M7 sauvées dans docs/visual-checks + doc protocole. Prochain: W6 tail — M7-07 (audits csharp-lowlevel + architecte), M7-08 (requirements spec §3.6/§6), M7-09 (verif finale + protocole visuel humain).
+- 2026-07-10: W5/M7-06 done — override AGAPANTHE_HDRI, captures M7 sauvées dans docs/visual-checks + doc protocole.
+- 2026-07-10: W6 tail — M7-07 audits (csharp-lowlevel + architecte) PASS, 0 critique ; 3 findings mémoire (M1/M2/m3) + 1 archi (F1) CORRIGÉS, reste tracé en Deferred Work. M7-08 requirements §3.6/§6 cochés. Fixes vérifiés : 180 tests, capture byte-identique, 0 leak. RESTE : M7-09 = protocole visuel HUMAIN (verdict docs/visual-checks/2026-07-10-m7-ibl.md) + validation multi-OS.

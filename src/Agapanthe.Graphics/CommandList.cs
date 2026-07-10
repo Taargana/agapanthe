@@ -275,13 +275,10 @@ public readonly unsafe struct CommandList
         // Storage image read/written by a compute kernel (IBL generation, spec §3.6). Compute→compute
         // hazards between successive kernels are covered by a General→General transition here: both the
         // source and destination scope are the compute stage with read+write access, so a RAW/WAR between
-        // two dispatches over the same image serializes correctly. The IBL generator keeps every
-        // intermediate (cubemap, irradiance, prefiltered mips) in General across its kernels — General is a
-        // valid layout for both storage and sampled access, so a later kernel can sample an earlier kernel's
-        // output without a layout change — and only transitions General→ShaderReadOnly at the final hand-off
-        // to the mesh fragment shader. A future case that must *sample* an image in ShaderReadOnlyOptimal
-        // from a compute kernel (fragment-only today) would need a stage-hinted TransitionImage overload; it
-        // is not required by M7.
+        // two dispatches over the same image serializes correctly. A kernel's output that a LATER kernel
+        // must *sample* (the IBL environment cubemap, read by the irradiance/prefilter kernels) is handed
+        // off with General→ShaderReadOnlyCompute (below): same layout, compute-scoped read. Maps consumed
+        // only by a later frame's fragment stage (irradiance/prefiltered/BRDF LUT) end in General→ShaderReadOnly.
         ImageLayoutState.General => (
             ImageLayout.General,
             PipelineStageFlags2.ComputeShaderBit,

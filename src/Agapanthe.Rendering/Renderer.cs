@@ -452,8 +452,11 @@ public sealed class Renderer : IDisposable
     {
         ArgumentNullException.ThrowIfNull(environment);
         ObjectDisposedException.ThrowIf(_disposed, this);
+        // Generate into a temporary and swap only on success: if Generate throws, the previously-adopted maps
+        // stay valid rather than being disposed while _iblMaps still references them (audit M7-07 finding m3).
+        var maps = _iblGenerator!.Generate(environment);
         _iblMaps?.Dispose();
-        _iblMaps = _iblGenerator!.Generate(environment);
+        _iblMaps = maps;
     }
 
     public void DrawScene(Scene scene, Camera camera, CommandList cmd, FrameContext frame, SwapchainTarget target)

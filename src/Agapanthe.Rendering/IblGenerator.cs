@@ -144,42 +144,52 @@ public sealed class IblGenerator : IDisposable
 
         var stopwatch = Stopwatch.StartNew();
 
-        // Output maps. Every map is both a compute write target (Storage) and later sampled (Sampled);
-        // TransferSrc lets debug captures read a face back (M7-04 AC). The three cubemaps use a Cube default
-        // view (samplerCube read); their storage writes go through per-mip 2D-array views.
-        var environment = new GpuImage(
-            _device, EnvironmentSize, EnvironmentSize, RadianceFormat,
-            ImageUsage.Storage | ImageUsage.Sampled | ImageUsage.TransferSrc,
-            arrayLayers: 6, viewKind: ImageViewKind.Cube);
-        var irradiance = new GpuImage(
-            _device, IrradianceSize, IrradianceSize, RadianceFormat,
-            ImageUsage.Storage | ImageUsage.Sampled | ImageUsage.TransferSrc,
-            arrayLayers: 6, viewKind: ImageViewKind.Cube);
         var prefilteredMips = GpuImage.FullMipChain(PrefilteredSize, PrefilteredSize);
-        var prefiltered = new GpuImage(
-            _device, PrefilteredSize, PrefilteredSize, RadianceFormat,
-            ImageUsage.Storage | ImageUsage.Sampled | ImageUsage.TransferSrc,
-            mipLevels: prefilteredMips, arrayLayers: 6, viewKind: ImageViewKind.Cube);
-        var brdfLut = new GpuImage(
-            _device, BrdfLutSize, BrdfLutSize, BrdfFormat,
-            ImageUsage.Storage | ImageUsage.Sampled | ImageUsage.TransferSrc);
 
-        // Storage (write) views: whole-cube 2D-array per mip, single-2D for the LUT.
-        var environmentStore = environment.CreateMipView(0, 0, 6);
-        var irradianceStore = irradiance.CreateMipView(0, 0, 6);
-        var prefilteredStore = new ImageMipView[prefilteredMips];
-        for (var mip = 0u; mip < prefilteredMips; mip++)
-        {
-            prefilteredStore[mip] = prefiltered.CreateMipView(mip, 0, 6);
-        }
-
-        var brdfStore = brdfLut.CreateMipView(0);
-
+        // Declared before the try so the catch can release whatever was already created if a later
+        // `new GpuImage`/`CreateMipView` throws (OOM, a rejected view under memory pressure): creating them
+        // inside the try is the only way the failure path frees them (audit M7-07 finding M1). The mip-views
+        // are owned by their GpuImage, so disposing the image releases them too — the catch only touches the
+        // four images.
+        GpuImage? environment = null;
+        GpuImage? irradiance = null;
+        GpuImage? prefiltered = null;
+        GpuImage? brdfLut = null;
         GpuImage? equirectTexture = null;
         GpuUploader? uploader = null;
         DescriptorAllocator? descriptors = null;
         try
         {
+            // Output maps. Every map is both a compute write target (Storage) and later sampled (Sampled);
+            // TransferSrc lets debug captures read a face back (M7-04 AC). The three cubemaps use a Cube default
+            // view (samplerCube read); their storage writes go through per-mip 2D-array views.
+            environment = new GpuImage(
+                _device, EnvironmentSize, EnvironmentSize, RadianceFormat,
+                ImageUsage.Storage | ImageUsage.Sampled | ImageUsage.TransferSrc,
+                arrayLayers: 6, viewKind: ImageViewKind.Cube);
+            irradiance = new GpuImage(
+                _device, IrradianceSize, IrradianceSize, RadianceFormat,
+                ImageUsage.Storage | ImageUsage.Sampled | ImageUsage.TransferSrc,
+                arrayLayers: 6, viewKind: ImageViewKind.Cube);
+            prefiltered = new GpuImage(
+                _device, PrefilteredSize, PrefilteredSize, RadianceFormat,
+                ImageUsage.Storage | ImageUsage.Sampled | ImageUsage.TransferSrc,
+                mipLevels: prefilteredMips, arrayLayers: 6, viewKind: ImageViewKind.Cube);
+            brdfLut = new GpuImage(
+                _device, BrdfLutSize, BrdfLutSize, BrdfFormat,
+                ImageUsage.Storage | ImageUsage.Sampled | ImageUsage.TransferSrc);
+
+            // Storage (write) views: whole-cube 2D-array per mip, single-2D for the LUT.
+            var environmentStore = environment.CreateMipView(0, 0, 6);
+            var irradianceStore = irradiance.CreateMipView(0, 0, 6);
+            var prefilteredStore = new ImageMipView[prefilteredMips];
+            for (var mip = 0u; mip < prefilteredMips; mip++)
+            {
+                prefilteredStore[mip] = prefiltered.CreateMipView(mip, 0, 6);
+            }
+
+            var brdfStore = brdfLut.CreateMipView(0);
+
             // Stage the equirect source as a half-float sampled texture (single mip). Half rather than 32-bit
             // float guarantees linear filtering support on every backend (MoltenVK).
             uploader = new GpuUploader(_device);
@@ -259,10 +269,10 @@ public sealed class IblGenerator : IDisposable
         }
         catch
         {
-            environment.Dispose();
-            irradiance.Dispose();
-            prefiltered.Dispose();
-            brdfLut.Dispose();
+            environment?.Dispose();
+            irradiance?.Dispose();
+            prefiltered?.Dispose();
+            brdfLut?.Dispose();
             throw;
         }
         finally
@@ -277,7 +287,8 @@ public sealed class IblGenerator : IDisposable
             $"IblGenerator: generated IBL from {equirect.Width}x{equirect.Height} HDR in {stopwatch.ElapsedMilliseconds} ms " +
             $"(env {EnvironmentSize}², irradiance {IrradianceSize}², prefiltered {PrefilteredSize}²×{prefilteredMips} mips, BRDF LUT {BrdfLutSize}²).");
 
-        return new IblMaps(environment, irradiance, prefiltered, brdfLut);
+        // Non-null on the success path (the try assigned all four; any throw went through the catch).
+        return new IblMaps(environment!, irradiance!, prefiltered!, brdfLut!);
     }
 
     /// <summary>Disposes the generator's pipelines, layouts, samplers and shaders. Not GPU-idle-guarded here
@@ -304,13 +315,19 @@ public sealed class IblGenerator : IDisposable
     // kernels drop the out-of-range tail when size is not a multiple of 8).
     private static uint Groups(uint size) => (size + WorkgroupSize - 1) / WorkgroupSize;
 
-    // Reinterpret-free float32 -> float16 conversion of the tightly-packed RGBA pixels for a half-float upload.
+    // float32 -> float16 conversion of the tightly-packed RGBA pixels for a half-float upload. Values are
+    // clamped to Half.MaxValue and NaN is scrubbed to 0 first (audit M7-07 finding M2): outdoor HDRIs routinely
+    // exceed 65504 (sun disc, blown speculars), and a bare cast would turn those into +Inf — a single Inf texel
+    // sampled linearly then poisons the irradiance/prefilter integrals into Inf/NaN across the whole map.
+    private const float HalfMax = 65504f;
+
     private static Half[] ToHalf(float[] pixels)
     {
         var result = new Half[pixels.Length];
         for (var i = 0; i < pixels.Length; i++)
         {
-            result[i] = (Half)pixels[i];
+            var v = pixels[i];
+            result[i] = (Half)(float.IsNaN(v) ? 0f : Math.Clamp(v, -HalfMax, HalfMax));
         }
 
         return result;
