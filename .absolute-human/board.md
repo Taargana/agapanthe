@@ -1,6 +1,6 @@
 # Absolute-Human Board — Agapanthe Session 7 (M7 : IBL & Skybox)
 
-**Status**: in-progress
+**Status**: DONE — M7 livré (9 tâches, verdict visuel PASS 2026-07-10). À archiver → board-session7-M7.md à l'ouverture de S8.
 **Créé**: 2026-07-05
 **Spec**: docs/plans/2026-07-02-graphics-engine-design.md §3.3, §3.4, §3.6 (IBL), §5 (protocole visuel), §6 (M7)
 **Board persistence**: git-tracked
@@ -79,8 +79,8 @@ HDRI par défaut (fixture copiée à l'output), arg pour en changer. Captures Me
 ### M7-08 — Requirements validation [test, S] — done
 Spec §3.6 IBL : equirect HDR → cubemap env ✓ → irradiance diffuse ✓ → prefiltered specular (mips par roughness) ✓ → BRDF LUT (une fois, indépendante env) ✓ ; généré au chargement via compute ✓. Cache disque par hash HDRI = DÉFÉRÉ (gén. 135 ms ≪ 2 s, board). Spec §6 M7 : IBL complet compute ✓ + skybox ✓. §3.4 set 0 maps IBL : câblées bindings 3/4/5 (le placeholder 1×1 de la spec non implémenté — DrawScene exige un env à la place, déviation actée F5).
 
-### M7-09 — Full verification + protocole visuel [test, S] — pending
-build/tests/runs + captures MetalRoughSpheres vs viewer Khronos (IBL ON cette fois — même environnement impossible, juger le CARACTÈRE metallic/roughness) annotées docs/visual-checks/. Cache disque IBL : si le temps de génération loggé est < ~2 s, déférer définitivement (M8/phase 2).
+### M7-09 — Full verification + protocole visuel [test, S] — done — PASS
+Verif : build OK, 180 tests verts, runs 0 validation / 0 leak (136 helmet, 142 spheres), capture byte-identique post-fixes. Protocole visuel : **PASS (revue humaine 2026-07-10, « c'est très bien »)** — helmet réfléchit l'environnement + ciel visible, MetalRoughSpheres rangée metallic net→flou correcte. Cache disque IBL déféré définitivement (135 ms). Verdict inscrit docs/visual-checks/2026-07-10-m7-ibl.md.
 
 ## Deferred Work
 
