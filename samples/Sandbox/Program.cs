@@ -93,11 +93,15 @@ window.Loaded += () =>
     SetupLights(renderer.Lights, scene);
 
     // Load the HDRI environment and generate IBL (M7). The renderer needs an environment before it can draw
-    // (the ambient and skybox both sample it). The fixture is copied into models/ next to the executable.
-    var iblHdrPath = Path.Combine(modelsDir, "studio_small_1k.hdr");
+    // (the ambient and skybox both sample it). Default is the fixture copied into models/ next to the
+    // executable; AGAPANTHE_HDRI=<path> swaps in any other equirectangular .hdr.
+    var iblHdrPath = Environment.GetEnvironmentVariable("AGAPANTHE_HDRI") is { Length: > 0 } hdriOverride
+        ? hdriOverride
+        : Path.Combine(modelsDir, "studio_small_1k.hdr");
     if (File.Exists(iblHdrPath))
     {
         renderer.SetEnvironment(HdrImageLoader.Load(iblHdrPath));
+        Log.Info($"Sandbox: environment '{iblHdrPath}'.");
     }
     else
     {
