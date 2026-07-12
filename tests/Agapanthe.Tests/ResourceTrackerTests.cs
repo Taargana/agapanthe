@@ -2,6 +2,7 @@ using Agapanthe.Core;
 
 namespace Agapanthe.Tests;
 
+[Collection("ResourceTracker")]
 public class ResourceTrackerTests : IDisposable
 {
     public ResourceTrackerTests()

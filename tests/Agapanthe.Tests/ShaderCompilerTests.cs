@@ -2,6 +2,7 @@ using Agapanthe.Graphics;
 
 namespace Agapanthe.Tests;
 
+[Collection("ResourceTracker")]
 public sealed class ShaderCompilerTests : IDisposable
 {
     private const string ValidVertex = """
