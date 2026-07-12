@@ -48,6 +48,14 @@ Env vars debug : `AGAPANTHE_MAX_FRAMES=N` (auto-close, sortie 0 si 0 leak) · `A
 
 Sessions pilotées via **absolute-human** (décomposition en tâches, vagues parallèles, TDD). Chaque jalon clôt sur : Sandbox propre (0 message validation, 0 leak), tests verts, **double audit agent** (`csharp-lowlevel` + `engine-architect`) PASS, protocole visuel humain quand pertinent, board archivé.
 
+## Préférences de travail (l'humain)
+
+- **Commits sur demande uniquement** : ne jamais `commit`/`push` sans demande explicite. L'humain pilote le rythme et valide chaque étape.
+- **Travail en vagues + feu vert** : décomposer en vagues, attendre l'accord de l'humain entre les étapes, lancer les audits subagents (`csharp-lowlevel` + `engine-architect`) avant de clore un jalon.
+- **Vérification visuelle headless** : captures headless (`AGAPANTHE_CAPTURE`) à chaque vague pour prouver le rendu ; **verdict visuel humain** requis avant de marquer un jalon `done`.
+- **Gate 0 leak / 0 validation** : tout message de validation layer ou tout leak ResourceTracker est **bloquant**, jamais ignoré ni contourné.
+- **Langue** : conversation en **français** (phrases complètes) ; **code, commits, PRs et docs techniques en anglais**.
+
 ## État courant
 
 **Phase 1 : 7/8 jalons.** M0–M7 livrés (M7 = IBL compute + skybox, validé visuellement). **Prochain : M8** (hot reload shaders + includes, debug labels RenderDoc, confort souris, audit perf/leaks final, validation multi-OS) — dernier jalon avant la close Phase 1. Détail + point de reprise dans `docs/AVANCEMENT.md`.
