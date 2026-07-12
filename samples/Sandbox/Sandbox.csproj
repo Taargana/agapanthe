@@ -13,6 +13,18 @@
     <TargetFramework>net10.0</TargetFramework>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
+    <!-- Phase 2 rule 1: the shipping executable must publish as NativeAOT. Enabling PublishAot here also
+         turns on the trim/AOT analyzers for the whole app closure, so IL2xxx/IL3xxx surface at build time
+         (and, with the global TreatWarningsAsErrors, become errors — the permanent AOT gate). -->
+    <PublishAot>true</PublishAot>
+    <!-- Third-party (Silk.NET) trim/single-file warnings we cannot fix, verified benign:
+         - IL2104: Silk.NET.Windowing.Common / Input.Common produce assembly-level trim warnings.
+         - IL3000/IL3002: Silk.NET.Core.Loader.DefaultPathResolver + Microsoft.Extensions.DependencyModel use
+           Assembly.Location / DependencyContext (single-file). Harmless here — glfw3/shaderc ship beside the
+           exe and the resolver falls back to AppContext.BaseDirectory (the AOT binary runs, verified P2-M0).
+         OUR code is analyzer-clean: every Agapanthe library sets IsAotCompatible=true, so any AOT-unsafe
+         pattern we write is still a build error. This NoWarn only silences the third-party publish noise. -->
+    <NoWarn>$(NoWarn);IL2104;IL3000;IL3002</NoWarn>
   </PropertyGroup>
 
   <ItemGroup>

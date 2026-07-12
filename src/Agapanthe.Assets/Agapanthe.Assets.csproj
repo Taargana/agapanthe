@@ -5,6 +5,8 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <!-- Phase 2 rule 1: trim/AOT analyzers at build time (permanent gate, see Agapanthe.Core.csproj). -->
+    <IsAotCompatible>true</IsAotCompatible>
   </PropertyGroup>
 
   <!-- Assets is GPU-free by design (spec §5: glTF parsing is unit-testable without a GPU).

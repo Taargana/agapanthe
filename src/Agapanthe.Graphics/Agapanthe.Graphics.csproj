@@ -17,6 +17,8 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <!-- Phase 2 rule 1: trim/AOT analyzers at build time (permanent gate, see Agapanthe.Core.csproj). -->
+    <IsAotCompatible>true</IsAotCompatible>
   </PropertyGroup>
 
 </Project>

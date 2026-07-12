@@ -7,6 +7,11 @@
   <ItemGroup>
     <PackageReference Include="Silk.NET.Input" Version="2.23.0" />
     <PackageReference Include="Silk.NET.Windowing" Version="2.23.0" />
+    <!-- NativeAOT (Phase 2 rule 1): reference the concrete GLFW backends directly so we can register them
+         explicitly. Silk.NET's default Window.Create() discovers platforms by reflection, which the AOT
+         trimmer strips (PlatformNotSupportedException at runtime). See EngineWindow's static ctor. -->
+    <PackageReference Include="Silk.NET.Windowing.Glfw" Version="2.23.0" />
+    <PackageReference Include="Silk.NET.Input.Glfw" Version="2.23.0" />
   </ItemGroup>
 
   <PropertyGroup>
@@ -14,6 +19,8 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <!-- Phase 2 rule 1: trim/AOT analyzers at build time (permanent gate, see Agapanthe.Core.csproj). -->
+    <IsAotCompatible>true</IsAotCompatible>
   </PropertyGroup>
 
 </Project>
