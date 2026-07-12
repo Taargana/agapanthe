@@ -12,4 +12,10 @@
     <Nullable>enable</Nullable>
   </PropertyGroup>
 
+  <ItemGroup>
+    <!-- The shader hot reloader (M8-05) is internal; expose it for GPU-free unit tests of its debounce /
+         dedup / normalization logic. -->
+    <InternalsVisibleTo Include="Agapanthe.Tests" />
+  </ItemGroup>
+
 </Project>

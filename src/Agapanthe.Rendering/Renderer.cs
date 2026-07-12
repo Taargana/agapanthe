@@ -1,7 +1,9 @@
+using System.Diagnostics;
 using System.Numerics;
 using System.Runtime.CompilerServices;
 using Agapanthe.Core;
 using Agapanthe.Graphics;
+using Agapanthe.Rendering.Passes;
 
 namespace Agapanthe.Rendering;
 
@@ -55,13 +57,6 @@ public sealed class Renderer : IDisposable
     private const float ShadowDepthBiasConstant = 1.25f;
     private const float ShadowDepthBiasSlope = 1.75f;
 
-    // Position-only view over the mesh vertex layout for the shadow pass: it keeps the full 60-byte stride
-    // (the mesh vertex buffers are bound unchanged) but declares ONLY location 0, so shadow.vert consumes
-    // every declared attribute — no "attribute not consumed by vertex shader" validation warning.
-    private static readonly VertexLayout ShadowVertexLayout = new(
-        stride: 60,
-        attributes: [new VertexAttribute(Location: 0, Offset: 0, PixelFormat.R32G32B32Sfloat)]);
-
     /// <summary>
     /// HDR scene-color format (architect decision 2): the scene pass renders here (linear, unclamped), and
     /// the tonemap pass (decision 3) resolves it to the sRGB swapchain. The scene pipeline declares this as
@@ -69,26 +64,44 @@ public sealed class Renderer : IDisposable
     /// </summary>
     public const PixelFormat HdrFormat = PixelFormat.Rgba16Sfloat;
 
+    // Debug-label names for the per-frame passes (M8-07): grouped in a RenderDoc/Nsight capture. Literals/const
+    // so no managed allocation happens when they are pushed every frame (the label API also no-ops with debug
+    // utils off). Kept as fields so every recorder references the same string.
+    private const string ShadowPassLabel = "Shadow";
+    private const string ScenePassLabel = "Scene";
+    private const string SkyboxLabel = "Skybox";
+    private const string TonemapPassLabel = "Tonemap";
+
     // Per-frame-slot camera UBOs: host-visible, rewritten every frame (Write<T> is correct — no staging).
     private readonly GpuBuffer?[] _cameraUbos = new GpuBuffer?[GraphicsDevice.FramesInFlight];
     private readonly GpuBuffer?[] _lightsUbos = new GpuBuffer?[GraphicsDevice.FramesInFlight];
 
     private readonly GraphicsDevice _device;
+
+    // Owned here and borrowed by the reloadable passes for their Reload path (M8-05). Kept so hot reload can
+    // recompile a pass without the Renderer re-plumbing anything.
     private ShaderCompiler? _shaderCompiler;
-    private ShaderModule? _vertexShader;
-    private ShaderModule? _fragmentShader;
+
+    // Set 0 (per-frame camera/lights/shadow/IBL) and set 1 (per-material) layouts + the persistent per-material
+    // descriptor allocator. Owned here; ScenePass borrows the two layouts to build its pipeline.
     private DescriptorSetLayout? _frameSetLayout;
     private DescriptorSetLayout? _materialSetLayout;
     private DescriptorAllocator? _materialAllocator;
-    private GraphicsPipeline? _pipeline;
 
-    // Tonemap (HDR resolve) pass resources: fullscreen-triangle pipeline (no vertex buffer), a 1-binding
-    // set layout (combined image sampler on the HDR target), and a clamp/linear sampler. The HDR image is
-    // sampled through this sampler and resolved to the swapchain.
-    private ShaderModule? _tonemapVertexShader;
-    private ShaderModule? _tonemapFragmentShader;
+    // The four reloadable passes (M8-04 seam). Each POSSESSES its shader modules, its GraphicsPipeline and a
+    // copy of the stable pipeline description (formats, set layouts, cull/depth — everything but the modules),
+    // so it can recompile and rebuild its pipeline at the frame boundary for shader hot reload (M8-05). The
+    // Renderer keeps the stable state they borrow (set layouts, samplers, targets); the record methods below
+    // bind pass.Pipeline.
+    private ShadowPass? _shadowPass;
+    private ScenePass? _scenePass;
+    private SkyboxPass? _skyboxPass;
+    private TonemapPass? _tonemapPass;
+
+    // Tonemap (HDR resolve) pass resources kept here (TonemapPass borrows the layout to build its pipeline):
+    // a 1-binding set layout (combined image sampler on the HDR target) and a clamp/linear sampler. The HDR
+    // image is sampled through this sampler and resolved to the swapchain.
     private DescriptorSetLayout? _tonemapSetLayout;
-    private GraphicsPipeline? _tonemapPipeline;
     private Sampler? _tonemapSampler;
 
     // Swapchain-sized attachments owned here now that the frame loop is attachment-agnostic: the HDR scene
@@ -104,35 +117,44 @@ public sealed class Renderer : IDisposable
     // hazard on the single shared HDR target — pipeline barriers order against prior submits on the queue).
     private bool _hdrInitialized;
 
-    // Directional shadow pass resources (architect decisions 6-9). The shadow map is a D32 2048² depth image
-    // that is BOTH a depth attachment (shadow pass writes it) and sampled (scene pass reads it through a
-    // comparison sampler). Created once at construction — invariant to swapchain resize, so unlike the HDR /
-    // depth targets it lives outside EnsureTargets. The shadow pipeline is depth-only (no fragment shader):
-    // model + lightViewProj travel as 128 bytes of push constants, no descriptor set (decision 7).
-    private ShaderModule? _shadowVertexShader;
+    // Directional shadow map (architect decisions 6-9): a D32 2048² depth image that is BOTH a depth
+    // attachment (ShadowPass writes it) and sampled (scene pass reads it through the sampler below). Created
+    // once at construction — invariant to swapchain resize, so unlike the HDR/depth targets it lives outside
+    // EnsureTargets. The depth-only shadow pipeline lives in ShadowPass; the image and its sampler stay here.
     private GpuImage? _shadowMap;
     private Sampler? _shadowSampler;
-    private GraphicsPipeline? _shadowPipeline;
 
     // Same WAR pattern as _hdrInitialized on the single shared shadow map: first use acquires from Undefined,
     // every later frame from ShaderReadOnly (the previous frame's scene-pass sample), so the depth write
     // serializes after that read.
     private bool _shadowInitialized;
 
-    // Image-based lighting (M7). The generator builds the maps from an HDRI supplied via SetEnvironment; the
-    // maps feed set 0 bindings 3/4/5 (irradiance, prefiltered, BRDF LUT) every frame and the skybox pass. All
-    // three sample through one linear/clamp sampler (the prefiltered map walks its mip chain for roughness).
-    private IblGenerator? _iblGenerator;
-    private IblMaps? _iblMaps;
-    private Sampler? _iblSampler;
-
-    // Skybox pass (M7): a vertex-buffer-less fullscreen triangle at the far plane sampling the environment
-    // cubemap, drawn INSIDE the scene pass after the meshes (depth test LessOrEqual, no depth write) so it
-    // fills only the background. Its own set 0 = camera UBO (ray reconstruction) + environment cubemap.
-    private ShaderModule? _skyboxVertexShader;
-    private ShaderModule? _skyboxFragmentShader;
+    // Image-based lighting + skybox (M7). IblResources bundles the generator, the current maps (built from an
+    // HDRI via SetEnvironment) and the shared linear/clamp sampler; the maps feed set 0 bindings 3/4/5
+    // (irradiance, prefiltered, BRDF LUT) every frame and the skybox pass. The skybox set-0 layout is kept
+    // here (SkyboxPass borrows it): camera UBO (ray reconstruction) + environment cubemap.
+    private IblResources? _iblResources;
     private DescriptorSetLayout? _skyboxSetLayout;
-    private GraphicsPipeline? _skyboxPipeline;
+
+    // The four reloadable passes as a stable array (built once), so PollShaderReload iterates them without
+    // re-allocating the collection every frame. Same instances as the individual _xxxPass fields.
+    private IReloadablePipeline[] _reloadablePasses = [];
+
+    // Shader hot reload (M8-05). Watches the passes' resolved source files on a background thread; null when
+    // there is nothing to watch (no editable source directory). PollShaderReload drives the reload at the frame
+    // boundary. The reloader is a managed object (not a GPU resource) so the ResourceTracker never sees it.
+    private ShaderHotReloader? _reloader;
+
+    // Debounce window for the shader watcher: long enough to coalesce an editor's save burst (write-temp +
+    // rename) and to let a half-written file finish, short enough to stay well inside the <1s reload budget.
+    private static readonly TimeSpan ShaderReloadDebounce = TimeSpan.FromMilliseconds(200);
+
+    // Bounded retry for a changed file that is not readable yet (audit M8-09 M1). Consecutive failed read
+    // attempts per path; the dictionary is created lazily on the FIRST failure, so the steady-state poll never
+    // touches it. Past MaxReloadReadAttempts (~2 s at the debounce above) the file is dropped with a warning
+    // instead of being requeued forever.
+    private const int MaxReloadReadAttempts = 10;
+    private Dictionary<string, int>? _reloadReadFailures;
 
     private bool _disposed;
 
@@ -154,11 +176,8 @@ public sealed class Renderer : IDisposable
 
         try
         {
+            // Owned by the Renderer and borrowed by every pass for its Build + Reload path.
             _shaderCompiler = new ShaderCompiler();
-            var vertSpirv = _shaderCompiler.CompileFile(Path.Combine(shaderDirectory, "mesh.vert"), ShaderStage.Vertex);
-            var fragSpirv = _shaderCompiler.CompileFile(Path.Combine(shaderDirectory, "mesh.frag"), ShaderStage.Fragment);
-            _vertexShader = new ShaderModule(device, vertSpirv, ShaderStage.Vertex);
-            _fragmentShader = new ShaderModule(device, fragSpirv, ShaderStage.Fragment);
 
             // Set 0 = per-frame data (spec §3.4): binding 0 camera (view/proj/position — the PBR
             // fragment stage needs the eye position), binding 1 lights (M5, decision 4), binding 2 the
@@ -180,44 +199,16 @@ public sealed class Renderer : IDisposable
             _materialSetLayout = MaterialLayout.CreateLayout(device);
             _materialAllocator = new DescriptorAllocator(device);
 
-            _pipeline = new GraphicsPipeline(device, new GraphicsPipelineDesc
-            {
-                VertexShader = _vertexShader,
-                FragmentShader = _fragmentShader,
-                // Full 5-attribute layout — mesh.vert consumes every one (see the shader header note).
-                VertexLayout = Vertex.Layout,
-                SetLayouts = [_frameSetLayout, _materialSetLayout],
-                PushConstants =
-                [
-                    new PushConstantRange(0, 64, ShaderStages.Vertex),   // model matrix
-                    new PushConstantRange(64, 4, ShaderStages.Fragment), // debug view selector
-                ],
-                // Scene renders into the HDR target (decision 2), not the swapchain: the tonemap pass owns
-                // the sRGB swapchain write.
-                ColorFormat = HdrFormat,
-                DepthFormat = DepthFormat,
-                DepthTest = true,
-                // glTF winding is CCW viewed from outside. Our PerspectiveVulkan bakes the Y-flip
-                // into the projection, so the image is upright and a world-CCW triangle appears
-                // visually CCW on screen — and Vulkan's front-face formula (spec 'Basic Polygon
-                // Rasterization', note the leading minus sign compensating the y-down framebuffer)
-                // classifies visually-CCW as COUNTER-clockwise. The old Clockwise choice came from
-                // applying the negative-viewport-height folklore plus a shoelace computed without
-                // that sign — it culled every front face of DamagedHelmet (fixed after M5 visual
-                // debugging: Cull None restored the intact shell, the decisive experiment).
-                FrontFace = FrontFace.CounterClockwise,
-                Cull = CullMode.Back,
-            });
-
             for (var i = 0; i < _cameraUbos.Length; i++)
             {
                 _cameraUbos[i] = new GpuBuffer(device, (ulong)Unsafe.SizeOf<CameraUniforms>(), BufferUsage.Uniform);
                 _lightsUbos[i] = new GpuBuffer(device, (ulong)Unsafe.SizeOf<LightsUniforms>(), BufferUsage.Uniform);
             }
 
-            // --- Directional shadow pass (decisions 6-9) ----------------------------------------------------
-            // Shadow map: D32, 2048², both depth attachment (shadow pass writes) and sampled (scene pass reads).
-            // Created here, once — it is invariant to swapchain resize, so it stays out of EnsureTargets.
+            // --- Directional shadow map (decisions 6-9) -----------------------------------------------------
+            // D32, 2048², both depth attachment (ShadowPass writes) and sampled (scene pass reads). Created
+            // here, once — invariant to swapchain resize, so it stays out of EnsureTargets. The pipeline that
+            // draws into it lives in ShadowPass, built below.
             Shadow = new ShadowSettings(ShadowMapResolution, ShadowDepthBiasConstant, ShadowDepthBiasSlope);
             _shadowMap = new GpuImage(
                 device, ShadowMapResolution, ShadowMapResolution, DepthFormat,
@@ -236,79 +227,23 @@ public sealed class Renderer : IDisposable
                 MipFilter: SamplerFilter.Nearest,
                 AddressMode: SamplerAddressMode.ClampToEdge));
 
-            // Depth-only shadow pipeline: shadow.vert alone (no fragment shader, no color attachment), a
-            // position-only vertex layout that KEEPS the mesh's 60-byte stride (so the mesh vertex buffers feed
-            // it verbatim) but declares only location 0 — declaring the full layout instead trips a validation
-            // warning per unconsumed attribute (locations 1-4). 128 bytes of push constants (lightViewProj @0,
-            // model @64) with NO descriptor set. Same CCW winding + back-face cull as the scene (M5 lesson);
-            // slope-scaled depth bias (rasterizer state, independent of the sampler) fights acne.
-            var shadowVertSpirv = _shaderCompiler.CompileFile(Path.Combine(shaderDirectory, "shadow.vert"), ShaderStage.Vertex);
-            _shadowVertexShader = new ShaderModule(device, shadowVertSpirv, ShaderStage.Vertex);
-            _shadowPipeline = new GraphicsPipeline(device, new GraphicsPipelineDesc
-            {
-                VertexShader = _shadowVertexShader,
-                FragmentShader = null,
-                VertexLayout = ShadowVertexLayout,
-                SetLayouts = [],
-                PushConstants = [new PushConstantRange(0, 128, ShaderStages.Vertex)],
-                ColorFormat = PixelFormat.Undefined,
-                DepthFormat = DepthFormat,
-                DepthTest = true,
-                DepthBiasConstant = ShadowDepthBiasConstant,
-                DepthBiasSlope = ShadowDepthBiasSlope,
-                Cull = CullMode.Back,
-                FrontFace = FrontFace.CounterClockwise,
-            });
-
-            // --- Tonemap pass (decision 3): fullscreen triangle, samples the HDR target, writes the swapchain.
-            var tonemapVertSpirv = _shaderCompiler.CompileFile(Path.Combine(shaderDirectory, "tonemap.vert"), ShaderStage.Vertex);
-            var tonemapFragSpirv = _shaderCompiler.CompileFile(Path.Combine(shaderDirectory, "tonemap.frag"), ShaderStage.Fragment);
-            _tonemapVertexShader = new ShaderModule(device, tonemapVertSpirv, ShaderStage.Vertex);
-            _tonemapFragmentShader = new ShaderModule(device, tonemapFragSpirv, ShaderStage.Fragment);
-
-            // One binding: the HDR target as a combined image sampler, read by the fragment stage.
+            // --- Tonemap pass resources (decision 3) --------------------------------------------------------
+            // One binding: the HDR target as a combined image sampler, read by the fragment stage. Linear /
+            // clamp-to-edge: the fullscreen triangle samples the HDR target 1:1, clamp is the safe screen-space
+            // resolve choice. The pipeline lives in TonemapPass, built below.
             _tonemapSetLayout = new DescriptorSetLayout(
                 device,
                 [new DescriptorBinding(0, DescriptorKind.CombinedImageSampler, ShaderStages.Fragment)]);
-
-            // Linear filtering, clamp-to-edge: the fullscreen triangle samples the HDR target 1:1, so wrap
-            // mode is irrelevant in practice, but clamp is the safe choice for a screen-space resolve.
             _tonemapSampler = new Sampler(device, new SamplerDesc(
                 Filter: SamplerFilter.Linear,
                 MipFilter: SamplerFilter.Linear,
                 AddressMode: SamplerAddressMode.ClampToEdge));
 
-            _tonemapPipeline = new GraphicsPipeline(device, new GraphicsPipelineDesc
-            {
-                VertexShader = _tonemapVertexShader,
-                FragmentShader = _tonemapFragmentShader,
-                // No vertex buffer: the vertex shader generates the triangle from gl_VertexIndex (Draw(3)).
-                VertexLayout = null,
-                SetLayouts = [_tonemapSetLayout],
-                // 4-byte float exposure, fragment stage only.
-                PushConstants = [new PushConstantRange(0, 4, ShaderStages.Fragment)],
-                // Resolves to the sRGB swapchain; the format's OETF replaces any gamma pow in the shader.
-                ColorFormat = swapchain.ColorFormat,
-                // No depth attachment and no depth test: a fullscreen resolve. DepthFormat stays Undefined.
-                DepthTest = false,
-                // The triangle is a screen-space quad; face orientation is meaningless, so cull nothing.
-                Cull = CullMode.None,
-            });
-
             // --- Image-based lighting + skybox (M7) ---------------------------------------------------------
-            // The generator is reusable across HDRIs; the maps themselves are produced later by SetEnvironment.
-            // One linear/clamp sampler serves the irradiance, prefiltered (mip-walked for roughness) and BRDF
-            // LUT reads, and the skybox's environment sample.
-            _iblGenerator = new IblGenerator(device, shaderDirectory);
-            _iblSampler = new Sampler(device, new SamplerDesc(
-                Filter: SamplerFilter.Linear, MipFilter: SamplerFilter.Linear, AddressMode: SamplerAddressMode.ClampToEdge));
-
-            var skyboxVertSpirv = _shaderCompiler.CompileFile(Path.Combine(shaderDirectory, "skybox.vert"), ShaderStage.Vertex);
-            var skyboxFragSpirv = _shaderCompiler.CompileFile(Path.Combine(shaderDirectory, "skybox.frag"), ShaderStage.Fragment);
-            _skyboxVertexShader = new ShaderModule(device, skyboxVertSpirv, ShaderStage.Vertex);
-            _skyboxFragmentShader = new ShaderModule(device, skyboxFragSpirv, ShaderStage.Fragment);
-
-            // Skybox set 0: camera UBO (vertex, ray reconstruction) + environment cubemap (fragment).
+            // IblResources bundles the reusable generator, the current maps (produced later by SetEnvironment)
+            // and the shared linear/clamp sampler. Skybox set 0: camera UBO (vertex, ray reconstruction) +
+            // environment cubemap (fragment); the pipeline lives in SkyboxPass, built below.
+            _iblResources = new IblResources(device, shaderDirectory);
             _skyboxSetLayout = new DescriptorSetLayout(
                 device,
                 [
@@ -316,20 +251,39 @@ public sealed class Renderer : IDisposable
                     new DescriptorBinding(1, DescriptorKind.CombinedImageSampler, ShaderStages.Fragment),
                 ]);
 
-            _skyboxPipeline = new GraphicsPipeline(device, new GraphicsPipelineDesc
+            // --- Reloadable passes (M8-04 seam) -------------------------------------------------------------
+            // Each pass compiles its own shaders (via CompileFileResolved, so its SourceFiles are populated for
+            // the hot-reload watcher) and builds its pipeline from the stable state assigned above (set layouts,
+            // formats, shadow bias). The pass owns the shaders + pipeline; the Renderer keeps the state above.
+            _scenePass = new ScenePass(
+                device, shaderDirectory, _shaderCompiler,
+                _frameSetLayout, _materialSetLayout, HdrFormat, DepthFormat);
+            _shadowPass = new ShadowPass(
+                device, shaderDirectory, _shaderCompiler,
+                DepthFormat, ShadowDepthBiasConstant, ShadowDepthBiasSlope);
+            _tonemapPass = new TonemapPass(
+                device, shaderDirectory, _shaderCompiler,
+                _tonemapSetLayout, swapchain.ColorFormat);
+            _skyboxPass = new SkyboxPass(
+                device, shaderDirectory, _shaderCompiler,
+                _skyboxSetLayout, HdrFormat, DepthFormat);
+
+            // --- Shader hot reload (M8-05) ------------------------------------------------------------------
+            // Only the four graphics passes are hot-reloadable (the IBL compute kernels are deferred — board).
+            // Their SourceFiles (root shader + resolved #includes, populated by Build above) are exactly the
+            // files to watch. The reloader spins up FileSystemWatcher(s) on their source directories; the
+            // resulting change flag is drained in PollShaderReload at the frame boundary.
+            _reloadablePasses = [_shadowPass, _scenePass, _skyboxPass, _tonemapPass];
+            var watchedFiles = new HashSet<string>(ShaderIncludeResolver.PathComparer);
+            foreach (var pass in _reloadablePasses)
             {
-                VertexShader = _skyboxVertexShader,
-                FragmentShader = _skyboxFragmentShader,
-                VertexLayout = null, // fullscreen triangle generated from gl_VertexIndex
-                SetLayouts = [_skyboxSetLayout],
-                ColorFormat = HdrFormat,
-                DepthFormat = DepthFormat,
-                // Test against the scene depth but never write: the far-plane triangle (z=w=1) passes the
-                // LessOrEqual test only where the cleared background depth (1.0) survived, i.e. no geometry.
-                DepthTest = true,
-                DepthWrite = false,
-                Cull = CullMode.None,
-            });
+                foreach (var file in pass.SourceFiles)
+                {
+                    watchedFiles.Add(file);
+                }
+            }
+
+            _reloader = new ShaderHotReloader(watchedFiles, ShaderReloadDebounce);
         }
         catch
         {
@@ -452,11 +406,204 @@ public sealed class Renderer : IDisposable
     {
         ArgumentNullException.ThrowIfNull(environment);
         ObjectDisposedException.ThrowIf(_disposed, this);
-        // Generate into a temporary and swap only on success: if Generate throws, the previously-adopted maps
-        // stay valid rather than being disposed while _iblMaps still references them (audit M7-07 finding m3).
-        var maps = _iblGenerator!.Generate(environment);
-        _iblMaps?.Dispose();
-        _iblMaps = maps;
+        // IblResources generates into a temporary and swaps only on success: if Generate throws, the
+        // previously-adopted maps stay valid rather than being disposed while still referenced (audit M7-07 m3).
+        _iblResources!.SetEnvironment(environment);
+    }
+
+    /// <summary>
+    /// The four reloadable passes (M8-04 seam) for the shader hot reloader (M8-05): it maps a changed source
+    /// file to the passes whose <see cref="IReloadablePipeline.SourceFiles"/> contain it and calls
+    /// <see cref="IReloadablePipeline.Reload"/> on each, at the frame boundary before recording. Internal —
+    /// the pass types never leave the Rendering assembly.
+    /// </summary>
+    internal IReadOnlyList<IReloadablePipeline> ReloadablePasses => _reloadablePasses;
+
+    /// <summary>The compiler the passes were built with; reused by the hot reloader (M8-05) on reload.</summary>
+    internal ShaderCompiler ShaderCompiler => _shaderCompiler!;
+
+    /// <summary>
+    /// Drives shader hot reload (M8-05, spec §3.6 / §6). Call once per frame from the render loop <b>before</b>
+    /// <see cref="DrawFrame"/> / any command recording — the reload retires the old pipeline through the
+    /// deletion queue (deferred N+FramesInFlight), which is only safe at the frame boundary (see
+    /// <see cref="IReloadablePipeline"/>).
+    /// <para>
+    /// <b>Hot path.</b> The steady-state cost when no shader changed is a single <c>volatile bool</c> read that
+    /// returns immediately — no lock, no allocation (audit point M8-09). Everything below the early-out runs
+    /// only after an actual edit (rare) and is deliberately off the zero-allocation budget.
+    /// </para>
+    /// When a watched file changes it is mapped to the passes whose <see cref="IReloadablePipeline.SourceFiles"/>
+    /// contain it, and each affected pass is reloaded once; a file that cannot be read yet (half-written) is
+    /// requeued and retried on a later poll. The recompile + pipeline-recreate wall time is logged per pass to
+    /// prove the &lt;1s budget (spec §6). A failed edit is logged and the previous pipeline is kept (spec §4).
+    /// </summary>
+    public void PollShaderReload()
+    {
+        // Zero-allocation early-out: a plain volatile read. Nothing changed on the vast majority of frames.
+        if (_reloader is null || !_reloader.HasPending)
+        {
+            return;
+        }
+
+        // Debounce gate: returns false (no allocation) while the editor's save burst is still settling.
+        if (!_reloader.TryBeginReload(out var changed))
+        {
+            return;
+        }
+
+        // Below here we are off the hot path (an edit happened) — allocations are acceptable.
+        var passes = _reloadablePasses;
+        Span<bool> touched = stackalloc bool[passes.Length];
+
+        for (var c = 0; c < changed.Count; c++)
+        {
+            var file = changed[c];
+
+            // A file the watcher reported but that no live pass compiled from (editor temp/swap files, unrelated
+            // edits): nothing to reload.
+            var matchesAnyPass = false;
+            for (var p = 0; p < passes.Length; p++)
+            {
+                if (ContainsPath(passes[p].SourceFiles, file))
+                {
+                    matchesAnyPass = true;
+                    break;
+                }
+            }
+
+            if (!matchesAnyPass)
+            {
+                continue;
+            }
+
+            // Guard against a half-written file: if it is not yet readable (the editor still holds it), requeue
+            // it (re-arms the debounce) and skip this cycle rather than letting the recompile fail spuriously.
+            // The two failure modes must be told apart or the requeue never converges (audit M8-09 M1):
+            //   - the file is gone (deleted/renamed): requeueing would re-arm _dirty and throw a FileNotFound
+            //     inside IsReadable every ~200 ms, forever → drop it, warn once;
+            //   - the file exists but is locked / half-written: requeue, but at most MaxReloadReadAttempts times,
+            //     so an externally locked file cannot keep the poll spinning either.
+            // Both paths converge; a later watcher event re-arms a dropped file with a fresh attempt count.
+            if (!IsReadable(file))
+            {
+                if (!File.Exists(file))
+                {
+                    _reloadReadFailures?.Remove(file);
+                    Core.Log.Warn($"Renderer: watched shader '{file}' no longer exists; dropping its reload.");
+                    continue;
+                }
+
+                // Allocated lazily on the first failure only: the steady-state poll (and its early-out) stays
+                // allocation-free.
+                _reloadReadFailures ??= new Dictionary<string, int>(ShaderIncludeResolver.PathComparer);
+                var attempts = _reloadReadFailures.TryGetValue(file, out var previous) ? previous + 1 : 1;
+                if (attempts >= MaxReloadReadAttempts)
+                {
+                    _reloadReadFailures.Remove(file);
+                    Core.Log.Warn(
+                        $"Renderer: watched shader '{file}' is still unreadable after {MaxReloadReadAttempts} " +
+                        "attempts (locked by another process?); giving up until it changes again.");
+                    continue;
+                }
+
+                _reloadReadFailures[file] = attempts;
+                _reloader.NotifyChanged(file);
+                continue;
+            }
+
+            _reloadReadFailures?.Remove(file);
+
+            for (var p = 0; p < passes.Length; p++)
+            {
+                if (ContainsPath(passes[p].SourceFiles, file))
+                {
+                    touched[p] = true;
+                }
+            }
+        }
+
+        for (var p = 0; p < passes.Length; p++)
+        {
+            if (!touched[p])
+            {
+                continue;
+            }
+
+            // Wall-time of the recompile (shaderc, or a disk-cache hit) + pipeline recreation, to prove the
+            // <1s reload budget (spec §6). GetTimestamp/GetElapsedTime are struct-based: no allocation.
+            // Reload returns false on a failed edit: it already logged the compiler error and kept the live
+            // pipeline (spec §4), so do not claim a reload that did not happen.
+            var start = Stopwatch.GetTimestamp();
+            if (!passes[p].Reload(_shaderCompiler!))
+            {
+                continue;
+            }
+
+            var elapsed = Stopwatch.GetElapsedTime(start);
+            Core.Log.Info(
+                $"Renderer: hot-reloaded {passes[p].GetType().Name} in {elapsed.TotalMilliseconds:F1} ms " +
+                "(recompile + pipeline recreate).");
+        }
+    }
+
+    /// <summary>
+    /// Debug hook (M8-05 verification): forces one reload of every graphics pass and logs the per-pass wall
+    /// time, so the recompile + pipeline-recreate budget (&lt;1s, spec §6) can be measured headless without a
+    /// windowed editing session. Not part of the normal frame loop; call once at load time (GPU idle, before
+    /// the first frame). Gated behind <c>AGAPANTHE_SHADER_RELOAD_TEST</c> by the Sandbox.
+    /// </summary>
+    public void ReloadAllForTest()
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        var passes = _reloadablePasses;
+        for (var p = 0; p < passes.Length; p++)
+        {
+            var start = Stopwatch.GetTimestamp();
+            if (!passes[p].Reload(_shaderCompiler!))
+            {
+                continue;
+            }
+
+            var elapsed = Stopwatch.GetElapsedTime(start);
+            Core.Log.Info(
+                $"Renderer: [reload-test] {passes[p].GetType().Name} reloaded in {elapsed.TotalMilliseconds:F1} ms " +
+                "(recompile + pipeline recreate).");
+        }
+    }
+
+    // Case-correct (OS-aware) membership test against a pass's resolved source files, using the single shared
+    // path comparer (ShaderIncludeResolver.PathComparer — same one the pass dedup and the watcher use, audit
+    // M8-09 M2). Index loop over IReadOnlyList: no enumerator allocation.
+    private static bool ContainsPath(IReadOnlyList<string> files, string path)
+    {
+        for (var i = 0; i < files.Count; i++)
+        {
+            if (ShaderIncludeResolver.PathComparer.Equals(files[i], path))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    // True if the file can currently be opened for reading (the writer has released it). ReadWrite share so we
+    // never block the editor; any IOException means "not ready yet" -> the caller requeues it.
+    private static bool IsReadable(string path)
+    {
+        try
+        {
+            using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+            return true;
+        }
+        catch (IOException)
+        {
+            return false;
+        }
+        catch (UnauthorizedAccessException)
+        {
+            return false;
+        }
     }
 
     public void DrawScene(Scene scene, Camera camera, CommandList cmd, FrameContext frame, SwapchainTarget target)
@@ -465,7 +612,7 @@ public sealed class Renderer : IDisposable
         ArgumentNullException.ThrowIfNull(camera);
         ArgumentNullException.ThrowIfNull(frame);
         ObjectDisposedException.ThrowIf(_disposed, this);
-        if (_iblMaps is null)
+        if (!_iblResources!.HasEnvironment)
         {
             throw new InvalidOperationException(
                 "Renderer has no environment; call SetEnvironment before DrawScene (M7 IBL feeds the ambient and skybox).");
@@ -525,7 +672,11 @@ public sealed class Renderer : IDisposable
     /// </summary>
     private void RecordShadowPass(CommandList cmd, Scene scene, in Matrix4x4 lightViewProj)
     {
-        var pipeline = _shadowPipeline!;
+        // RenderDoc/Nsight capture region for the whole pass (barriers + draws). No-op when debug utils is
+        // off, so it stays on the per-frame path at zero cost; the name is a literal (no per-frame alloc).
+        using var _ = cmd.PushDebugLabel(ShadowPassLabel);
+
+        var pipeline = _shadowPass!.Pipeline;
         var shadow = _shadowMap!;
 
         cmd.TransitionImage(
@@ -584,7 +735,10 @@ public sealed class Renderer : IDisposable
         CommandList cmd, FrameContext frame, Scene scene, Camera camera, SwapchainTarget target,
         in Matrix4x4 lightViewProj)
     {
-        var pipeline = _pipeline!;
+        // Capture region for the forward PBR pass; the skybox draw below nests its own "Skybox" sub-label.
+        using var _ = cmd.PushDebugLabel(ScenePassLabel);
+
+        var pipeline = _scenePass!.Pipeline;
         var hdr = _hdrImage!;
         var depth = _depthImage!;
 
@@ -639,10 +793,11 @@ public sealed class Renderer : IDisposable
 
         // IBL maps (M7): irradiance (3), prefiltered specular (4), BRDF LUT (5). All left in ShaderReadOnly by
         // the generator. Non-null here: DrawScene rejects an unset environment before reaching this pass.
-        var ibl = _iblMaps!;
-        frame.WriteCombinedImageSampler(frameSet, 3, ibl.Irradiance, _iblSampler!);
-        frame.WriteCombinedImageSampler(frameSet, 4, ibl.Prefiltered, _iblSampler!);
-        frame.WriteCombinedImageSampler(frameSet, 5, ibl.BrdfLut, _iblSampler!);
+        var ibl = _iblResources!.Maps!;
+        var iblSampler = _iblResources.Sampler;
+        frame.WriteCombinedImageSampler(frameSet, 3, ibl.Irradiance, iblSampler);
+        frame.WriteCombinedImageSampler(frameSet, 4, ibl.Prefiltered, iblSampler);
+        frame.WriteCombinedImageSampler(frameSet, 5, ibl.BrdfLut, iblSampler);
 
         cmd.BindPipeline(pipeline);
         cmd.BindDescriptorSet(pipeline, 0, frameSet); // set 0: per-frame camera + lights + shadow map
@@ -669,13 +824,18 @@ public sealed class Renderer : IDisposable
 
         // Skybox (M7): fill the background with the environment cubemap inside this same pass, AFTER the meshes
         // so its far-plane depth test (LessOrEqual, no write) only paints pixels no mesh covered. The camera
-        // UBO written above is reused for the view-ray reconstruction.
-        var skyboxSet = frame.AllocateSet(_skyboxSetLayout!);
-        frame.WriteUniformBuffer(skyboxSet, 0, ubo);
-        frame.WriteCombinedImageSampler(skyboxSet, 1, _iblMaps!.Environment, _iblSampler!);
-        cmd.BindPipeline(_skyboxPipeline!);
-        cmd.BindDescriptorSet(_skyboxPipeline!, 0, skyboxSet);
-        cmd.Draw(3);
+        // UBO written above is reused for the view-ray reconstruction. Nested sub-label so the single skybox
+        // draw is distinguishable under "Scene" in a capture.
+        using (cmd.PushDebugLabel(SkyboxLabel))
+        {
+            var skyboxSet = frame.AllocateSet(_skyboxSetLayout!);
+            frame.WriteUniformBuffer(skyboxSet, 0, ubo);
+            frame.WriteCombinedImageSampler(skyboxSet, 1, ibl.Environment, iblSampler);
+            var skyboxPipeline = _skyboxPass!.Pipeline;
+            cmd.BindPipeline(skyboxPipeline);
+            cmd.BindDescriptorSet(skyboxPipeline, 0, skyboxSet);
+            cmd.Draw(3);
+        }
 
         cmd.EndRendering();
     }
@@ -689,7 +849,10 @@ public sealed class Renderer : IDisposable
     /// </summary>
     private void RecordTonemapPass(CommandList cmd, FrameContext frame, SwapchainTarget target)
     {
-        var tonemapPipeline = _tonemapPipeline!;
+        // Capture region for the HDR resolve (barrier + fullscreen triangle).
+        using var _ = cmd.PushDebugLabel(TonemapPassLabel);
+
+        var tonemapPipeline = _tonemapPass!.Pipeline;
         var hdr = _hdrImage!;
 
         cmd.TransitionImage(hdr, ImageLayoutState.ColorAttachment, ImageLayoutState.ShaderReadOnly);
@@ -773,11 +936,18 @@ public sealed class Renderer : IDisposable
         DisposeResources();
     }
 
-    // Teardown order (also the ctor-failure cleanup path): targets, tonemap pipeline/layout/sampler/shaders,
-    // scene pipeline, layouts, allocator, UBOs, scene shaders, compiler. Every ?. is a real guard: on a
-    // failed construction only a prefix of these is assigned.
+    // Teardown order (also the ctor-failure cleanup path): targets, the four passes + IBL bundle, then the
+    // stable state the Renderer owns (samplers, set layouts, allocator, UBOs, compiler). Each pass disposes
+    // its own shaders + pipeline (deferred). Every ?. is a real guard: on a failed construction only a prefix
+    // of these is assigned.
     private void DisposeResources()
     {
+        // Stop the background file watcher first (managed object, not a GPU resource): no more reload flags can
+        // be raised while we tear the passes down.
+        _reloader?.Dispose();
+        _reloader = null;
+        _reloadablePasses = [];
+
         // Deferred release: the caller idles the GPU before Dispose (see the type remarks) and drains the
         // deletion queue with FlushAll afterwards, so the HDR/depth/shadow images are freed before the leak check.
         _hdrImage?.Dispose();
@@ -785,40 +955,33 @@ public sealed class Renderer : IDisposable
         _hdrImage = null;
         _depthImage = null;
 
-        // Image-based lighting + skybox (M7): the maps, the reusable generator (owns its own compiler/shaders),
-        // the shared sampler, and the skybox pipeline/layout/shaders.
-        _iblMaps?.Dispose();
-        _iblGenerator?.Dispose();
-        _iblSampler?.Dispose();
-        _skyboxPipeline?.Dispose();
-        _skyboxSetLayout?.Dispose();
-        _skyboxFragmentShader?.Dispose();
-        _skyboxVertexShader?.Dispose();
-        _iblMaps = null;
-        _iblGenerator = null;
-        _iblSampler = null;
-        _skyboxPipeline = null;
-        _skyboxSetLayout = null;
-        _skyboxFragmentShader = null;
-        _skyboxVertexShader = null;
+        // The four reloadable passes (own their shaders + pipelines), then the IBL bundle (generator + maps +
+        // sampler) and the borrowed set layouts / samplers the Renderer keeps for them.
+        _scenePass?.Dispose();
+        _shadowPass?.Dispose();
+        _skyboxPass?.Dispose();
+        _tonemapPass?.Dispose();
+        _scenePass = null;
+        _shadowPass = null;
+        _skyboxPass = null;
+        _tonemapPass = null;
 
-        // Directional shadow pass: pipeline, comparison sampler, shadow map, then the depth-only vertex shader.
-        _shadowPipeline?.Dispose();
+        _iblResources?.Dispose();
+        _skyboxSetLayout?.Dispose();
+        _iblResources = null;
+        _skyboxSetLayout = null;
+
+        // Directional shadow map + its sampler (the pipeline lived in the disposed ShadowPass).
         _shadowSampler?.Dispose();
         _shadowMap?.Dispose();
-        _shadowVertexShader?.Dispose();
-        _shadowPipeline = null;
         _shadowSampler = null;
         _shadowMap = null;
-        _shadowVertexShader = null;
 
-        _tonemapPipeline?.Dispose();
         _tonemapSetLayout?.Dispose();
         _tonemapSampler?.Dispose();
-        _tonemapFragmentShader?.Dispose();
-        _tonemapVertexShader?.Dispose();
+        _tonemapSetLayout = null;
+        _tonemapSampler = null;
 
-        _pipeline?.Dispose();
         _materialSetLayout?.Dispose();
         _frameSetLayout?.Dispose();
         _materialAllocator?.Dispose();
@@ -828,21 +991,11 @@ public sealed class Renderer : IDisposable
             _lightsUbos[i]?.Dispose();
         }
 
-        _fragmentShader?.Dispose();
-        _vertexShader?.Dispose();
         _shaderCompiler?.Dispose();
 
-        _tonemapPipeline = null;
-        _tonemapSetLayout = null;
-        _tonemapSampler = null;
-        _tonemapFragmentShader = null;
-        _tonemapVertexShader = null;
-        _pipeline = null;
         _materialSetLayout = null;
         _frameSetLayout = null;
         _materialAllocator = null;
-        _fragmentShader = null;
-        _vertexShader = null;
         _shaderCompiler = null;
     }
 }

@@ -21,7 +21,10 @@ using Silk.NET.Input;
 // Fixtures are copied into <output>/models/ by Sandbox.csproj, so a bare fixture name and the default
 // both resolve against AppContext.BaseDirectory regardless of the shell's working directory.
 
-var shaderDir = Path.Combine(AppContext.BaseDirectory, "shaders");
+// Shader directory: for hot reload (M8-05) we want the *editable* repo source (…/shaders), not the read-only
+// copy MSBuild drops next to the executable under bin/. ResolveShaderDirectory prefers the source tree when it
+// can be found by walking up from the output directory, and falls back to the bin/ copy for a deployed build.
+var shaderDir = ResolveShaderDirectory();
 var modelsDir = Path.Combine(AppContext.BaseDirectory, "models");
 
 // Resolve the model path: CLI arg first (as given, then as a bare fixture name under models/), else the
@@ -117,7 +120,17 @@ window.Loaded += () =>
     drawScene = (cmd, frame, target) => renderer!.DrawScene(scene!, camera, cmd, frame, target);
 
     Log.Info($"Sandbox: initialized on '{device.AdapterName}'. Rendering '{scene.Name}' — " +
-             "clic pour capturer la souris, WASD + souris, Échap libère puis quitte.");
+             "clic pour capturer la souris, WASD + souris, Échap libère puis quitte. " +
+             $"Hot reload actif sur '{shaderDir}'.");
+
+    // Headless proof of the <1s reload budget (spec §6): AGAPANTHE_SHADER_RELOAD_TEST=1 forces one reload of
+    // every graphics pass and logs the per-pass wall time, then the normal loop continues. Runs before the
+    // first frame (GPU idle, no in-flight frames) so the deferred pipeline swap is safe. Debug-only branch —
+    // it never touches the per-frame hot path.
+    if (Environment.GetEnvironmentVariable("AGAPANTHE_SHADER_RELOAD_TEST") is { Length: > 0 })
+    {
+        renderer.ReloadAllForTest();
+    }
 };
 
 // MoltenVK does not always report OUT_OF_DATE on resize; recreate explicitly to be safe.
@@ -202,6 +215,9 @@ window.Updated += dt =>
     // The glTF model is static (M4: no animation); the world transform comes from the node hierarchy.
     if (!window.MouseCaptured)
     {
+        // Update() isn't driven while the cursor is free, so clear the smoothed look delta: the next
+        // captured frame then starts from rest instead of gliding out a stale delta (no rotation kick).
+        controller.ResetLook();
         return;
     }
 
@@ -231,6 +247,10 @@ window.Rendered += _ =>
         resizePending = false;
         frameRenderer.RequestResize();
     }
+
+    // Shader hot reload (M8-05): recompile any edited pass at the frame boundary, BEFORE command recording.
+    // Zero-allocation early-out inside when no shader changed (a single volatile read).
+    renderer?.PollShaderReload();
 
     frameRenderer.DrawFrame(drawScene!);
 
@@ -276,6 +296,26 @@ Log.Info(clean ? "Sandbox: clean shutdown, no GPU resource leaks." : "Sandbox: L
 Environment.Exit(clean ? 0 : 1);
 
 // --- Local helpers -----------------------------------------------------------------------------------
+
+// Resolves the shader directory. Hot reload (M8-05) must watch and recompile the files the human edits, i.e.
+// the repo source tree (…/shaders), not the read-only copy MSBuild lays down next to the executable under
+// bin/. Walking UP from the output directory (starting one level above so the bin/ copy itself is skipped),
+// the first ancestor holding shaders/mesh.frag is the editable source. A deployed build (no such ancestor)
+// falls back to the bin/ copy — hot reload is then inert but harmless.
+static string ResolveShaderDirectory()
+{
+    var binShaders = Path.Combine(AppContext.BaseDirectory, "shaders");
+    for (var dir = new DirectoryInfo(AppContext.BaseDirectory).Parent; dir is not null; dir = dir.Parent)
+    {
+        var candidate = Path.Combine(dir.FullName, "shaders");
+        if (File.Exists(Path.Combine(candidate, "mesh.frag")))
+        {
+            return candidate;
+        }
+    }
+
+    return binShaders;
+}
 
 // Resolves the model path: an explicit CLI arg is tried verbatim (absolute or cwd-relative) then as a
 // bare fixture name under models/; with no arg the default fixture is used. Returns null when an

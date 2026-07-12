@@ -226,41 +226,57 @@ public sealed class IblGenerator : IDisposable
 
             _device.SubmitImmediate(cmd =>
             {
+                // Each kernel is wrapped in a debug-label region (M8-07) so a RenderDoc/Nsight capture of the
+                // load-time IBL bake shows the four stages by name; the transient CommandList exposes the same
+                // label API (no-op when debug utils is off). Names are literals — no allocation.
+
                 // --- Kernel 1: equirect -> environment cubemap. Then hand it to the compute readers below.
-                cmd.TransitionImage(environment, ImageLayoutState.Undefined, ImageLayoutState.General);
-                cmd.BindPipeline(_equirectPipeline!);
-                cmd.BindDescriptorSet(_equirectPipeline!, 0, equirectSet);
-                cmd.Dispatch(Groups(EnvironmentSize), Groups(EnvironmentSize), 6);
-                cmd.TransitionImage(environment, ImageLayoutState.General, ImageLayoutState.ShaderReadOnlyCompute);
+                using (cmd.PushDebugLabel("IBL: EquirectToCube"))
+                {
+                    cmd.TransitionImage(environment, ImageLayoutState.Undefined, ImageLayoutState.General);
+                    cmd.BindPipeline(_equirectPipeline!);
+                    cmd.BindDescriptorSet(_equirectPipeline!, 0, equirectSet);
+                    cmd.Dispatch(Groups(EnvironmentSize), Groups(EnvironmentSize), 6);
+                    cmd.TransitionImage(environment, ImageLayoutState.General, ImageLayoutState.ShaderReadOnlyCompute);
+                }
 
                 // --- Kernel 2: diffuse irradiance (samples the environment cubemap).
-                cmd.TransitionImage(irradiance, ImageLayoutState.Undefined, ImageLayoutState.General);
-                cmd.BindPipeline(_irradiancePipeline!);
-                cmd.BindDescriptorSet(_irradiancePipeline!, 0, irradianceSet);
-                cmd.Dispatch(Groups(IrradianceSize), Groups(IrradianceSize), 6);
-                cmd.TransitionImage(irradiance, ImageLayoutState.General, ImageLayoutState.ShaderReadOnly);
+                using (cmd.PushDebugLabel("IBL: Irradiance"))
+                {
+                    cmd.TransitionImage(irradiance, ImageLayoutState.Undefined, ImageLayoutState.General);
+                    cmd.BindPipeline(_irradiancePipeline!);
+                    cmd.BindDescriptorSet(_irradiancePipeline!, 0, irradianceSet);
+                    cmd.Dispatch(Groups(IrradianceSize), Groups(IrradianceSize), 6);
+                    cmd.TransitionImage(irradiance, ImageLayoutState.General, ImageLayoutState.ShaderReadOnly);
+                }
 
                 // --- Kernel 3: prefiltered specular, one dispatch per roughness mip (disjoint mip
                 // subresources, so no inter-dispatch barrier is needed).
-                cmd.TransitionImage(prefiltered, ImageLayoutState.Undefined, ImageLayoutState.General);
-                cmd.BindPipeline(_prefilterPipeline!);
-                for (var mip = 0u; mip < prefilteredMips; mip++)
+                using (cmd.PushDebugLabel("IBL: Prefilter"))
                 {
-                    var roughness = prefilteredMips == 1 ? 0f : (float)mip / (prefilteredMips - 1);
-                    cmd.PushConstants(_prefilterPipeline!, ShaderStages.Compute, in roughness);
-                    cmd.BindDescriptorSet(_prefilterPipeline!, 0, prefilterSets[mip]);
-                    var (mipW, mipH) = GpuImage.MipSize(PrefilteredSize, PrefilteredSize, mip);
-                    cmd.Dispatch(Groups(mipW), Groups(mipH), 6);
+                    cmd.TransitionImage(prefiltered, ImageLayoutState.Undefined, ImageLayoutState.General);
+                    cmd.BindPipeline(_prefilterPipeline!);
+                    for (var mip = 0u; mip < prefilteredMips; mip++)
+                    {
+                        var roughness = prefilteredMips == 1 ? 0f : (float)mip / (prefilteredMips - 1);
+                        cmd.PushConstants(_prefilterPipeline!, ShaderStages.Compute, in roughness);
+                        cmd.BindDescriptorSet(_prefilterPipeline!, 0, prefilterSets[mip]);
+                        var (mipW, mipH) = GpuImage.MipSize(PrefilteredSize, PrefilteredSize, mip);
+                        cmd.Dispatch(Groups(mipW), Groups(mipH), 6);
+                    }
+
+                    cmd.TransitionImage(prefiltered, ImageLayoutState.General, ImageLayoutState.ShaderReadOnly);
                 }
 
-                cmd.TransitionImage(prefiltered, ImageLayoutState.General, ImageLayoutState.ShaderReadOnly);
-
                 // --- Kernel 4: environment BRDF LUT (no environment input).
-                cmd.TransitionImage(brdfLut, ImageLayoutState.Undefined, ImageLayoutState.General);
-                cmd.BindPipeline(_brdfPipeline!);
-                cmd.BindDescriptorSet(_brdfPipeline!, 0, brdfSet);
-                cmd.Dispatch(Groups(BrdfLutSize), Groups(BrdfLutSize), 1);
-                cmd.TransitionImage(brdfLut, ImageLayoutState.General, ImageLayoutState.ShaderReadOnly);
+                using (cmd.PushDebugLabel("IBL: BRDF LUT"))
+                {
+                    cmd.TransitionImage(brdfLut, ImageLayoutState.Undefined, ImageLayoutState.General);
+                    cmd.BindPipeline(_brdfPipeline!);
+                    cmd.BindDescriptorSet(_brdfPipeline!, 0, brdfSet);
+                    cmd.Dispatch(Groups(BrdfLutSize), Groups(BrdfLutSize), 1);
+                    cmd.TransitionImage(brdfLut, ImageLayoutState.General, ImageLayoutState.ShaderReadOnly);
+                }
             });
 
             // The submit fenced already, but the transient descriptor pool is destroyed synchronously — make
