@@ -268,6 +268,7 @@ window.Rendered += _ =>
     }
 };
 
+var clean = false;
 try
 {
     window.Run();
@@ -280,7 +281,7 @@ finally
     //   -> renderer.Dispose (pipeline/layouts/allocator/UBOs; the allocator destroys its pools synchronously,
     //      which is why scene — whose material sets came from that allocator — is disposed first)
     //   -> device.DeletionQueue.FlushAll() (drain every deferred destroy while the device is alive and idle)
-    //   -> swapchain -> device -> window.
+    //   -> swapchain -> device -> [REPORT] -> window.
     frameRenderer?.WaitIdle();
     frameRenderer?.Dispose();
     scene?.Dispose();
@@ -288,11 +289,18 @@ finally
     device?.DeletionQueue.FlushAll();
     swapchain?.Dispose();
     device?.Dispose();
-    window.Dispose();
+
+    // GPU-leak accounting is fully decided once the device is gone: every tracked GPU resource has been
+    // registered and unregistered by now. Emit the report HERE, BEFORE the window's native GLFW teardown.
+    // That teardown can hit a rare, uncatchable Silk.NET access violation (0xC0000005 in GlfwEvents.Dispose,
+    // M8-14); a native fault cannot be caught by managed try/catch, so anything after it may never run.
+    // Reporting first guarantees the 0-leak gate result is always printed, whatever GLFW does next.
+    clean = ResourceTracker.Report();
+    Log.Info(clean ? "Sandbox: clean shutdown, no GPU resource leaks." : "Sandbox: LEAKS DETECTED (see above).");
+
+    window.Dispose(); // native GLFW/window teardown LAST — a crash here can no longer mask the leak report
 }
 
-var clean = ResourceTracker.Report();
-Log.Info(clean ? "Sandbox: clean shutdown, no GPU resource leaks." : "Sandbox: LEAKS DETECTED (see above).");
 Environment.Exit(clean ? 0 : 1);
 
 // --- Local helpers -----------------------------------------------------------------------------------

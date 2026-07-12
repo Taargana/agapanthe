@@ -1,9 +1,10 @@
 using System.Numerics;
-using Agapanthe.Core;
 using Silk.NET.Core.Contexts;
 using Silk.NET.Input;
+using Silk.NET.Input.Glfw;
 using Silk.NET.Maths;
 using Silk.NET.Windowing;
+using Silk.NET.Windowing.Glfw;
 
 namespace Agapanthe.Platform;
 
@@ -31,6 +32,18 @@ public sealed class EngineWindow : IDisposable
     private bool _recenterCapture;
     private bool _disposed;
 
+    static EngineWindow()
+    {
+        // NativeAOT (Phase 2 rule 1): Silk.NET's Window.Create() discovers windowing/input platforms by
+        // reflecting over loaded assemblies. The AOT trimmer removes that path, so Create() throws
+        // PlatformNotSupportedException ("none registered") at runtime. Registering GLFW explicitly is a
+        // direct static reference to GlfwPlatform, which (a) the trimmer therefore keeps and (b) Window.Create
+        // finds without any reflection. GlfwInput.RegisterPlatform() also ensures windowing is registered;
+        // both calls are idempotent (they no-op if the platform already exists), so calling both is safe.
+        GlfwWindowing.RegisterPlatform();
+        GlfwInput.RegisterPlatform();
+    }
+
     public EngineWindow(string title, int width, int height)
     {
         var options = WindowOptions.DefaultVulkan with
@@ -53,8 +66,6 @@ public sealed class EngineWindow : IDisposable
         _window.FramebufferResize += size => FramebufferResized?.Invoke(size.X, size.Y);
         _window.FocusChanged += OnFocusChanged;
         _window.Closing += () => Closing?.Invoke();
-
-        ResourceTracker.Register("EngineWindow");
     }
 
     /// <summary>Fires once the window and its input context exist. Create GPU resources here.</summary>
@@ -308,11 +319,13 @@ public sealed class EngineWindow : IDisposable
             _mouse.MouseDown -= OnMouseDown;
         }
 
+        // Native GLFW teardown. This is where a rare, non-reproducible Silk.NET access violation can occur
+        // (0xC0000005 in GlfwEvents.Dispose → glfwSetCursorPosCallback; M8-14). It is an uncatchable native
+        // fault, so callers MUST emit the ResourceTracker leak report BEFORE disposing the window — the report
+        // must never be masked by this teardown. EngineWindow is a platform object, not a GPU resource, so it
+        // is deliberately NOT tracked by ResourceTracker: the GPU-leak gate is fully decided by the device
+        // teardown that precedes this.
         _input?.Dispose();
         _window.Dispose();
-        ResourceTracker.Unregister("EngineWindow");
-        GC.SuppressFinalize(this);
     }
-
-    ~EngineWindow() => ResourceTracker.ReportFinalizerLeak("EngineWindow");
 }
