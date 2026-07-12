@@ -162,6 +162,27 @@ public sealed unsafe partial class GraphicsDevice : IDisposable
     /// <summary>Non-null only when <see cref="HasVulkan13Core"/> is false.</summary>
     internal KhrSynchronization2? KhrSynchronization2 => _khrSynchronization2;
 
+    /// <summary>
+    /// True when <c>VK_EXT_debug_utils</c> is loaded (validation builds only — see
+    /// <see cref="_debugUtilsEnabled"/>). The <see cref="CommandList"/> debug-label API is a safe
+    /// no-op when this is false, so callers may issue labels unconditionally and pay nothing in
+    /// Release. Backed by the extension object itself so it is the single source of truth: the object
+    /// is non-null iff the messenger was set up, which only happens when the extension was enabled.
+    /// </summary>
+    internal bool DebugLabelsEnabled => _debugUtils is not null;
+
+    /// <summary>
+    /// Routes <c>vkCmdBeginDebugUtilsLabelEXT</c>. Callers MUST gate on <see cref="DebugLabelsEnabled"/>
+    /// first: this dereferences the extension object unconditionally. Kept <c>internal</c> so the
+    /// <see cref="DebugUtilsLabelEXT"/> Vulkan type never leaks past the module boundary.
+    /// </summary>
+    internal void CmdBeginDebugLabel(CommandBuffer cmd, DebugUtilsLabelEXT* label)
+        => _debugUtils!.CmdBeginDebugUtilsLabel(cmd, label);
+
+    /// <summary>Routes <c>vkCmdEndDebugUtilsLabelEXT</c>. Gate on <see cref="DebugLabelsEnabled"/> first.</summary>
+    internal void CmdEndDebugLabel(CommandBuffer cmd)
+        => _debugUtils!.CmdEndDebugUtilsLabel(cmd);
+
     internal Queue GraphicsQueue { get; private set; }
     internal Queue PresentQueue { get; private set; }
     internal uint GraphicsQueueFamily { get; private set; }

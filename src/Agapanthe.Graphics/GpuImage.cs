@@ -11,10 +11,10 @@ namespace Agapanthe.Graphics;
 /// same type serves depth attachments, color targets and sampled textures; the view aspect is derived
 /// (Depth for <see cref="ImageUsage.DepthAttachment"/>, Color otherwise).
 /// <para>
-/// Disposal is <b>deferred by default</b> (<see cref="Dispose"/> → device DeletionQueue): the destroy
-/// runs once the frame that used the image leaves flight. Swapchain-sized attachments (the depth image)
-/// are recreated only after <c>vkDeviceWaitIdle</c>, so they use <see cref="DestroyImmediately"/> to skip
-/// the queue. <c>VkDeviceMemory</c> is <i>not</i> tracked here — the allocator counts it per backing
+/// Disposal is <b>deferred</b> (<see cref="Dispose"/> → device DeletionQueue): the destroy runs once the
+/// frame that used the image leaves flight — including swapchain-sized attachments, which are recreated
+/// behind a <c>vkDeviceWaitIdle</c> and drained by the queue like everything else.
+/// <c>VkDeviceMemory</c> is <i>not</i> tracked here — the allocator counts it per backing
 /// block; this type only registers its <c>VkImage</c> and <c>VkImageView</c>.
 /// </para>
 /// </summary>
@@ -292,36 +292,6 @@ public sealed unsafe class GpuImage : IDisposable
         GC.SuppressFinalize(this);
     }
 
-    /// <summary>
-    /// Destroys the image, view and suballocation <b>synchronously</b>. Only valid when the GPU can no
-    /// longer reference them (after <c>vkDeviceWaitIdle</c>) — used for swapchain-sized attachments the
-    /// FrameRenderer recreates behind a device wait.
-    /// </summary>
-    internal void DestroyImmediately()
-    {
-        if (_disposed)
-        {
-            return;
-        }
-
-        _disposed = true;
-        var vk = _device.Api;
-        foreach (var extra in _extraViews)
-        {
-            if (extra.Handle != 0)
-            {
-                vk.DestroyImageView(_device.Device, extra, null);
-                ResourceTracker.Unregister("VkImageView");
-            }
-        }
-
-        _extraViews.Clear();
-        DestroyHandles(_device, _image, _view, in _allocation, _hasAllocation);
-        _image = default;
-        _view = default;
-        _hasAllocation = false;
-        GC.SuppressFinalize(this);
-    }
 
     // Allocated once per type: passing this reference on the deferred path costs no allocation.
     private static readonly Action<GraphicsDevice, DeletionPayload> DestroyDelegate = DestroyDeferred;

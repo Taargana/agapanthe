@@ -42,7 +42,7 @@ public sealed unsafe class ComputePipeline : IDisposable
         var vk = device.Api;
         try
         {
-            CreateLayout(vk, desc);
+            _layout = PipelineLayoutBuilder.Create(_device, desc.SetLayouts, desc.PushConstants);
             CreatePipeline(vk, desc);
         }
         catch
@@ -66,6 +66,11 @@ public sealed unsafe class ComputePipeline : IDisposable
     internal Pipeline Handle => _pipeline;
     internal PipelineLayout Layout => _layout;
 
+    /// <summary>
+    /// Deferred disposal (default, spec §3.2.1/§3.2.5): the pipeline and its layout are released once the
+    /// frame that used them leaves flight. Safe only because pipeline swaps happen at the frame boundary
+    /// before recording; N+FramesInFlight then covers every in-flight frame.
+    /// </summary>
     public void Dispose()
     {
         if (_disposed)
@@ -74,46 +79,38 @@ public sealed unsafe class ComputePipeline : IDisposable
         }
 
         _disposed = true;
-        DestroyResources();
+
+        // Non-capturing deferred destroy (zero managed allocation): the two raw handles travel by value in
+        // the payload (Handle0 = VkPipeline, Handle1 = VkPipelineLayout) and the destructor is a cached
+        // static delegate.
+        var payload = new DeletionPayload(_pipeline.Handle, _layout.Handle);
+        _pipeline = default;
+        _layout = default;
+        _device.EnqueueDestroy(DestroyDelegate, in payload);
         GC.SuppressFinalize(this);
     }
 
-    // Deliberately duplicated from GraphicsPipeline.CreateLayout: that method is private and
-    // GraphicsPipeline.cs is owner-locked for this task (M7-02, parallel agent constraints), so the layout
-    // build is mirrored here rather than refactored into a shared helper. Extracting a shared
-    // PipelineLayoutBuilder is a candidate for a later cleanup pass (noted in the M7-02 hand-off).
-    private void CreateLayout(Vk vk, ComputePipelineDesc desc)
+    // Allocated once per type: passing this reference on the deferred path costs no allocation.
+    private static readonly Action<GraphicsDevice, DeletionPayload> DestroyDelegate = DestroyDeferred;
+
+    // Deferred destructor for the non-capturing DeletionQueue path (Dispose): rebuilds the handles from the
+    // value-type payload and destroys pipeline then layout. Runs after the frame leaves flight.
+    private static void DestroyDeferred(GraphicsDevice device, DeletionPayload payload)
     {
-        var setLayouts = stackalloc Silk.NET.Vulkan.DescriptorSetLayout[Math.Max(1, desc.SetLayouts.Count)];
-        for (var i = 0; i < desc.SetLayouts.Count; i++)
+        var vk = device.Api;
+        var pipeline = new Pipeline(payload.Handle0);
+        if (pipeline.Handle != 0)
         {
-            setLayouts[i] = desc.SetLayouts[i].Handle;
+            vk.DestroyPipeline(device.Device, pipeline, null);
+            ResourceTracker.Unregister("VkPipeline");
         }
 
-        var pushRanges = stackalloc Silk.NET.Vulkan.PushConstantRange[Math.Max(1, desc.PushConstants.Count)];
-        for (var i = 0; i < desc.PushConstants.Count; i++)
+        var layout = new PipelineLayout(payload.Handle1);
+        if (layout.Handle != 0)
         {
-            var range = desc.PushConstants[i];
-            pushRanges[i] = new Silk.NET.Vulkan.PushConstantRange
-            {
-                Offset = range.Offset,
-                Size = range.Size,
-                StageFlags = DescriptorSetLayout.ToVkStages(range.Stages),
-            };
+            vk.DestroyPipelineLayout(device.Device, layout, null);
+            ResourceTracker.Unregister("VkPipelineLayout");
         }
-
-        var layoutInfo = new PipelineLayoutCreateInfo
-        {
-            SType = StructureType.PipelineLayoutCreateInfo,
-            SetLayoutCount = (uint)desc.SetLayouts.Count,
-            PSetLayouts = desc.SetLayouts.Count > 0 ? setLayouts : null,
-            PushConstantRangeCount = (uint)desc.PushConstants.Count,
-            PPushConstantRanges = desc.PushConstants.Count > 0 ? pushRanges : null,
-        };
-        PipelineLayout layout;
-        VkCheck.ThrowIfFailed(vk.CreatePipelineLayout(_device.Device, &layoutInfo, null, &layout), "vkCreatePipelineLayout");
-        _layout = layout;
-        ResourceTracker.Register("VkPipelineLayout");
     }
 
     private void CreatePipeline(Vk vk, ComputePipelineDesc desc)

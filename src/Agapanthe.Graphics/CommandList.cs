@@ -1,4 +1,5 @@
 using System.Runtime.CompilerServices;
+using System.Text.Unicode;
 using Silk.NET.Vulkan;
 
 namespace Agapanthe.Graphics;
@@ -169,6 +170,85 @@ public readonly unsafe struct CommandList
 
     /// <summary>Closes the scope opened by <see cref="BeginRendering"/>.</summary>
     public void EndRendering() => _device.CmdEndRendering(_buffer);
+
+    /// <summary>
+    /// Opens a named debug region (<c>vkCmdBeginDebugUtilsLabelEXT</c>) so RenderDoc, Nsight and the
+    /// validation layers group the following commands under <paramref name="name"/>. Pair with
+    /// <see cref="EndDebugLabel"/>, or prefer <see cref="PushDebugLabel"/> for a scoped <c>using</c>.
+    /// <para>
+    /// <b>Safe no-op when debug utils is inactive</b> (Release, or <c>EnableValidation == false</c>):
+    /// it early-returns before touching the extension, so both this and <see cref="EndDebugLabel"/>
+    /// can be called unconditionally on the per-frame path at zero cost.
+    /// </para>
+    /// <para>
+    /// <b>Allocation-free.</b> <paramref name="name"/> is transcoded UTF-16 → UTF-8 into a
+    /// <c>stackalloc</c> buffer (no managed string/array), then NUL-terminated for the C API. A name
+    /// longer than the buffer is silently truncated (labels are diagnostic only) rather than throwing.
+    /// </para>
+    /// </summary>
+    public void BeginDebugLabel(ReadOnlySpan<char> name)
+    {
+        if (!_device.DebugLabelsEnabled)
+        {
+            return;
+        }
+
+        // 256 bytes covers any reasonable pass/kernel name; one byte reserved for the NUL terminator.
+        // Utf8.FromUtf16 never throws on a small destination — it writes what fits and reports the
+        // status (ignored here: truncation is acceptable for a diagnostic label), so this stays
+        // allocation-free and crash-free regardless of name length.
+        const int capacity = 256;
+        Span<byte> utf8 = stackalloc byte[capacity];
+        Utf8.FromUtf16(name, utf8[..(capacity - 1)], out _, out var written);
+        utf8[written] = 0;
+
+        fixed (byte* pName = utf8)
+        {
+            var label = new DebugUtilsLabelEXT
+            {
+                SType = StructureType.DebugUtilsLabelExt,
+                PLabelName = pName,
+                // Color left at (0,0,0,0): let the capture tool pick a default hue.
+            };
+            _device.CmdBeginDebugLabel(_buffer, &label);
+        }
+    }
+
+    /// <summary>Closes the region opened by <see cref="BeginDebugLabel"/>
+    /// (<c>vkCmdEndDebugUtilsLabelEXT</c>). Safe no-op when debug utils is inactive.</summary>
+    public void EndDebugLabel()
+    {
+        if (!_device.DebugLabelsEnabled)
+        {
+            return;
+        }
+
+        _device.CmdEndDebugLabel(_buffer);
+    }
+
+    /// <summary>
+    /// Opens a debug region and returns a <see cref="DebugLabelScope"/> that closes it on dispose, for
+    /// ergonomic nesting: <c>using (cmd.PushDebugLabel("scene")) { ... }</c>. The returned value is a
+    /// <c>ref struct</c> (stack-only, no heap allocation); when debug utils is inactive both ends are
+    /// no-ops so the pairing stays balanced.
+    /// </summary>
+    public DebugLabelScope PushDebugLabel(ReadOnlySpan<char> name)
+    {
+        BeginDebugLabel(name);
+        return new DebugLabelScope(this);
+    }
+
+    /// <summary>Scoped debug-label region opened by <see cref="PushDebugLabel"/>; calls
+    /// <see cref="EndDebugLabel"/> on <see cref="Dispose"/>. Stack-only, allocation-free.</summary>
+    public readonly ref struct DebugLabelScope
+    {
+        private readonly CommandList _commandList;
+
+        internal DebugLabelScope(CommandList commandList) => _commandList = commandList;
+
+        /// <summary>Closes the region (<c>vkCmdEndDebugUtilsLabelEXT</c>).</summary>
+        public void Dispose() => _commandList.EndDebugLabel();
+    }
 
     /// <summary>
     /// Sets a full-target viewport and scissor of <paramref name="width"/>×<paramref name="height"/>. No
