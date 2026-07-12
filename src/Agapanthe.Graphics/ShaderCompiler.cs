@@ -16,25 +16,57 @@ namespace Agapanthe.Graphics;
 /// </summary>
 public sealed unsafe class ShaderCompiler : IDisposable
 {
-    private readonly Shaderc _shaderc;
-    private readonly Compiler* _compiler;
+    // shaderc is loaded LAZILY (Phase 2 rule §2.1-2): a fully pre-cooked cache never triggers a compile, so
+    // the native shaderc library is never loaded. Only the first real cache miss initializes it. _shaderc is
+    // null until then; _shaderc != null implies _compiler is set (see EnsureShaderc's publish order).
+    private readonly Lock _shadercLock = new();
+    private Shaderc? _shaderc;
+    private Compiler* _compiler;
     private readonly string _cacheDirectory;
     private bool _disposed;
 
     public ShaderCompiler(string? cacheDirectory = null)
     {
-        _shaderc = Shaderc.GetApi();
-        _compiler = _shaderc.CompilerInitialize();
-        if (_compiler is null)
-        {
-            _shaderc.Dispose();
-            GC.SuppressFinalize(this);
-            throw new GraphicsException("Failed to initialize the shaderc compiler.");
-        }
-
         _cacheDirectory = cacheDirectory ?? Path.Combine(AppContext.BaseDirectory, ".shadercache");
         Directory.CreateDirectory(_cacheDirectory);
         ResourceTracker.Register(nameof(ShaderCompiler));
+    }
+
+    /// <summary>
+    /// Lazily initializes shaderc on the first real compilation (cache miss). Double-checked under a lock so a
+    /// warm cache never pays for it and the native library is never loaded when every shader is pre-cooked.
+    /// <c>_compiler</c> is assigned before <c>_shaderc</c> is published, so a non-null <c>_shaderc</c> observed
+    /// without the lock always implies a valid compiler.
+    /// </summary>
+    private void EnsureShaderc()
+    {
+        if (_shaderc is not null)
+        {
+            return;
+        }
+
+        lock (_shadercLock)
+        {
+            if (_shaderc is not null)
+            {
+                return;
+            }
+
+            var api = Shaderc.GetApi();
+            var compiler = api.CompilerInitialize();
+            if (compiler is null)
+            {
+                api.Dispose();
+                throw new GraphicsException("Failed to initialize the shaderc compiler.");
+            }
+
+            _compiler = compiler;
+            _shaderc = api; // publish last
+
+            // Visible proof of the lazy path: this line appears only on a real cache miss. A fully pre-cooked
+            // cache (Phase 2 rule §2.1-2) never logs it — shaderc is never loaded.
+            Log.Info("ShaderCompiler: cache miss — loading shaderc for runtime GLSL compilation.");
+        }
     }
 
     ~ShaderCompiler() => ResourceTracker.ReportFinalizerLeak(nameof(ShaderCompiler));
@@ -161,6 +193,9 @@ public sealed unsafe class ShaderCompiler : IDisposable
 
     private byte[] CompileWithShaderc(string source, ShaderStage stage, string sourceName)
     {
+        EnsureShaderc();
+        var sc = _shaderc!; // EnsureShaderc guarantees non-null (and _compiler set)
+
         var kind = stage switch
         {
             ShaderStage.Vertex => ShaderKind.VertexShader,
@@ -169,7 +204,7 @@ public sealed unsafe class ShaderCompiler : IDisposable
             _ => throw new ArgumentOutOfRangeException(nameof(stage), stage, "Unknown shader stage."),
         };
 
-        var options = _shaderc.CompileOptionsInitialize();
+        var options = sc.CompileOptionsInitialize();
         if (options is null)
         {
             throw new GraphicsException($"shaderc failed to allocate compile options for '{sourceName}'.");
@@ -187,25 +222,25 @@ public sealed unsafe class ShaderCompiler : IDisposable
             namePtr = (byte*)Marshal_StringToUtf8(sourceName, out _);
             entryPtr = (byte*)Marshal_StringToUtf8("main", out _);
 
-            _shaderc.CompileOptionsSetOptimizationLevel(options, OptimizationLevel.Performance);
-            _shaderc.CompileOptionsSetSourceLanguage(options, SourceLanguage.Glsl);
+            sc.CompileOptionsSetOptimizationLevel(options, OptimizationLevel.Performance);
+            sc.CompileOptionsSetSourceLanguage(options, SourceLanguage.Glsl);
 
-            result = _shaderc.CompileIntoSpv(
+            result = sc.CompileIntoSpv(
                 _compiler, sourcePtr, (nuint)sourceLength, kind, namePtr, entryPtr, options);
             if (result is null)
             {
                 throw new GraphicsException($"shaderc returned no result for '{sourceName}'.");
             }
 
-            var status = _shaderc.ResultGetCompilationStatus(result);
+            var status = sc.ResultGetCompilationStatus(result);
             if (status != CompilationStatus.Success)
             {
-                var error = SilkStringOrEmpty(_shaderc.ResultGetErrorMessage(result));
+                var error = SilkStringOrEmpty(sc.ResultGetErrorMessage(result));
                 throw new GraphicsException($"Shader compilation failed for '{sourceName}' ({status}):\n{error}");
             }
 
-            var length = (int)_shaderc.ResultGetLength(result);
-            var bytesPtr = _shaderc.ResultGetBytes(result);
+            var length = (int)sc.ResultGetLength(result);
+            var bytesPtr = sc.ResultGetBytes(result);
             var spirv = new byte[length];
             new ReadOnlySpan<byte>(bytesPtr, length).CopyTo(spirv);
             return spirv;
@@ -214,10 +249,10 @@ public sealed unsafe class ShaderCompiler : IDisposable
         {
             if (result is not null)
             {
-                _shaderc.ResultRelease(result);
+                sc.ResultRelease(result);
             }
 
-            _shaderc.CompileOptionsRelease(options);
+            sc.CompileOptionsRelease(options);
             NativeMemory.Free(sourcePtr);
             NativeMemory.Free(namePtr);
             NativeMemory.Free(entryPtr);
@@ -251,12 +286,19 @@ public sealed unsafe class ShaderCompiler : IDisposable
         }
 
         _disposed = true;
-        if (_compiler is not null)
+
+        // shaderc may never have been initialized (a fully pre-cooked cache never compiles): only release it
+        // if EnsureShaderc actually ran.
+        if (_shaderc is not null)
         {
-            _shaderc.CompilerRelease(_compiler);
+            if (_compiler is not null)
+            {
+                _shaderc.CompilerRelease(_compiler);
+            }
+
+            _shaderc.Dispose();
         }
 
-        _shaderc.Dispose();
         ResourceTracker.Unregister(nameof(ShaderCompiler));
         GC.SuppressFinalize(this);
     }
