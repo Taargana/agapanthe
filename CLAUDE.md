@@ -1,7 +1,7 @@
 # Agapanthe — contexte projet (à lire en premier)
 
 Moteur de jeu **Vulkan en C# from scratch** (.NET 10), cross-platform (Windows / Linux / macOS).
-Phase 1 (en cours) : toute la chaîne graphique 3D. Phase 2 (plus tard) : ECS/scene graph, audio, physique, gameplay.
+**Phase 1 (TERMINÉE, 8/8 jalons)** : toute la chaîne graphique 3D. **Phase 2 (à venir)** : ECS/scene graph, audio, physique, gameplay.
 
 ## Où est la vérité (lis ces fichiers avant d'agir)
 
@@ -42,7 +42,9 @@ DYLD_LIBRARY_PATH=/opt/homebrew/lib dotnet run --project samples/Sandbox
 DYLD_LIBRARY_PATH=/opt/homebrew/lib dotnet run --project samples/Sandbox -- MetalRoughSpheres.glb
 ```
 
-Env vars debug : `AGAPANTHE_MAX_FRAMES=N` (auto-close, sortie 0 si 0 leak) · `AGAPANTHE_CAPTURE=out.ppm` (dump HDR tonemappé) · `AGAPANTHE_VIEW="x,y,z"` (angle caméra) · `AGAPANTHE_HDRI=<path.hdr>` (environnement IBL) · `AGAPANTHE_IBL_TEST=<préfixe>` (génère l'IBL headless + dump faces/maps).
+Env vars debug : `AGAPANTHE_MAX_FRAMES=N` (auto-close, sortie 0 si 0 leak) · `AGAPANTHE_CAPTURE=out.ppm` (dump HDR tonemappé) · `AGAPANTHE_VIEW="x,y,z"` (angle caméra) · `AGAPANTHE_HDRI=<path.hdr>` (environnement IBL) · `AGAPANTHE_IBL_TEST=<préfixe>` (génère l'IBL headless + dump faces/maps) · `AGAPANTHE_SHADER_RELOAD_TEST=1` (force un reload des 4 passes + logge le wall-time).
+
+**Hot reload shaders** (M8) : éditer un fichier de `shaders/` pendant que le Sandbox tourne → recompile + recréation du pipeline en < 1 s. Échec de compile = log + ancien pipeline conservé. Limites : éditions **interface-compatibles** uniquement (changer un binding → restart) ; les 4 shaders compute IBL ne sont pas surveillés.
 
 ## Méthode de travail
 
@@ -58,4 +60,10 @@ Sessions pilotées via **absolute-human** (décomposition en tâches, vagues par
 
 ## État courant
 
-**Phase 1 : 7/8 jalons.** M0–M7 livrés (M7 = IBL compute + skybox, validé visuellement). **Prochain : M8** (hot reload shaders + includes, debug labels RenderDoc, confort souris, audit perf/leaks final, validation multi-OS) — dernier jalon avant la close Phase 1. Détail + point de reprise dans `docs/AVANCEMENT.md`.
+**PHASE 1 CLOSE — 8/8 jalons.** M0–M8 livrés (M8 = hot reload shaders < 1 s, labels RenderDoc, confort souris, double audit PASS). Métriques : 205 tests, 0 warning, 0 message de validation, 0 leak.
+
+⚠️ **L'arbre M8 n'est pas committé** (l'humain pilote les commits) — 14 fichiers modifiés + 6 nouveaux. Premier geste d'une reprise : décider du/des commit(s) M8.
+
+**Dette d'ouverture Phase 2** (détail : `docs/AVANCEMENT.md`) — 🔴 **Linux jamais validé** (rattrapage M4 toujours dû ; pas de machine le 2026-07-12, trou assumé) · labels RenderDoc non observés · feel souris non jugé · invariant du reload garanti par convention seulement · crash rare non reproductible au shutdown (GLFW/Silk.NET).
+
+**Prochain** : ouvrir la Phase 2 (ECS/scene graph, audio, physique, gameplay) — commencer par un passage `engine-architect`. Détail + point de reprise dans `docs/AVANCEMENT.md`.
