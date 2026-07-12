@@ -1,12 +1,40 @@
 # Agapanthe — Plan complet & état d'avancement
 
-**Mis à jour** : 2026-07-12 (fin session 8 — **PHASE 1 CLOSE**) · **Machines de dev** : macOS (Apple M3, MoltenVK) + Windows 11 (RTX 5070 Ti, Vulkan 1.3 core) · **Cibles** : Windows / Linux / macOS
+**Mis à jour** : 2026-07-12 (session 10 — **PHASE 2 EN COURS**, P2-M1 W1) · **Machines de dev** : macOS (Apple M3, MoltenVK) + Windows 11 (RTX 5070 Ti, Vulkan 1.3 core) · **Cibles** : Windows / Linux / macOS
 
 ## Vision
 
-Moteur de jeu Vulkan en C# from scratch. **Phase 1 (TERMINÉE)** : toute la chaîne graphique 3D, d'une fenêtre vide à une scène PBR complète — glTF, metallic-roughness, multi-lumières, ombres, skybox/IBL, hot reload shaders. **Phase 2 (à venir)** : ECS/scene graph, audio, physique, gameplay.
+Moteur de jeu Vulkan en C# from scratch. **Phase 1 (TERMINÉE, 8/8)** : toute la chaîne graphique 3D, d'une fenêtre vide à une scène PBR complète — glTF, metallic-roughness, multi-lumières, ombres, skybox/IBL, hot reload shaders. **Phase 2 (EN COURS)** : transformer le viewer en moteur — fondations scalables (ECS, coordonnées grande échelle, culling, AOT). Physique/audio/gameplay = phases ultérieures.
 
-Spec de référence : [docs/plans/2026-07-02-graphics-engine-design.md](plans/2026-07-02-graphics-engine-design.md) · Suivi de session : [.absolute-human/board.md](../.absolute-human/board.md) (+ archives par session)
+Spec Phase 1 : [docs/plans/2026-07-02-graphics-engine-design.md](plans/2026-07-02-graphics-engine-design.md) · **Spec Phase 2** : [docs/plans/2026-07-12-phase2-foundations-design.md](plans/2026-07-12-phase2-foundations-design.md) · Suivi de session : [.absolute-human/board.md](../.absolute-human/board.md) (+ archives par session)
+
+## Phase 2 — Fondations scalables (EN COURS)
+
+**Cadre** (spec Phase 2) : la Phase 1 a livré un **viewer**, pas un moteur (`Mesh.WorldTransform` figé → rien ne bouge ; `Scene` mélange possession GPU et draw list). La Phase 2 pose **les fondations qui ne se retrofitent pas** : ECS (**Arch**), coordonnées monde `double` + camera-relative rendering, couture render-list (handles, pas de types GPU dans le monde), frustum culling. **Cible de sortie** : des milliers d'entités qui bougent, cullées, **à 10 000 km de l'origine sans trembler**, en NativeAOT, 0 leak. Horizon lointain (non construit ici, mais non condamné) : univers persistant streamé multi-serveurs.
+
+**Deux règles obligatoires nouvelles (rétroactives Phase 1)** : (1) code **AOT-pur** (`IsAotCompatible` sur les libs, `PublishAot` Sandbox, warnings IL = erreurs) ; (2) **chemin SPIR-V hors-ligne** (shaderc = luxe de dev, prod = précuit).
+
+**Jalons Phase 2** :
+| # | Livrable | État |
+|---|---|---|
+| P2-M0 | Gate AOT + verdict Arch | ✅ **PASSÉ** (S9) — double audit PASS, Arch validé |
+| P2-M1 | Chemin SPIR-V hors-ligne | ⏳ **en cours** (S10) — W1 fait (shaderc lazy), reste W2-W3 |
+| P2-M2 | `Double3` + camera-relative + couture ECS render-list | à venir |
+| P2-M3 | (camera-relative / ECS — voir spec §6) | à venir |
+| P2-M4 | Frustum culling + montée en charge (= critère de sortie) | à venir |
+| P2-M5 | Audits + clôture | à venir |
+
+**P2-M0 (gate AOT) — acquis clés** :
+- Le Sandbox **publie et tourne en NativeAOT** (binaire natif 4,3 Mo, capture **byte-identique à M8**). Prérequis : PATH avec `vswhere` (VS Installer) sinon le linker ILC échoue (code 123, non lié à l'AOT).
+- **Risque n°1 (Silk.NET.Windowing par réflexion) matérialisé puis résolu** : trimmé par l'AOT → `PlatformNotSupportedException` → fix par enregistrement explicite `GlfwWindowing/GlfwInput.RegisterPlatform()` (ctor statique EngineWindow).
+- **Verdict Arch : GO** pour l'ECS (World/Query/ParallelQuery/System validés en vrai AOT). **Arch.Persistence : NO-GO** (incompat binaire + MessagePack alpha/CVE + Utf8Json abandonné) → sérialisation **maison source-gen** en phase ultérieure.
+- **Contrainte AOT dure pour P2-M2 (les 2 audits convergent, pas de la dette molle)** : Arch instancie les tableaux de composants `T[]` par voie générique que l'ILC ne pré-génère pas → échec runtime `'T[]' is missing native code` **SANS warning au publish**, pouvant frapper `Add`/`CommandBuffer` et **corrompre l'état partiellement**. → le **registre de composants doit être source unique** et **générer lui-même le rooting** (`new T[1]` par type, source-gen), gardé par un **test qui tourne sous AOT**. Converge avec la sérialisation maison → **un seul générateur**.
+- EngineWindow **retiré du ResourceTracker** (objet plateforme ≠ ressource GPU) + rapport 0-leak émis **avant** le teardown GLFW → le crash Silk.NET au shutdown (M8-14, upstream) ne peut plus masquer le gate.
+- **AOT prouvé Windows UNIQUEMENT** → à re-prouver Linux/macOS.
+
+**P2-M1 (SPIR-V hors-ligne) — avancement** :
+- ✅ **W1** : `ShaderCompiler` charge shaderc **paresseusement** (au premier vrai cache miss, pas au ctor). Prouvé : cache chaud → shaderc jamais chargé (log absent). + fix collatéral d'un **gate de fuites flaky** (ResourceTracker statique global × parallélisme xUnit → collection non-parallélisable, 5/5 runs verts). **Il y a 2 instances de ShaderCompiler** (Renderer + IblGenerator) → W2/W3 doivent couvrir les deux.
+- ⏳ **RESTE** : W2 (mode « cache-only » : miss = échec explicite §4 + sélection Release=cache-only / Debug=full + hot reload Debug-only) · W3 (précompilateur build réutilisant ShaderCompiler+resolver → `.spv` keyés dans l'output + target MSBuild) · tail (vérif + audits).
 
 ## Décisions structurantes (verrouillées)
 
@@ -127,14 +155,38 @@ Détail complet : [.absolute-human/archive/board-session8-M8.md](../.absolute-hu
 
 ## Reprise — où repartir
 
-**Point de reprise** : **Phase 1 close, 8/8 jalons.** M8 livré (session 8), board archivé → `.absolute-human/archive/board-session8-M8.md`. Rien en cours.
+**Point de reprise (2026-07-12, session 10)** : Phase 2 en cours. **P2-M0 clos et committé**, **P2-M1 W1 fait mais NON committé**. Board courant : [.absolute-human/board.md](../.absolute-human/board.md) (session 10) ; prochaine tâche = **P2-M1 W2**.
 
-**⚠️ L'arbre de travail M8 n'est PAS committé** (l'humain pilote les commits) : 14 fichiers modifiés + 6 nouveaux (`PipelineLayoutBuilder.cs`, `ShaderIncludeResolver.cs`, `ShaderHotReloader.cs`, `Passes/`, 2 fichiers de tests). Premier geste d'une reprise : décider du/des commit(s) M8.
+**Branche** : `phase2-foundations` (partie de `main` à `264772e`). Commits Phase 2 : `f62e82b` (spec) · `0da5a1d` (config AOT) · `9bf42b9` (GLFW + shutdown) · `4cc930e` (docs P2-M0).
 
-**Run de sanity** (doit donner 0 validation / 0 leak) :
+**⚠️ Arbre de travail NON committé (l'humain pilote les commits)** — W1 de P2-M1 + ce doc :
+- `src/Agapanthe.Graphics/ShaderCompiler.cs` (shaderc lazy)
+- `tests/Agapanthe.Tests/ResourceTrackerCollection.cs` (new) + `[Collection]` sur `ResourceTrackerTests.cs` et `ShaderCompilerTests.cs` (fix flakiness)
+- `.absolute-human/board.md`, `docs/AVANCEMENT.md`
+> Ces changements **ne sont pas dans git** : sur une autre machine ils seront absents tant qu'ils ne sont pas committés + poussés. Premier geste possible d'une reprise : décider du commit W1.
+
+**Prochaine tâche : P2-M1 W2** (spec §3.7, §4) — mode « cache-only » du ShaderCompiler (miss = `GraphicsException` explicite, pas de repli shaderc) + sélection Release=cache-only / Debug=full + hot reload Debug-only. Puis W3 (précompilateur build) + tail. Rappel : **2 instances de ShaderCompiler** (Renderer + IblGenerator) à couvrir.
+
+**Run de sanity Debug** (0 validation / 0 leak) :
 ```powershell
 $env:AGAPANTHE_MAX_FRAMES=3; $env:AGAPANTHE_CAPTURE="check.ppm"; dotnet run --project samples/Sandbox
 ```
-*(macOS : `DYLD_LIBRARY_PATH=/opt/homebrew/lib AGAPANTHE_MAX_FRAMES=3 AGAPANTHE_CAPTURE=/tmp/check.ppm dotnet run --project samples/Sandbox`)*
+**Publish + run NativeAOT** (Windows ; `vswhere` sur le PATH requis) :
+```powershell
+$env:PATH="C:\Program Files (x86)\Microsoft Visual Studio\Installer;$env:PATH"
+dotnet publish samples/Sandbox/Sandbox.csproj -r win-x64 -c Release
+samples/Sandbox/bin/Release/net10.0/win-x64/publish/Sandbox.exe   # 0 validation, 0 leak, capture byte-identique 24001B24…
+```
+*(macOS : préfixer `DYLD_LIBRARY_PATH=/opt/homebrew/lib` pour les runs Debug ; NativeAOT non validé hors Windows — voir dette.)*
 
-**Pour ouvrir la Phase 2** : ECS/scene graph, audio, physique, gameplay. Commencer par un passage `engine-architect` sur le découpage ECS vs scene graph et son articulation avec le `Renderer` actuel (qui prend aujourd'hui une `Scene` en entrée). Traiter la dette d'ouverture ci-dessus en préalable — **en priorité la validation Linux** si une machine devient disponible.
+**Contexte hors dépôt** : les projets de smoke-test/probe Arch (P2-M0) sont dans le scratchpad de session (non versionnés) — jetables, à recréer si besoin depuis la spec.
+
+## Dette d'ouverture Phase 2 — mise à jour session 10
+
+Détail P2-M0 : [.absolute-human/archive/board-session9-P2M0.md](../.absolute-human/archive/board-session9-P2M0.md) → « Dette issue de P2-M0 ». En bref, à traiter dans les jalons Phase 2 :
+- 🔴 **Rooting AOT des composants = contrainte de conception P2-M2** (registre source-unique → source-gen du rooting → test AOT). Pas de la dette molle : échec runtime silencieux au publish, corruption partielle possible.
+- 🔴 **Linux jamais validé** (dette M4) **+ AOT prouvé Windows-only** → re-prouver sur Linux/macOS dès qu'une machine est dispo.
+- **Sérialisation maison source-gen** (Arch.Persistence NO-GO) → phase ultérieure, même générateur que le rooting.
+- **CI** : le gate 0-leak doit keyer sur la **ligne de rapport**, pas l'exit code (otage du crash Silk.NET au shutdown).
+- **shaderc encore embarqué** sous AOT → en cours de retrait par P2-M1.
+- Reste hérité de M8 (voir « Dette d'ouverture Phase 2 (issue de M8) » plus haut) : invariant du reload par convention, feel souris/labels RenderDoc non observés, crash GLFW shutdown upstream, etc.
