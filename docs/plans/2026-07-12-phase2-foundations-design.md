@@ -120,6 +120,11 @@ Conséquence : `World → Core` seulement. Les **handles survivent au streaming*
 
 **Contrainte non négociable, imposée dès maintenant** : **aucun changement structurel pendant l'itération** (ajouter/retirer un composant déplace l'entité d'archétype et invalide le chunk parcouru). Les changements passent par un **command buffer** rejoué à un point de synchro. C'est ce qui rendra le parallélisme possible sans rien réécrire.
 
+**Contrainte AOT (durcie par le gate P2-M0, les 2 audits convergent) — pas de la dette molle.** Arch instancie les tableaux de composants (`T[]`) par voie générique que l'ILC **ne pré-génère pas** : sans rooting explicite, `Create`/`Add`/`Remove`/`CommandBuffer` lèvent `NotSupportedException` (« `T[]` is missing native code or metadata ») **au runtime, sans aucun warning au publish**, et peuvent **corrompre l'état partiellement** (un composant ajouté seulement au runtime → défaillance différée en plein gameplay). Donc :
+- Le **registre de composants est source unique de vérité** et **émet lui-même le rooting** (`new T[1]` par type enregistré, via source generator), **exécuté à l'init du monde**.
+- Un **test qui s'exécute réellement sous NativeAOT** (headless) crée/ajoute/retire chaque composant du registre et échoue si l'un n'est pas rooté. Le gate « warnings IL = erreurs » **ne couvre pas** cette classe d'échec — ce test est le seul garde-fou.
+- Ce générateur **converge avec la sérialisation maison** (§2 « à défaut ») → **un seul générateur** piloté par le registre (rooting maintenant, snapshot/delta en Phase 3).
+
 ### 3.5 Chaîne de systèmes (l'ordre est un contrat)
 
 ```
@@ -162,7 +167,9 @@ Struct dans `Core` (auprès de `MathHelpers`) : **3 × `double`**, pas de SIMD (
 
 ## 5. Stratégie de test
 
-- **Unitaires (xUnit, sans GPU)** : `Double3` (précision, `ToVector3` à grande distance) ; propagation de hiérarchie **et détection de cycle** ; agrégation des bounds ; frustum culling (dedans/dehors/à cheval) ; construction des deux listes ; snapshot/restore d'entité.
+- **Unitaires (xUnit, sans GPU)** : `Double3` (précision, `ToVector3` à grande distance) ; propagation de hiérarchie **et détection de cycle** ; agrégation des bounds ; frustum culling (dedans/dehors/à cheval) ; construction des deux listes. *(Le snapshot/restore d'entité est reclassé en Phase 3 : Arch.Persistence est NO-GO — gate P2-M0 — et la sérialisation maison arrive avec le streaming. Hors périmètre Phase 2.)*
+- **Test AOT dédié (P2-M2, garde du rooting des composants, §3.4)** : sous NativeAOT réel, créer/ajouter/retirer chaque composant du registre ; échoue si un `T[]` n'est pas rooté. C'est le seul garde-fou d'une classe d'échec **invisible au build**.
+- **Exercice du source-gen `[Query]` d'Arch.System** en P2-M2 (le smoke P2-M0 n'a testé qu'une Query manuelle ; la feature phare reste à prouver sous AOT).
 - **Preuve de non-régression (§6 P2-M2)** : la couture ECS est un **refactor pur** → capture **byte-identique à la baseline M8** (`24001B24…`). Deux conditions le rendent atteignable, et elles sont **exigibles** : (a) l'entité importée porte la **matrice bakée telle quelle**, sans aller-retour TRS (§3.4) ; (b) **l'ordre de draw est stable et identique à celui de `Scene.Instances`** (l'itération Arch par archétype/chunk ne le garantit pas par elle-même → la `RenderList` est ordonnée par une clé stable). Sans (a) et (b), le critère serait faux.
 - **Preuve de précision (§6 P2-M3)** : rendu **à 10 000 km** vs **à l'origine**. Critère **chiffré** : les transforms relatifs caméra sont **exactement égaux** (test unitaire `Double3`, comparaison bit-à-bit) ; la capture GPU tolère **≤ 1 LSB par canal** (la reconstruction `double → float` ne retombe pas nécessairement sur les mêmes bits, exiger l'identité binaire du framebuffer serait un critère faux).
 - **Preuve AOT (§6 P2-M0)** : `dotnet publish /p:PublishAot=true` → binaire natif qui tourne, **0 warning IL**.
