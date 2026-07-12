@@ -8,3 +8,6 @@ artifacts/
 *.binlog
 .shadercache/
 *.spv
+
+# Session-local temp captures/scripts (never pushed)
+scratchpad_run/
