@@ -77,8 +77,9 @@ W0 ──► W1 ──┬──► W2 ──┐
 
 ## Tâches
 
-### P2-M2-00 — Fondations Core [code, S] — todo — OWNER Core/
-`Double3` (`[StructLayout(Sequential)]`, blittable, `+/-/*`, Length, Distance, **`ToVector3(Double3 origin)`**), `Double3Bounds`, `MeshHandle`/`MaterialHandle` (`readonly record struct`), `RenderItem` (WorldTransform + handles + `ulong SortKey`), `RenderList` (possédée Renderer, `Clear`/`Add` amorti/`Items`), `ImportedEntitySpec`.
+### ✅ P2-M2-00 — Fondations Core [code, S] — done — OWNER Core/
+`Double3` (`[StructLayout(Sequential)]`, blittable, `+/-/*`, Length, Distance, `ToVector3(Double3 origin)`, ctor widen depuis Vector3), `Double3Bounds` (Union/Center/Diagonal/**Empty** seed), `MeshHandle`/`MaterialHandle` (`readonly record struct` + `Invalid`/`IsValid`), `RenderItem` (WorldTransform + handles + `ulong SortKey`), `RenderList` (possédée Renderer : `Clear`/`Add` amorti/`Items`/`Capacity`/`Sort<TComparer struct>` zéro-boxing), `ImportedEntitySpec`. **Ajout pur, aucun câblage.**
+**Vérif** : build 0 warning ; **13 unitaires verts** (dont `ToVector3(Zero)` re-narrow **bit-exact** d'un float élargi, précision camera-relative à 1e7 m, `RenderList` croissance amortie + `Clear` sans réalloc + `Sort` struct comparer). Suite complète **220 tests**.
 
 ### P2-M2-01 — World + rooting AOT [code+infra, L] — todo — OWNER src/Agapanthe.World, src/Agapanthe.World.SourceGen, tools/AotComponentProbe ⚠️
 Projet World (réf. Arch + Core), `[Component]`, 7 composants (`GlobalId`, `LocalTransform`, `Parent`(interne), `WorldTransform`, `MeshRef`, `Bounds`, `RenderOrder`), `GameWorld` (wrapper : `SpawnImported`/`PropagateTransforms`/`AggregateBounds`/`CollectRenderLists`, ctor→`RootAll()`). World.SourceGen : `ComponentRegistry.RootAll/All` + analyzer. `AotComponentProbe`. **AC : probe publie AOT et sort 0 ; analyzer erreur sur non-`[Component]`. Second avis csharp-lowlevel.**
@@ -104,4 +105,5 @@ csharp-lowlevel + engine-architect PASS 0 critique ; archive → board-session11
 
 ## Log
 
+- 2026-07-13: **W0 DONE** — 6 types Core (Double3, Double3Bounds, handles, RenderItem, RenderList, ImportedEntitySpec), ajout pur sans câblage. 13 unitaires (re-narrow bit-exact, précision camera-relative, RenderList amorti/Clear/Sort). Build 0 warning, 220 tests. **Non committé.** Prêt pour W1 (World + rooting AOT — le risque n°1, second avis csharp-lowlevel requis).
 - 2026-07-13: **Session 11 ouverte — P2-M2 (couture ECS).** Passe `engine-architect` faite : conception tranchée (frontière modules avec nouveau projet World + World.SourceGen ; rooting AOT source-gen + analyzer + probe ; Double3 = stockage seul en M2 ; byte-identique via bake sans TRS + tri RenderOrder ; ResourceRegistry reprend la possession de Scene). DAG 6 tâches, 6 vagues (W2∥W3). 2 déviations à valider aux audits (RenderList en Core, Bounds monde en M2). **En attente feu vert pour W0.**
