@@ -60,6 +60,16 @@ var camera = new Camera();
 var controller = new FreeCameraController();
 var resizePending = false;
 
+// Load bench (W4): AGAPANTHE_CULL_STATS=1 puts the Sandbox in bench mode — the camera is placed INSIDE the scene
+// (so the frustum culls most of it), the drawables spin in place each frame (deterministic, by frame index), and
+// the per-frame cull cost + visible/total counts + allocation delta are logged every BenchLogEvery frames. Pair
+// it with AGAPANTHE_SCENE=grid:100x100 for the 10 000-entity exit-criterion run.
+var benchMode = Environment.GetEnvironmentVariable("AGAPANTHE_CULL_STATS") is { Length: > 0 };
+const int BenchLogEvery = 60;
+var benchFrame = 0;
+long benchTicks = 0;
+long benchAllocBefore = 0;
+
 // Hoisted out of the render handler so the delegate is allocated once, not per frame
 // (spec §3.2.5, zero managed allocation on the hot path).
 Action<CommandList, FrameContext, SwapchainTarget>? drawScene = null;
@@ -151,6 +161,22 @@ window.Loaded += () =>
     // orient yaw/pitch to look at the centre.
     FrameCamera(camera, controller, renderer, in sceneBounds);
 
+    // Bench: put the camera INSIDE the scene, looking along -Z, so the frustum sees only a forward wedge and
+    // culling has most of the grid to reject (the exit criterion wants << all visible). near/far span the local
+    // neighbourhood, not the whole grid.
+    if (benchMode)
+    {
+        var (center, diagonal) = NarrowBounds(in sceneBounds);
+        camera.Position = center;
+        camera.Yaw = 0f;
+        camera.Pitch = 0f;
+        camera.Near = MathF.Max(diagonal * 0.001f, 0.01f);
+        camera.Far = MathF.Max(diagonal * 0.5f, 1f);
+        // Cap the shadow distance to the view too, so the LIGHT volume is bounded and the shadow-caster list is
+        // culled as well (otherwise the huge framing shadow distance would make every entity a caster).
+        renderer.ShadowDistance = camera.Far;
+    }
+
     // Default M5 lighting: a warm directional key (sun) plus a cool rim and a soft fill point
     // light placed from the scene bounds — a classic 3-point setup that reads PBR materials
     // well. HDR intensities (> 1) are expected; the ACES tonemap compresses them.
@@ -182,6 +208,19 @@ window.Loaded += () =>
     // AggregateBounds is NOT re-run per frame: nothing moves in M2, so the extent is folded once above.
     drawScene = (cmd, frame, target) =>
     {
+        // Bench: spin every drawable in place (direct WorldTransform write, zero-alloc, no archetype move) and
+        // drift the camera yaw, both by a fixed step per frame so captures stay deterministic. The spheres do not
+        // move (spin preserves the bounding sphere), so sceneBounds stays valid without a per-frame refold.
+        if (benchMode)
+        {
+            var spin = new SpinAnimator(0.02f);
+            world!.AnimateDrawables(ref spin);
+            camera.Yaw += 0.01f;
+            benchAllocBefore = GC.GetAllocatedBytesForCurrentThread();
+        }
+
+        var cpuStart = benchMode ? System.Diagnostics.Stopwatch.GetTimestamp() : 0;
+
         // ONE view per frame (spec §3.3): the world narrows every object against view.Origin, and the light fit
         // uses the same one. A single value = a single origin.
         var view = camera.CreateView();
@@ -196,6 +235,23 @@ window.Loaded += () =>
 
         renderer.DrawScene(
             renderList, shadowCasters, registry!, in view, in lightViewProj, cmd, frame, target);
+
+        // Bench stats: the per-frame CPU cull cost, the visible/total counts, and the managed allocation of the
+        // whole per-frame chain (animate + view + cull + collect + record). Averaged and logged every
+        // BenchLogEvery frames. The alloc delta MUST be zero in steady state (spec §6, zero-alloc hot path).
+        if (benchMode)
+        {
+            var alloc = GC.GetAllocatedBytesForCurrentThread() - benchAllocBefore;
+            benchTicks += System.Diagnostics.Stopwatch.GetTimestamp() - cpuStart;
+            if (++benchFrame % BenchLogEvery == 0)
+            {
+                var avgMs = System.Diagnostics.Stopwatch.GetElapsedTime(0, benchTicks).TotalMilliseconds / BenchLogEvery;
+                Log.Info(
+                    $"Sandbox: [cull-stats] frame {benchFrame} — visible {renderList.Count} + shadow {shadowCasters.Count}, " +
+                    $"cull+collect avg {avgMs:F3} ms/frame, per-frame alloc {alloc} B.");
+                benchTicks = 0;
+            }
+        }
     };
 
     // Camera-relative proof (spec §3.3): both are world-space doubles, and the GPU sees neither — it only ever
@@ -730,4 +786,15 @@ file static class DebugViews
         "PBR", "shaded normal", "geometric normal", "base color", "metallic",
         "roughness", "occlusion", "tangent (+handedness)", "key NdotL", "shadow factor",
     ];
+}
+
+// Load-bench animator: spins every drawable about world +Y by a fixed step each frame. Incremental (no base
+// pose needed) and deterministic by frame count. Spin preserves the bounding sphere, so the scene extent stays
+// valid without a per-frame refold. A struct, so GameWorld.AnimateDrawables dispatches to it without boxing.
+file readonly struct SpinAnimator(float deltaRadians) : IDrawableAnimator
+{
+    private readonly Matrix4x4 _delta = Matrix4x4.CreateRotationY(deltaRadians);
+
+    public void Animate(ulong globalId, ref Double3 position, ref Matrix4x4 rotationScale)
+        => rotationScale = _delta * rotationScale; // rotation only — translation row stays zero (position carries it)
 }

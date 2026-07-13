@@ -47,6 +47,8 @@ public sealed class GameWorld : IDisposable
         new QueryDescription().WithAll<WorldTransform, WorldPosition, Bounds>();
     private static readonly QueryDescription DrawableDesc =
         new QueryDescription().WithAll<WorldTransform, WorldPosition, Bounds, MeshRef, RenderOrder>();
+    private static readonly QueryDescription AnimateDesc =
+        new QueryDescription().WithAll<GlobalId, WorldPosition, WorldTransform>();
 
     // The thread that built this world. Arch's world creation and entity storage are not thread-safe, so a world
     // is owned by one thread; the guard below turns that contract from a comment into a checked invariant
@@ -161,6 +163,17 @@ public sealed class GameWorld : IDisposable
                 $"AOT smoke: CollectRenderLists produced {render.Count} drawables, expected 8.");
         }
 
+        // AnimateDrawables is generic over a struct animator — the M4 direct-write animation path. Instantiate it
+        // here with a concrete struct so the ILC compiles that instantiation (a generic method over a struct is
+        // the AOT-fragile shape P2-M0 flagged), and confirm the write-in-place actually mutated a component.
+        var animator = new SmokeAnimator();
+        AnimateDrawables(ref animator);
+        if (animator.Count != 8)
+        {
+            throw new InvalidOperationException(
+                $"AOT smoke: AnimateDrawables visited {animator.Count} drawables, expected 8.");
+        }
+
         // Chunk-iteration query (the path the systems use) touching several component arrays. Counts the 8
         // imported entities plus the deferred CommandBuffer one (WorldTransform + RenderOrder, no MeshRef).
         var count = 0;
@@ -170,6 +183,49 @@ public sealed class GameWorld : IDisposable
         }
 
         return count;
+    }
+
+    /// <summary>
+    /// Advances every imported drawable by writing its world transform IN PLACE (spec §3.4 deviation, board D5):
+    /// the position (double) and rotation/scale of a baked drawable are handed to the animator by <c>ref</c>. No
+    /// <see cref="LocalTransform"/> is touched and no component is added or removed, so there is no archetype move
+    /// — the write is zero-alloc and does not need a command buffer. This is how a flat (imported) scene animates
+    /// without the hierarchy-propagation cost; hierarchical animation stays with <see cref="PropagateTransforms"/>.
+    /// <para>
+    /// <typeparamref name="TAnimator"/> is a <c>struct</c> constrained to <see cref="IDrawableAnimator"/>: the call
+    /// is devirtualized, never boxed, and NativeAOT-safe (the concrete instantiation is reachable from the caller).
+    /// </para>
+    /// </summary>
+    public void AnimateDrawables<TAnimator>(ref TAnimator animator)
+        where TAnimator : struct, IDrawableAnimator
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        AssertOwnerThread();
+        foreach (ref var chunk in _world.Query(in AnimateDesc))
+        {
+            var ids = chunk.GetSpan<GlobalId>();
+            var positions = chunk.GetSpan<WorldPosition>();
+            var worlds = chunk.GetSpan<WorldTransform>();
+            var count = chunk.Count;
+            for (var i = 0; i < count; i++)
+            {
+                animator.Animate(ids[i].Value, ref positions[i].Value, ref worlds[i].Value);
+                AssertNoTranslation(worlds[i].Value); // the animator must not bake a translation (see the contract)
+            }
+        }
+    }
+
+    // Trivial animator for AotRootingSmoke: mutates the position (keeping the rotation/scale translation zero) and
+    // counts visits, so the smoke can both root AnimateDrawables<T> under AOT and assert the write took effect.
+    private struct SmokeAnimator : IDrawableAnimator
+    {
+        public int Count;
+
+        public void Animate(ulong globalId, ref Double3 position, ref Matrix4x4 rotationScale)
+        {
+            position += new Double3(0.1, 0, 0);
+            Count++;
+        }
     }
 
     // --- Systems (spec §3.5) ---------------------------------------------------------------------------------
