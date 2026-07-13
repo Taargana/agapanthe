@@ -58,8 +58,13 @@
     <ShaderCacheStamp>$(ShaderCacheStageDir).precooked.stamp</ShaderCacheStamp>
   </PropertyGroup>
 
+  <!-- Incrementality inputs: EVERY file under shaders/, not just the .vert/.frag/.comp roots. The runtime cache
+       key is the hash of the source AFTER #include expansion, so editing an included file (e.g. a common.glsl)
+       must re-cook even though no root shader changed — otherwise the shipped .spv keeps the stale key and a
+       cache-only Release build misses at startup (audit M2). shaders/ holds only shader files, so globbing all
+       of it is safe. -->
   <ItemGroup>
-    <ShaderSourceFile Include="$(ShaderSourceDir)**\*.vert;$(ShaderSourceDir)**\*.frag;$(ShaderSourceDir)**\*.comp" />
+    <ShaderSourceFile Include="$(ShaderSourceDir)**\*" />
   </ItemGroup>
 
   <!-- Incremental: only re-cooks when a shader source changes. RemoveProperties isolates the tool's build from
@@ -104,10 +109,15 @@
   <Target Name="StripShadercFromRelease"
           Condition="'$(Configuration)' == 'Release'"
           AfterTargets="CopyFilesToOutputDirectory;Publish">
+    <!-- Cover all three platform library names (Windows .dll / Linux .so / macOS .dylib, incl. versioned .so.*)
+         at the output root and under runtimes/, so the exit criterion "native shaderc absent from publish" holds
+         cross-platform, not just on Windows (audit M1). -->
     <ItemGroup>
-      <_ShadercNativeToStrip Include="$(OutDir)shaderc_shared.dll;$(OutDir)runtimes\**\shaderc_shared.dll" />
-      <_ShadercNativeToStrip Include="$(PublishDir)shaderc_shared.dll;$(PublishDir)runtimes\**\shaderc_shared.dll"
+      <_ShadercNativeToStrip Include="$(OutDir)shaderc_shared.dll;$(OutDir)libshaderc_shared.so*;$(OutDir)libshaderc_shared.dylib" />
+      <_ShadercNativeToStrip Include="$(OutDir)runtimes\**\*shaderc_shared*" />
+      <_ShadercNativeToStrip Include="$(PublishDir)shaderc_shared.dll;$(PublishDir)libshaderc_shared.so*;$(PublishDir)libshaderc_shared.dylib"
                              Condition="'$(PublishDir)' != ''" />
+      <_ShadercNativeToStrip Include="$(PublishDir)runtimes\**\*shaderc_shared*" Condition="'$(PublishDir)' != ''" />
     </ItemGroup>
     <Delete Files="@(_ShadercNativeToStrip)" />
   </Target>

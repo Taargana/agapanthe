@@ -1,6 +1,6 @@
 # Agapanthe — Plan complet & état d'avancement
 
-**Mis à jour** : 2026-07-12 (session 10 — **PHASE 2 EN COURS**, P2-M1 W1) · **Machines de dev** : macOS (Apple M3, MoltenVK) + Windows 11 (RTX 5070 Ti, Vulkan 1.3 core) · **Cibles** : Windows / Linux / macOS
+**Mis à jour** : 2026-07-13 (session 10 — **PHASE 2 EN COURS**, **P2-M1 CLOS** — chemin SPIR-V hors-ligne livré, double audit PASS) · **Machines de dev** : macOS (Apple M3, MoltenVK) + Windows 11 (RTX 5070 Ti, Vulkan 1.3 core) · **Cibles** : Windows / Linux / macOS
 
 ## Vision
 
@@ -18,8 +18,8 @@ Spec Phase 1 : [docs/plans/2026-07-02-graphics-engine-design.md](plans/2026-07-0
 | # | Livrable | État |
 |---|---|---|
 | P2-M0 | Gate AOT + verdict Arch | ✅ **PASSÉ** (S9) — double audit PASS, Arch validé |
-| P2-M1 | Chemin SPIR-V hors-ligne | ⏳ **en cours** (S10) — W1 fait (shaderc lazy), reste W2-W3 |
-| P2-M2 | `Double3` + camera-relative + couture ECS render-list | à venir |
+| P2-M1 | Chemin SPIR-V hors-ligne | ✅ **PASSÉ** (S10) — double audit PASS, prod sans shaderc (prouvé Windows AOT) |
+| P2-M2 | `Double3` + camera-relative + couture ECS render-list | **prochain** |
 | P2-M3 | (camera-relative / ECS — voir spec §6) | à venir |
 | P2-M4 | Frustum culling + montée en charge (= critère de sortie) | à venir |
 | P2-M5 | Audits + clôture | à venir |
@@ -32,9 +32,12 @@ Spec Phase 1 : [docs/plans/2026-07-02-graphics-engine-design.md](plans/2026-07-0
 - EngineWindow **retiré du ResourceTracker** (objet plateforme ≠ ressource GPU) + rapport 0-leak émis **avant** le teardown GLFW → le crash Silk.NET au shutdown (M8-14, upstream) ne peut plus masquer le gate.
 - **AOT prouvé Windows UNIQUEMENT** → à re-prouver Linux/macOS.
 
-**P2-M1 (SPIR-V hors-ligne) — avancement** :
-- ✅ **W1** : `ShaderCompiler` charge shaderc **paresseusement** (au premier vrai cache miss, pas au ctor). Prouvé : cache chaud → shaderc jamais chargé (log absent). + fix collatéral d'un **gate de fuites flaky** (ResourceTracker statique global × parallélisme xUnit → collection non-parallélisable, 5/5 runs verts). **Il y a 2 instances de ShaderCompiler** (Renderer + IblGenerator) → W2/W3 doivent couvrir les deux.
-- ⏳ **RESTE** : W2 (mode « cache-only » : miss = échec explicite §4 + sélection Release=cache-only / Debug=full + hot reload Debug-only) · W3 (précompilateur build réutilisant ShaderCompiler+resolver → `.spv` keyés dans l'output + target MSBuild) · tail (vérif + audits).
+**P2-M1 (SPIR-V hors-ligne) — LIVRÉ (S10)** :
+- **W1** : `ShaderCompiler` charge shaderc **paresseusement** (au 1er vrai miss, pas au ctor) + fix collatéral d'un gate de fuites flaky (collection xUnit non-parallélisable). Les 2 instances (Renderer + IblGenerator) couvertes.
+- **W2** : mode **cache-only** (`precompiledOnly` — miss = `GraphicsException` explicite, pas de repli shaderc, §4) + fabrique `ShaderCompiler.CreateForBuild()` (source unique du `#if DEBUG` : Debug=full / Release=cache-only) ; `ShaderHotReloader` gardé `#if DEBUG` (Release : 0 watcher).
+- **W3** : précompilateur build `tools/ShaderPrecompiler` (réutilise `ShaderCompiler`+`ShaderIncludeResolver` → clés **identiques** au runtime), 2 targets MSBuild (pré-cook incrémental → staging `obj/` ; ship `.spv` en Content vers `.shadercache/`), **non-ProjectReference** du Sandbox (pas de contamination AOT). `StripShadercFromRelease` retire la lib native shaderc du Release.
+- **Preuve** : publish **Release/AOT win-x64** → binaire 4,47 Mo, **shaderc absent**, 15 `.spv` livrés, run cache-only → aucun miss / aucune exception (clés matchent), 0 leak, **capture byte-identique M8 (24001B24…)**. Debug : hot reload conservé, aucun « loading shaderc » (cache chaud). 207 tests, 0 warning.
+- **Double audit PASS** (csharp-lowlevel + engine-architect, 0 critique) + 8 durcissements appliqués (ctor internal, garde `EnsureShaderc`, `_shaderc` volatile ARM64, IblGenerator→`CompileFileResolved`, Inputs MSBuild `**\*`, strip cross-platform, tool récursif + catch élargi). Détail : board session 10.
 
 ## Décisions structurantes (verrouillées)
 
@@ -155,17 +158,13 @@ Détail complet : [.absolute-human/archive/board-session8-M8.md](../.absolute-hu
 
 ## Reprise — où repartir
 
-**Point de reprise (2026-07-12, session 10)** : Phase 2 en cours. **P2-M0 clos et committé**, **P2-M1 W1 fait mais NON committé**. Board courant : [.absolute-human/board.md](../.absolute-human/board.md) (session 10) ; prochaine tâche = **P2-M1 W2**.
+**Point de reprise (2026-07-13, session 10)** : Phase 2 en cours. **P2-M0 et P2-M1 clos** (P2-M1 : W1/W2/W3 committés ; durcissements post-audit + docs de clôture **à committer**). Board courant : [.absolute-human/board.md](../.absolute-human/board.md) (session 10, à archiver en `board-session10-P2M1.md`) ; prochaine tâche = **ouvrir P2-M2**.
 
-**Branche** : `phase2-foundations` (partie de `main` à `264772e`). Commits Phase 2 : `f62e82b` (spec) · `0da5a1d` (config AOT) · `9bf42b9` (GLFW + shutdown) · `4cc930e` (docs P2-M0).
+**Branche** : `phase2-foundations` (partie de `main` à `264772e`). Commits P2-M1 : `2579389`/`89ddf1e` (W1 shaderc lazy + fix flaky) · `b202b92` (W2 cache-only + sélection Debug/Release) · `e79925b` (W3 précompilateur + strip shaderc). Durcissements post-audit + docs de clôture : arbre de travail à committer.
 
-**⚠️ Arbre de travail NON committé (l'humain pilote les commits)** — W1 de P2-M1 + ce doc :
-- `src/Agapanthe.Graphics/ShaderCompiler.cs` (shaderc lazy)
-- `tests/Agapanthe.Tests/ResourceTrackerCollection.cs` (new) + `[Collection]` sur `ResourceTrackerTests.cs` et `ShaderCompilerTests.cs` (fix flakiness)
-- `.absolute-human/board.md`, `docs/AVANCEMENT.md`
-> Ces changements **ne sont pas dans git** : sur une autre machine ils seront absents tant qu'ils ne sont pas committés + poussés. Premier geste possible d'une reprise : décider du commit W1.
+**Prochaine tâche : P2-M2** (spec §6) — `Double3` (monde `double`) + camera-relative rendering + couture ECS render-list (handles, pas de types GPU dans le monde). ⚠️ **Contrainte AOT dure** (les 2 audits P2-M0 convergent) : le rooting des tableaux de composants Arch doit venir d'un **registre source-unique** (source-gen `new T[1]` par type) **gardé par un test tournant sous AOT** — sinon échec runtime silencieux `'T[]' is missing native code`, corruption partielle.
 
-**Prochaine tâche : P2-M1 W2** (spec §3.7, §4) — mode « cache-only » du ShaderCompiler (miss = `GraphicsException` explicite, pas de repli shaderc) + sélection Release=cache-only / Debug=full + hot reload Debug-only. Puis W3 (précompilateur build) + tail. Rappel : **2 instances de ShaderCompiler** (Renderer + IblGenerator) à couvrir.
+**Vérif humaine encore due (non bloquante, P2-M1)** : hot reload Debug **live** à la fenêtre (edit shader → recompile < 1 s) — non re-testé depuis M8 ; le headless ne le couvre pas.
 
 **Run de sanity Debug** (0 validation / 0 leak) :
 ```powershell
@@ -188,5 +187,6 @@ Détail P2-M0 : [.absolute-human/archive/board-session9-P2M0.md](../.absolute-hu
 - 🔴 **Linux jamais validé** (dette M4) **+ AOT prouvé Windows-only** → re-prouver sur Linux/macOS dès qu'une machine est dispo.
 - **Sérialisation maison source-gen** (Arch.Persistence NO-GO) → phase ultérieure, même générateur que le rooting.
 - **CI** : le gate 0-leak doit keyer sur la **ligne de rapport**, pas l'exit code (otage du crash Silk.NET au shutdown).
-- **shaderc encore embarqué** sous AOT → en cours de retrait par P2-M1.
+- ~~**shaderc encore embarqué** sous AOT~~ → **retiré de la prod par P2-M1** (mode cache-only + `StripShadercFromRelease`).
+- **Dette issue de P2-M1** (détail : board session 10) : (a) pas d'**assertion automatique** du critère de sortie §6 (lib native absente / shaderc jamais chargé reposent sur l'œil humain) → test + gate CI ≤ P2-M5 ; (b) chemin hors-ligne + strip **prouvés Windows uniquement** → re-prouver Linux/macOS (nom de lib natif `.so`/`.dylib` déjà couvert dans le target, non testé) ; (c) **includes non exercés** (resolver + clé include-aware en place, corrects par construction mais aucun shader n'a de `#include` → ajouter un cas avant de s'y fier).
 - Reste hérité de M8 (voir « Dette d'ouverture Phase 2 (issue de M8) » plus haut) : invariant du reload par convention, feel souris/labels RenderDoc non observés, crash GLFW shutdown upstream, etc.

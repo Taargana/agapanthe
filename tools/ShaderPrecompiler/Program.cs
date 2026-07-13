@@ -35,8 +35,9 @@ var stages = new Dictionary<string, ShaderStage>(StringComparer.OrdinalIgnoreCas
     [".comp"] = ShaderStage.Compute,
 };
 
-// Deterministic order so the build log reads the same run to run.
-var shaderFiles = Directory.EnumerateFiles(shadersDir)
+// Recursive to match the csproj's shaders/**\* glob (audit m4): if shaders are ever nested in subfolders, the
+// tool and the build must agree on the set. Deterministic order so the build log reads the same run to run.
+var shaderFiles = Directory.EnumerateFiles(shadersDir, "*", SearchOption.AllDirectories)
     .Where(f => stages.ContainsKey(Path.GetExtension(f)))
     .OrderBy(f => f, StringComparer.Ordinal)
     .ToList();
@@ -59,8 +60,10 @@ try
         count++;
     }
 }
-catch (GraphicsException ex)
+catch (Exception ex) when (ex is GraphicsException or IOException or UnauthorizedAccessException)
 {
+    // A compile error (GraphicsException) or an unreadable source / missing #include (IO) fails the build with a
+    // clean one-line message + exit 1 rather than a raw stack (audit m5).
     Console.Error.WriteLine($"ShaderPrecompiler: {ex.Message}");
     return 1;
 }

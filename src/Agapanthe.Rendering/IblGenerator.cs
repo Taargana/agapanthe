@@ -323,7 +323,12 @@ public sealed class IblGenerator : IDisposable
 
     private ShaderModule Compile(string shaderDirectory, string fileName)
     {
-        var spirv = _compiler!.CompileFile(Path.Combine(shaderDirectory, fileName), ShaderStage.Compute);
+        // CompileFileResolved (resolved-source cache key), not CompileFile (raw-source key): the build-time
+        // precompiler pre-cooks every shader via CompileFileResolved, so the IBL kernels must look up under the
+        // SAME key or a cache-only Release build would miss (audit M3). Identical today (the kernels have no
+        // #include, so resolved == raw), but this stays correct the day one gains an include. The resolved file
+        // list is unused — the IBL kernels are not hot-reloaded.
+        var (spirv, _) = _compiler!.CompileFileResolved(Path.Combine(shaderDirectory, fileName), ShaderStage.Compute);
         return new ShaderModule(_device, spirv, ShaderStage.Compute);
     }
 

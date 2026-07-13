@@ -1,8 +1,13 @@
+using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using System.Text;
 using Agapanthe.Core;
 using Silk.NET.Shaderc;
+
+// The build-time precompiler tool constructs a ShaderCompiler in full mode via the internal ctor (it is the one
+// place shaderc-at-build is legitimate). Every other consumer must go through CreateForBuild.
+[assembly: InternalsVisibleTo("ShaderPrecompiler")]
 
 namespace Agapanthe.Graphics;
 
@@ -19,8 +24,12 @@ public sealed unsafe class ShaderCompiler : IDisposable
     // shaderc is loaded LAZILY (Phase 2 rule §2.1-2): a fully pre-cooked cache never triggers a compile, so
     // the native shaderc library is never loaded. Only the first real cache miss initializes it. _shaderc is
     // null until then; _shaderc != null implies _compiler is set (see EnsureShaderc's publish order).
+    // _shaderc is volatile so the double-checked fast path is correct on weak memory models (ARM64 / Apple
+    // silicon, a MoltenVK target): the volatile write publishes _compiler (a plain write ordered before it)
+    // with release semantics, and the volatile read acquires it, so a reader that observes a non-null _shaderc
+    // never sees a stale _compiler.
     private readonly Lock _shadercLock = new();
-    private Shaderc? _shaderc;
+    private volatile Shaderc? _shaderc;
     private Compiler* _compiler;
     private readonly string _cacheDirectory;
     private readonly bool _precompiledOnly;
@@ -35,7 +44,12 @@ public sealed unsafe class ShaderCompiler : IDisposable
     /// <c>false</c> (full runtime compilation) — the Debug/hot-reload behaviour and every unit test rely on it.
     /// Prefer <see cref="CreateForBuild"/> over passing this directly so the Debug/Release choice lives in one place.
     /// </param>
-    public ShaderCompiler(string? cacheDirectory = null, bool precompiledOnly = false)
+    /// <remarks>
+    /// Deliberately <c>internal</c>: application code must not be able to hand-pick the mode and accidentally get
+    /// runtime compilation in a shipping build (rule §2.1-2). Callers use <see cref="CreateForBuild"/>; only the
+    /// build-time precompiler (and tests) reach this ctor via <c>InternalsVisibleTo</c>.
+    /// </remarks>
+    internal ShaderCompiler(string? cacheDirectory = null, bool precompiledOnly = false)
     {
         _cacheDirectory = cacheDirectory ?? Path.Combine(AppContext.BaseDirectory, ".shadercache");
         _precompiledOnly = precompiledOnly;
@@ -66,6 +80,14 @@ public sealed unsafe class ShaderCompiler : IDisposable
     /// </summary>
     private void EnsureShaderc()
     {
+        // Belt-and-suspenders (audit): in pre-cooked-only mode shaderc must never load. Compile already throws on
+        // a miss before reaching here, but this guards against a future refactor routing back into EnsureShaderc.
+        if (_precompiledOnly)
+        {
+            throw new GraphicsException(
+                "ShaderCompiler is in pre-cooked-only mode; shaderc must not be loaded (rule §2.1-2).");
+        }
+
         if (_shaderc is not null)
         {
             return;
