@@ -6,7 +6,7 @@ namespace Agapanthe.Tests;
 public sealed class RenderListTests
 {
     private static RenderItem Item(uint order)
-        => new(Matrix4x4.Identity, new MeshHandle((int)order), new MaterialHandle(0), order);
+        => new(Matrix4x4.Identity, new MeshHandle((int)order, 1), new MaterialHandle(0, 1), order);
 
     [Fact]
     public void Add_GrowsAndPreservesItemsInOrder()

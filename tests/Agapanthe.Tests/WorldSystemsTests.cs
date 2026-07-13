@@ -84,7 +84,7 @@ public sealed class WorldSystemsTests
         using var world = new GameWorld();
         var baked = Matrix4x4.CreateScale(3f) * Matrix4x4.CreateTranslation(7, 8, 9);
         world.SpawnImported(new ImportedEntitySpec(
-            new MeshHandle(0), new MaterialHandle(0), baked,
+            new MeshHandle(0, 1), new MaterialHandle(0, 1), baked,
             new Double3(0, 0, 0), new Double3(1, 1, 1), 0));
 
         world.PropagateTransforms();
@@ -99,10 +99,10 @@ public sealed class WorldSystemsTests
     {
         using var world = new GameWorld();
         world.SpawnImported(new ImportedEntitySpec(
-            new MeshHandle(0), new MaterialHandle(0), Matrix4x4.Identity,
+            new MeshHandle(0, 1), new MaterialHandle(0, 1), Matrix4x4.Identity,
             new Double3(-1, -1, -1), new Double3(1, 1, 1), 0));
         world.SpawnImported(new ImportedEntitySpec(
-            new MeshHandle(1), new MaterialHandle(0), Matrix4x4.Identity,
+            new MeshHandle(1, 1), new MaterialHandle(0, 1), Matrix4x4.Identity,
             new Double3(0, 0, 0), new Double3(5, 2, 0), 1));
 
         var bounds = world.AggregateBounds();
@@ -131,7 +131,7 @@ public sealed class WorldSystemsTests
         for (var i = 0; i < 32; i++)
         {
             world.SpawnImported(new ImportedEntitySpec(
-                new MeshHandle(i), new MaterialHandle(0), Matrix4x4.Identity,
+                new MeshHandle(i, 1), new MaterialHandle(0, 1), Matrix4x4.Identity,
                 new Double3(i, 0, 0), new Double3(i + 1, 1, 1), (uint)i));
         }
 

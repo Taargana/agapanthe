@@ -91,9 +91,11 @@ window.Loaded += () =>
     // Load the model to CPU DTOs (no GPU dependency), then upload it into a GPU-resident Scene.
     var model = GltfLoader.Load(modelPath);
     LogModelStats(model, modelPath);
-    // The seam (spec §3.2): the builder hands back the GPU resources (registry) and a GPU-free description of
-    // each drawable (specs). The world spawns an entity per spec — from here on, the model IS entities.
-    (registry, var specs) = SceneBuilder.Build(device, model, renderer.MaterialAllocator, renderer.MaterialSetLayout);
+    // The seam (spec §3.2): the registry owns the GPU resources and hands back a GPU-free description of each
+    // drawable (specs). It is engine-wide, so several models can be loaded without their handles colliding.
+    // The world spawns an entity per spec — from here on, the model IS entities.
+    registry = new ResourceRegistry();
+    var (modelId, specs) = registry.Load(device, model, renderer.MaterialAllocator, renderer.MaterialSetLayout);
 
     world = new GameWorld();
     foreach (var spec in specs)
@@ -146,7 +148,7 @@ window.Loaded += () =>
             renderList, shadowCasters, registry!, camera, cmd, frame, target, in sceneBounds);
     };
 
-    Log.Info($"Sandbox: initialized on '{device.AdapterName}'. Rendering '{registry.Name}' — " +
+    Log.Info($"Sandbox: initialized on '{device.AdapterName}'. Rendering '{registry.NameOf(modelId)}' — " +
              "clic pour capturer la souris, WASD + souris, Échap libère puis quitte. " +
              $"Hot reload actif sur '{shaderDir}'.");
 

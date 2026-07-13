@@ -109,7 +109,7 @@ public sealed class GameWorld : IDisposable
         for (var i = 0; i < 8; i++)
         {
             SpawnImported(new ImportedEntitySpec(
-                new MeshHandle(i), new MaterialHandle(0), Matrix4x4.Identity,
+                new MeshHandle(i, 1), new MaterialHandle(0, 1), Matrix4x4.Identity,
                 new Double3(i, 0, 0), new Double3(i + 1, 1, 1), (uint)i));
         }
 

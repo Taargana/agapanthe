@@ -1,0 +1,32 @@
+using System.Numerics;
+using Agapanthe.Core;
+using Agapanthe.Graphics;
+
+namespace Agapanthe.Rendering;
+
+/// <summary>
+/// What one loaded model contributes: its GPU resources (owned by the <see cref="ResourceRegistry"/> once
+/// registered) and one <see cref="MeshEntry"/> per drawable. Internal — it is the hand-off between
+/// <see cref="SceneBuilder"/> (which creates GPU objects) and the registry (which assigns the global handles),
+/// so the builder no longer needs to know how handles are minted.
+/// </summary>
+internal sealed record ModelResources(
+    Mesh[] Meshes,
+    Material[] Materials,
+    GpuImage[] Textures,
+    GpuImage[] Placeholders,
+    SamplerCache SamplerCache,
+    string Name,
+    MeshEntry[] Entries);
+
+/// <summary>
+/// One drawable of a model, in terms LOCAL to that model: the index into its own material array (already
+/// resolved — an absent/out-of-range glTF material index points at the engine default), its baked world matrix
+/// (copied bit-for-bit from the asset, no TRS round-trip) and its world-space bounds (float vertex fold, widened).
+/// The registry turns the local material index into a global <see cref="MaterialHandle"/>.
+/// </summary>
+internal readonly record struct MeshEntry(
+    int LocalMaterialIndex,
+    Matrix4x4 World,
+    Double3 BoundsMin,
+    Double3 BoundsMax);
