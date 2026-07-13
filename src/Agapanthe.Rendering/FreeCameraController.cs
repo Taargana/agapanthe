@@ -173,9 +173,13 @@ public sealed class FreeCameraController
         // → finer look. Ratio is 1 at the nominal FOV, so this is a no-op until a zoom changes FovY.
         float fovScale = camera.FovY / FovYReference;
 
-        camera.Yaw += _smoothedLookDelta.X * LookSensitivityX * fovScale;
+        // Yaw is WRAPPED to (-pi, pi], not just accumulated. Left to grow, it reaches thousands of radians over a
+        // long session of turning the same way — and a float's precision is relative, so at 1e4 rad the mouse
+        // stops being able to express fine rotations at all (the look goes coarse and starts to snap). The wrap is
+        // free: the direction is periodic, so it changes nothing about where the camera points.
+        camera.Yaw = WrapAngle(camera.Yaw + (_smoothedLookDelta.X * LookSensitivityX * fovScale));
         camera.Pitch -= _smoothedLookDelta.Y * LookSensitivityY * fovScale;
-        camera.Pitch = Math.Clamp(camera.Pitch, -MaxPitch, MaxPitch);
+        camera.Pitch = Math.Clamp(camera.Pitch, -MaxPitch, MaxPitch); // clamped, so it cannot drift
 
         // --- Move: the whole camera basis is the travel referential. Forward = look axis,
         // Right/Up = the camera's own orthonormal axes, so up/down stays perpendicular to the
@@ -200,5 +204,18 @@ public sealed class FreeCameraController
         // the camera would simply refuse to move (spec §3.3).
         var speed = MoveSpeed * (input.Sprint ? SprintMultiplier : 1f);
         camera.Position += new Double3(Vector3.Normalize(direction) * (speed * deltaSeconds));
+    }
+
+    /// <summary>Folds an angle back into (-pi, pi] — same direction, but no unbounded growth.</summary>
+    private static float WrapAngle(float radians)
+    {
+        const float twoPi = 2f * MathF.PI;
+        var wrapped = radians % twoPi;
+        return wrapped switch
+        {
+            > MathF.PI => wrapped - twoPi,
+            <= -MathF.PI => wrapped + twoPi,
+            _ => wrapped,
+        };
     }
 }

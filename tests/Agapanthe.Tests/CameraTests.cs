@@ -145,6 +145,49 @@ public class CameraTests
     }
 
     [Fact]
+    public void Controller_MovesExactly_EvenTenThousandKilometresOut()
+    {
+        // The failure this exists to prevent: a float position at 1e7 m sits on a 1 m grid, so a 0.3 m step is
+        // rounded straight back to where it started and the camera simply REFUSES TO MOVE. Accumulating in double
+        // keeps the step, whole.
+        var start = new Double3(1e7, 1e7, 1e7);
+        var camera = new Camera { Position = start };
+        var controller = new FreeCameraController { MoveSpeed = 1f };
+
+        controller.Update(camera, 0.3f, new CameraInput(true, false, false, false, false, false, Vector2.Zero));
+
+        // Default forward is -Z: the step lands on Z, and it lands exactly.
+        var step = 1f * 0.3f; // the float the controller computes
+        Assert.Equal(start.Z - step, camera.Position.Z, 6);
+        Assert.NotEqual(start.Z, camera.Position.Z);
+    }
+
+    [Fact]
+    public void Float_CannotEvenRepresentThatStep_WhichIsWhyThePositionIsDouble()
+    {
+        // The witness for the test above: the same arithmetic in float, where the step vanishes on contact.
+        const float farOut = 1e7f;
+        Assert.Equal(farOut, farOut + 0.3f);       // the step is gone
+        Assert.Equal(farOut, farOut + 0.49f);      // so is half a metre
+    }
+
+    [Fact]
+    public void Controller_WrapsYaw_SoLongSessionsDoNotLosePrecision()
+    {
+        // Turning the same way for a while used to grow Yaw without bound; a float's precision is relative, so
+        // past a few thousand radians the mouse can no longer express a fine rotation and the look starts to snap.
+        var camera = new Camera();
+        var controller = new FreeCameraController { LookSensitivity = 0.01f, LookSmoothingTau = 0f };
+
+        for (var i = 0; i < 500; i++)
+        {
+            controller.Update(camera, 1f / 60f, new CameraInput(false, false, false, false, false, false, new Vector2(200f, 0f)));
+        }
+
+        Assert.InRange(camera.Yaw, -MathF.PI, MathF.PI);
+    }
+
+    [Fact]
     public void Controller_NoInput_DoesNotMoveOrProduceNaN()
     {
         var camera = new Camera { Position = new Double3(1, 2, 3) };
