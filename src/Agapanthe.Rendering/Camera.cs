@@ -87,5 +87,6 @@ public sealed class Camera
     /// narrows every object against <see cref="RenderView.Origin"/>) and the renderer (which narrows the lights
     /// and the shadow fit against the same origin) — one origin per frame, by construction.
     /// </summary>
-    public RenderView CreateView() => new(Position, ViewMatrix, ProjectionMatrix);
+    public RenderView CreateView()
+        => new(Position, ViewMatrix, ProjectionMatrix, FovY, AspectRatio, Near, Far);
 }

@@ -328,6 +328,18 @@ public sealed class Renderer : IDisposable
     public ShadowSettings Shadow { get; private set; }
 
     /// <summary>
+    /// How far in front of the camera shadows are cast, in world units (spec §3.5). The shadow map covers the
+    /// camera frustum truncated at this distance — beyond it, geometry is simply unshadowed, because spreading a
+    /// 2048² map over the whole far plane would make its texels metres wide and the shadows useless anyway.
+    /// Set it to the range that actually matters for the scene; 0 or less means "the whole frustum".
+    /// <para>
+    /// It is only a CAP: a scene smaller than the frustum is shadowed tightly whatever this says (see
+    /// <see cref="ShadowFit"/>), so a small scene never pays for a large value.
+    /// </para>
+    /// </summary>
+    public float ShadowDistance { get; set; } = 100f;
+
+    /// <summary>
     /// Shading debug visualization (0 = normal PBR). Values map to the DEBUG_* selector in
     /// <c>mesh.frag</c>: 1 shaded normal, 2 geometric normal, 3 base color, 4 metallic,
     /// 5 roughness, 6 occlusion, 7 tangent (+handedness tint), 8 key-light NdotL,
@@ -643,7 +655,7 @@ public sealed class Renderer : IDisposable
         // One light-space transform per frame, shared by the shadow pass (render depth) and the scene pass
         // (pack into the lights UBO for the PCF lookup). Fitted in the SAME camera-relative frame as the render
         // lists (view.Origin), because that is the space the vertex/fragment stages hand it world positions in.
-        var lightViewProj = ComputeLightViewProj(in sceneBounds, view.Origin);
+        var lightViewProj = ComputeLightViewProj(in view, in sceneBounds);
 
         RecordShadowPass(cmd, shadowCasters, registry, in lightViewProj);
         RecordScenePass(cmd, frame, renderList, registry, in view, target, in lightViewProj);
@@ -651,41 +663,14 @@ public sealed class Renderer : IDisposable
     }
 
     /// <summary>
-    /// Fits the directional light's orthographic frustum to the scene's world AABB and returns its
-    /// <c>view · proj</c> (row-vector; a world point maps to light clip space as <c>p · result</c>, and std140
-    /// uploads it transposed so the shaders multiply <c>result * vec4(worldPos, 1)</c>). One cascade covering
-    /// the whole scene (spec §6 M6 — CSM is phase 2).
-    /// <para>
-    /// <b>Fit.</b> Centre = <see cref="Scene.BoundsCenter"/>; radius = half the space diagonal + 10% margin;
-    /// the eye sits at <c>centre − dir · 2·radius</c> looking at the centre; the ortho spans <c>2·radius</c> on
-    /// each axis with near/far clamped to <c>[0.5·radius, 3.5·radius]</c> from the eye (the scene sphere of
-    /// radius <c>r</c> sits at <c>[r, 3r]</c> from the eye, comfortably inside). The up vector is +Y, swapped
-    /// to +Z when the light points nearly along ±Y (else <see cref="MathHelpers.LookAt"/> degenerates). A
-    /// degenerate/empty scene (zero diagonal) falls back to a unit radius so the matrix stays finite.
-    /// </para>
+    /// The directional light's <c>view · proj</c> for this frame — see <see cref="ShadowFit"/> for the fit
+    /// itself (camera frustum, capped by <see cref="ShadowDistance"/>, never wider than the scene, texel-snapped).
+    /// Row-vector: a camera-relative point maps to light clip space as <c>p · result</c>, and std140 uploads it
+    /// transposed so the shaders multiply <c>result * vec4(worldPos, 1)</c>. One cascade (CSM is out of scope).
     /// </summary>
-    private Matrix4x4 ComputeLightViewProj(in Double3Bounds sceneBounds, Double3 origin)
-    {
-        var dir = Lights.Directional.Direction;
-        dir = dir.LengthSquared() > 1e-12f ? Vector3.Normalize(dir) : new Vector3(0f, -1f, 0f);
-
-        // Camera-relative (spec §3.3): the bounds are narrowed against the frame's origin, the same one the render
-        // lists used, so the matrix maps the camera-relative world positions the shaders actually carry. The
-        // subtraction happens in double, so a scene 10 000 km out still yields an exact, small extent.
-        // An empty world folds to inverted infinities; collapse it to a degenerate zero box, or ±∞ would poison
-        // the matrix to NaN.
-        var min = sceneBounds.IsEmpty ? Vector3.Zero : sceneBounds.Min.ToVector3(origin);
-        var max = sceneBounds.IsEmpty ? Vector3.Zero : sceneBounds.Max.ToVector3(origin);
-        var center = (min + max) * 0.5f;
-        var radius = Vector3.Distance(min, max) * 0.5f;
-        radius = radius > 1e-4f ? radius * 1.1f : 1f; // 10% margin; unit fallback for an empty scene
-
-        var eye = center - (dir * (radius * 2f));
-        var up = MathF.Abs(dir.Y) > 0.99f ? Vector3.UnitZ : Vector3.UnitY;
-        var view = MathHelpers.LookAt(eye, center, up);
-        var proj = MathHelpers.OrthographicVulkan(2f * radius, 2f * radius, radius * 0.5f, radius * 3.5f);
-        return view * proj;
-    }
+    private Matrix4x4 ComputeLightViewProj(in RenderView view, in Double3Bounds sceneBounds)
+        => ShadowFit.ComputeLightViewProj(
+            in view, in sceneBounds, Lights.Directional.Direction, ShadowDistance, ShadowMapResolution);
 
     /// <summary>
     /// Pass 0 (M6, decision 7): renders scene depth from the directional light's viewpoint into the shadow

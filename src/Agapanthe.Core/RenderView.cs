@@ -28,10 +28,28 @@ public readonly struct RenderView
     /// <summary>Projection matrix (Vulkan clip space: Y flipped, depth [0,1]).</summary>
     public readonly Matrix4x4 Projection;
 
-    public RenderView(Double3 origin, in Matrix4x4 view, in Matrix4x4 projection)
+    /// <summary>Vertical field of view, in radians.</summary>
+    public readonly float FovY;
+
+    /// <summary>Viewport aspect ratio (width / height).</summary>
+    public readonly float AspectRatio;
+
+    /// <summary>Near plane distance.</summary>
+    public readonly float Near;
+
+    /// <summary>Far plane distance.</summary>
+    public readonly float Far;
+
+    public RenderView(
+        Double3 origin, in Matrix4x4 view, in Matrix4x4 projection,
+        float fovY, float aspectRatio, float near, float far)
     {
         Origin = origin;
         View = view;
         Projection = projection;
+        FovY = fovY;
+        AspectRatio = aspectRatio;
+        Near = near;
+        Far = far;
     }
 }

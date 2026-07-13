@@ -114,7 +114,7 @@ window.Loaded += () =>
 
     // Frame the model: sit the camera back by 1.5x the diagonal along a slightly-raised front direction,
     // orient yaw/pitch to look at the centre.
-    FrameCamera(camera, controller, in sceneBounds);
+    FrameCamera(camera, controller, renderer, in sceneBounds);
 
     // Default M5 lighting: a warm directional key (sun) plus a cool rim and a soft fill point
     // light placed from the scene bounds — a classic 3-point setup that reads PBR materials
@@ -559,7 +559,7 @@ static void SetupLights(SceneLights lights, in Double3Bounds bounds)
     lights.Ambient = new Vector3(0.08f, 0.08f, 0.09f);
 }
 
-static void FrameCamera(Camera camera, FreeCameraController controller, in Double3Bounds bounds)
+static void FrameCamera(Camera camera, FreeCameraController controller, Renderer renderer, in Double3Bounds bounds)
 {
     var (center, diagonal) = NarrowBounds(in bounds);
 
@@ -605,6 +605,11 @@ static void FrameCamera(Camera camera, FreeCameraController controller, in Doubl
     // couple of seconds regardless of the model's absolute size (a fixed speed felt insane on
     // a 1-unit helmet). Shift sprints at 3x.
     controller.MoveSpeed = MathF.Max(diagonal * 0.5f, 0.01f);
+
+    // Shadow range scaled to the model as well (a fixed 100 m would be absurd on a 2 m helmet). It is only a cap:
+    // this scene is far smaller than the frustum, so the fit stays on the scene and this changes nothing today —
+    // it starts to matter the moment the world is bigger than what the camera sees (M4).
+    renderer.ShadowDistance = MathF.Max(diagonal * 4f, 1f);
 }
 
 file static class DebugViews
