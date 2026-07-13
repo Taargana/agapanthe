@@ -1,118 +1,107 @@
-# Absolute-Human Board — Agapanthe Session 10 (P2-M1 : Chemin SPIR-V hors-ligne)
+# Absolute-Human Board — Agapanthe Session 11 (P2-M2 : Couture ECS)
 
-**Status**: CLOSED — 2026-07-13. **P2-M1 livré** (chemin SPIR-V hors-ligne) : W1/W2/W3 + double audit PASS + 8 durcissements. Prod Release/AOT sans shaderc (prouvé Windows), capture byte-identique, 0 leak, 207 tests. Archivé → `archive/board-session10-P2M1.md`. Prochain : ouvrir P2-M2. Règle §2.1-2 tenue : le hot reload est un luxe de dev, **la prod embarque du SPIR-V précuit et ne charge pas shaderc**.
-**Créé**: 2026-07-12
-**Spec**: docs/plans/2026-07-12-phase2-foundations-design.md §2.1-2 (règle), §3.7 (chemin SPIR-V hors-ligne), §4 (SPIR-V manquant = échec explicite).
+**Status**: OPEN — session ouverte 2026-07-13. Troisième jalon Phase 2. P2-M1 clos (SPIR-V hors-ligne, double audit PASS). **P2-M2 = la couture : débrancher `Scene` en deux (possession GPU → `ResourceRegistry`, monde → ECS Arch), faire passer le rendu par des handles + 2 listes en passthrough, PROUVER que rien n'a bougé (capture byte-identique M8).** C'est un **refactor pur**, pas une feature — le culling (M4) et le camera-relative (M3) sont HORS périmètre.
+**Créé**: 2026-07-13
+**Spec**: docs/plans/2026-07-12-phase2-foundations-design.md §3.1 (modules), §3.2 (couture : handles, pas de types GPU dans le monde), §3.4 (modèle ECS), §3.5 (chaîne de systèmes — l'ordre est un contrat ; M2 livre systèmes 1-2 + 2 listes passthrough), §3.6 (Double3), §6 P2-M2 (critère byte-identique), §6.1 (rooting AOT).
 **Board persistence**: git-tracked
-**Sessions passées**: S1-S9 → .absolute-human/archive/ (S9 = board-session9-P2M0.md).
+**Sessions passées**: S1-S10 → .absolute-human/archive/ (S10 = board-session10-P2M1.md).
+**Conception d'ouverture**: passe `engine-architect` (2026-07-13) — synthèse ci-dessous.
 
-## Intake (spec §3.7 — actée)
+## Intake (spec §6 P2-M2 — acté)
 
-- **But** : un build Release/AOT qui **démarre sans shaderc** et **sans rien compiler**. Le hot reload (shaderc à chaud) reste actif **en Debug uniquement**.
-- **Levier** : le cache disque existe déjà, keyé par `{stage}_{SHA256(source résolu après #include)}.spv` (ShaderCompiler.CacheKey + CompileFileResolved, M8-03). Il suffit de (a) le **pré-remplir au build** avec les mêmes clés, et (b) ne charger shaderc qu'en cas de vrai miss (Debug), jamais en prod.
+- **But** : refactor pur. `Scene` mélange possession GPU (`_meshes/_materials/_textures/_placeholders/_samplerCache`) ET draw list (`Instances`) + bounds figées (`BoundsMin/Max/Center/Diagonal`). On sépare : `ResourceRegistry` (possession) + `GameWorld` Arch (le monde, en handles). Le Renderer consomme 2 listes (`RenderList` + `ShadowCasterList`) en **passthrough** (aucun culling, toutes les entités, ordre stable). Le helmet est dessiné **via l'ECS**.
+- **Critère de sortie** : **capture headless byte-identique à la baseline M8** (`24001B24…`), 0 message validation, 0 leak, publish NativeAOT OK — sous 2 conditions : (a) matrice monde **bakée sans aller-retour TRS**, (b) **ordre de draw stable**.
+- **Le vrai risque** : le **rooting AOT** des composants Arch (§6.1) — `T[]` instanciés par voie générique non pré-générée par l'ILC → échec runtime `'T[]' is missing native code` SANS warning au publish, corruption partielle possible.
 
-## État actuel (constaté en lisant le code)
+## État actuel (constaté en lisant le code — confirme le diagnostic spec)
 
-- `ShaderCompiler` charge shaderc **dès le ctor** (`Shaderc.GetApi()` + `CompilerInitialize()`, l.26-27) → même cache chaud = shaderc chargé à chaque run. C'est ce qu'il faut casser.
-- Clé de cache = hash du **source résolu** (CompileFileResolved → Compile). Un précompilateur build qui réutilise `ShaderIncludeResolver` produit des clés **identiques** au runtime.
-- Extensions shaders : `.vert`/`.frag`/`.comp` dans `shaders/` → stage dérivable de l'extension (pas besoin de la liste des passes).
-- `shaderc_shared.dll` (6,6 Mo) est aujourd'hui embarqué au publish (constaté P2-M0).
+- `Scene` (Scene.cs) = double rôle possession + draw list + bounds figées. `Renderer.DrawScene(Scene,…)` itère `scene.Instances` 2× (RecordShadowPass ~l.715-725, RecordScenePass ~l.818-831) en poussant `mesh.WorldTransform` (Matrix4x4 baké). `ComputeLightViewProj` (~l.657-671) lit `scene.BoundsCenter/BoundsDiagonal`.
+- **Les handles n'existent pas encore** (seule la spec les mentionne). **Arch n'est référencé nulle part** (le probe P2-M0 était dans le scratchpad, jetable). **`Double3` n'existe pas.** `IsAotCompatible=true` déjà sur Core + Rendering.
 
 ## Project Conventions
 
-- .NET 10, xUnit, TreatWarningsAsErrors, **AOT-pur** (IsAotCompatible libs, warnings IL = erreurs), aucun Vk* hors Graphics, IDisposable + DeletionQueue N+2, zéro alloc/frame, ResourceTracker (leak = échec), 0 message de validation.
+- .NET 10, xUnit, TreatWarningsAsErrors, **AOT-pur** (IsAotCompatible libs, warnings IL = erreurs), **aucun Vk* hors Graphics**, **aucun type Arch (`Entity`/`World`) hors du projet World**, IDisposable + DeletionQueue N+2, **zéro alloc/frame sur le hot path**, ResourceTracker (leak = échec), 0 message de validation.
 - Baseline capture byte-identique : SHA256 `24001B240C6C6B956F3F1AC6ABC1FE1D2CAA8914D9013169DFB049027E3309B7`.
 - Publish AOT : PATH doit inclure `C:\Program Files (x86)\Microsoft Visual Studio\Installer` (vswhere).
 
 ## Rollback Point
 
-`4cc930e` (P2-M0 clos, branche phase2-foundations).
+`5f9ab22` (P2-M1 clos, branche phase2-foundations).
 
-## Décision de conception (design fork tranché)
+## Décisions de conception (tranchées par l'architecte — à valider par les audits de sortie)
 
-**Le précompilateur build réutilise NOTRE `ShaderCompiler` + `ShaderIncludeResolver`** (pas un glslc externe) — c'est la seule façon de garantir des clés de cache **identiques** au runtime (même résolveur d'includes, même hash, même dérivation de clé). shaderc AU BUILD est acceptable (machine de dev) ; c'est shaderc AU RUNTIME/prod qu'on élimine.
+**D1 — Frontière modules (irréversible, à faire en premier)** :
+```
+Sandbox ─► Rendering ─► Graphics ─► Core
+   │          └─► Assets ─────────► Core
+   └────► World ───────────────────► Core        ◄── NOUVEAU (seul projet référençant Arch)
+Platform ─► Core
+World.SourceGen (generator+analyzer Roslyn, référencé par World en Analyzer)
+```
+| Élément | Projet | Raison |
+|---|---|---|
+| `MeshHandle`/`MaterialHandle`, `Double3`/`Double3Bounds`, `RenderItem`/`RenderList`, `ImportedEntitySpec` | **Core** | GPU-free. `RenderList` en Core = **le point non-évident** : permet à World de la remplir et à Rendering de la consommer **sans que Rendering référence World** (le Renderer ne connaît pas l'ECS). *Compromis de couche assumé → à valider par `engine-architect`.* |
+| composants, systèmes, `GameWorld`, `ComponentRegistry` | **World** | Arch confiné ici ; types Arch ne sortent jamais de l'API publique. |
+| `ResourceRegistry` | **Rendering** | reprend le rôle « propriétaire » de `Scene`. |
+| générateur + analyzer de rooting | **World.SourceGen** (netstandard2.0) | Analyzer, `ReferenceOutputAssembly=false`. |
+
+**D2 — Rooting AOT (le risque n°1)** : attribut `[Component]` = source unique. `World.SourceGen` (`IIncrementalGenerator`) émet `ComponentRegistry.RootAll()` qui, par type T, **touche les mêmes entrées génériques d'Arch que le runtime** (`Add/Remove/Get/Set/Has<T>` + **`CommandBuffer.Add<T>`**, pas seulement `new T[1]`) sur un world jetable — appelé dans le ctor de `GameWorld`. Double garde : (a) **analyzer au build** → erreur si un argument de type des méthodes du wrapper `GameWorld` n'est pas `[Component]` (fiable car TOUT accès composant passe par `GameWorld`, jamais Arch en direct) ; (b) **filet AOT** `tools/AotComponentProbe` (console PublishAot, modèle ShaderPrecompiler) qui exerce chaque composant et sort non-zéro si un `T[]` manque. **Converge avec la sérialisation source-gen future (même générateur — dette).**
+
+**D3 — Double3 en M2 = stockage seul** : le *type* `Double3` et le stockage monde `double` arrivent en M2 (système 2 bounds `Double3` + `LocalTransform.Position` en Double3, exigés §3.4-3.5) ; le *rendu camera-relative* (soustraction à origine ≠ 0) reste **M3**. `Camera.Position` et `Lights` **restent `Vector3`** en M2 ; `WorldTransform` reste `Matrix4x4` monde absolu.
+
+**D4 — Byte-identique** : (a) le helmet importé **ne porte pas de `LocalTransform`** → il porte sa `WorldTransform` **bakée bit-exacte** depuis `MeshAsset.WorldTransform` (le système 1 exclut les entités sans `LocalTransform`, ne recalcule jamais sa matrice) ; bounds = **fold-sommets float actuel CONSERVÉ** puis élargi en `Double3` (float→double exact, `ToVector3(Zero)` re-narrow bit-à-bit). (b) ordre de draw stable : **l'itération Arch n'est PAS stable** → composant `RenderOrder { uint }` = index mesh source, la liste est **triée** avant draw via `Span<RenderItem>.Sort(struct comparer)` (zéro-alloc, pas de boxing).
+
+**D5 — Déviation `Bounds` assumée** : §3.4 dit « Bounds = AABB **locale** », mais en M2 transformer l'AABB locale ≠ fold-sommets → casserait le byte-identique. Donc **en M2 `Bounds` = AABB *monde* statique** (seedée par le fold-sommets), système 2 = union. La forme « AABB locale × WorldTransform » arrive en **M4** (culling). *→ à valider par `engine-architect`.*
+
+**D6 — Ownership/zéro-alloc** : `ResourceRegistry` reprend exactement la possession + l'ordre de teardown de `Scene` (gate 0-leak préservé, mêmes ressources). `RenderList` possédée par le Renderer, buffer réutilisé (`Clear()` = `_count=0`), croissance amortie → zéro-alloc/frame. Résolution handle→ressource = indexation + garde (`GraphicsException` avec handle+contexte, §4). Vérifier que le source-gen `[Query]` d'Arch n'alloue pas/frame, sinon repli itération chunk-manuel.
 
 ## Task Graph
 
 ```
-W1 : P2-M1-01 shaderc LAZY dans ShaderCompiler (chargé seulement au premier vrai miss)
-     → à lui seul : cache chaud complet = shaderc jamais chargé. Rétro-compatible.
-W2 : P2-M1-02 mode "précuit seul" (cache-only) : miss = GraphicsException explicite (§4, pas de repli shaderc)
-     P2-M1-03 sélection du mode : Release = cache-only, Debug = full (shaderc lazy + hot reload). Hot reload Debug-only.
-W3 : P2-M1-04 précompilateur build (tool console réutilisant ShaderCompiler+resolver) + target MSBuild
-     → glob shaders/*.{vert,frag,comp} → résout includes → compile → écrit les .spv keyés dans le cache livré
-Tail :
-     P2-M1-05 vérif : Release/AOT démarre sans shaderc + sans compiler ; capture byte-identique ; 0 leak
-     P2-M1-06 double audit (csharp-lowlevel + engine-architect) + archive
+W0 ──► W1 ──┬──► W2 ──┐
+            └──► W3 ──┴──► W4 ──► W5
 ```
 
 ## Waves
 
-| Wave | Tâches | Exécution |
+| Vague | Contenu | Critère de vérification |
 |---|---|---|
-| 1 | P2-M1-01 | ShaderCompiler (lazy) |
-| 2 | P2-M1-02 → 03 | mode cache-only + sélection Debug/Release |
-| 3 | P2-M1-04 | précompilateur build + MSBuild |
-| tail | P2-M1-05, 06 | vérif + audits + archive |
+| **W0** | Fondations **Core** : `Double3`, `Double3Bounds`, handles, `RenderItem`, `RenderList`, `ImportedEntitySpec`. Aucun changement de comportement. | Build 0 warning ; unitaires : précision `Double3`, **`ToVector3(Zero)` = re-narrow bit-exact**, `RenderList` croissance amortie / `Clear` sans réalloc. |
+| **W1** ⚠️ *risque n°1* | Projet **World** + **World.SourceGen** ; `[Component]` + 7 composants ; `ComponentRegistry.RootAll` généré ; `GameWorld` (wrapper médiateur, seule API) ; `tools/AotComponentProbe`. | Unitaires (create/spawn/query) ; **`AotComponentProbe` publie NativeAOT et sort 0** (gate rooting) ; test négatif : analyzer met en **erreur** un composant non-`[Component]`. **→ second avis `csharp-lowlevel` obligatoire avant W2/W3.** |
+| **W2** (∥ W3) | Systèmes 1 & 2 : propagation hiérarchie local→world + **détection de cycle** (chemin dans l'exception) ; agrégation bounds `Double3` (remplace `Scene.Bounds*`). GPU-free. | Tests : propagation parent×enfant, **cycle rejeté avec chemin**, union bounds, **zéro-alloc** (compteur d'allocations). |
+| **W3** (∥ W2) | `ResourceRegistry` ; `SceneBuilder`→(registry, specs) avec `ComputeWorldBounds` **float conservé** ; `Renderer.DrawScene(RenderList,…)` ; boucles shadow/scene sur listes+registry ; `RenderListBuilder` (tri `RenderOrder`). | Build vert (ancien chemin `Scene` bridgé jusqu'à W4 pour comparer) ; run Debug sanity 0 validation / 0 leak. |
+| **W4** | Câblage Sandbox : model → registry+specs → `SpawnImported` → par frame `PropagateTransforms`/`AggregateBounds`/`CollectRenderLists` → `DrawScene`. Suppression `Scene`/`MeshInstance`. | **Capture byte-identique M8 `24001B24…`** ; **0 validation ; 0 leak** ; **publish NativeAOT** tourne + capture identique ; re-run `AotComponentProbe` sur le jeu complet. |
+| **W5** | Durcissements, docs, archive. | **`csharp-lowlevel`** (zéro-alloc query/tri/listes, rooting AOT, parité leak) **+ `engine-architect`** (couture, ownership, `RenderList` en Core, déviation `Bounds` monde) **PASS 0 critique** ; AVANCEMENT à jour. |
+
+**Points de passage rooting AOT** : W1 (gate de vague), W4 (jeu complet), W5 (final). **Byte-identique** : W4 (seul endroit où il a du sens ; W0-W2 prouvés par unitaires, W3 garde l'ancien chemin vert).
 
 ## Tâches
 
-### ✅ P2-M1-01 — shaderc lazy dans ShaderCompiler [code, M] — done — OWNER ShaderCompiler.cs
-`Shaderc.GetApi()`/`CompilerInitialize()` déplacés du ctor vers `EnsureShaderc()`, appelé seulement par `CompileWithShaderc` (vrai cache miss). Double-checked lock (`System.Threading.Lock`), `_compiler` assigné avant publication de `_shaderc` (non-null ⇒ compiler valide). Dispose ne libère shaderc que s'il fut initialisé. ResourceTracker inchangé (ShaderCompiler reste tracké, register ctor / unregister Dispose). Log « cache miss — loading shaderc » = preuve visible du chemin paresseux.
-**Preuve empirique** : run Debug **cache froid** → message ×2 (les 2 instances : Renderer + IblGenerator) ; run **cache chaud** → **AUCUN message = shaderc jamais chargé**, 0 leak, clean shutdown. Build 0 warning, **205 tests (5 runs consécutifs verts)**.
-**Note** : 2 instances de ShaderCompiler existent (Renderer + IblGenerator) → W3 (précompilateur) et W2 (cache-only) doivent couvrir les shaders des deux.
+### P2-M2-00 — Fondations Core [code, S] — todo — OWNER Core/
+`Double3` (`[StructLayout(Sequential)]`, blittable, `+/-/*`, Length, Distance, **`ToVector3(Double3 origin)`**), `Double3Bounds`, `MeshHandle`/`MaterialHandle` (`readonly record struct`), `RenderItem` (WorldTransform + handles + `ulong SortKey`), `RenderList` (possédée Renderer, `Clear`/`Add` amorti/`Items`), `ImportedEntitySpec`.
 
-### ✅ [collatéral W1] Fix flakiness du gate ResourceTracker [test-infra] — done
-En vérifiant W1, `ResourceTrackerTests.BalancedRegisterUnregister` a échoué 1×/2 : **pré-existant** (le `ResourceTracker` est un statique global muté par `ResourceTrackerTests` — Enabled/Reset — pendant que `ShaderCompilerTests` y enregistre « ShaderCompiler » ; xUnit parallélise → course). Mon changement (ctor ShaderCompiler plus rapide, sans shaderc) a déplacé le timing et exposé la course. **Un gate de fuites flaky est inacceptable** → fix : `ResourceTrackerCollection.cs` (`[CollectionDefinition(DisableParallelization=true)]`) + `[Collection("ResourceTracker")]` sur les 2 classes → elles ne s'exécutent plus jamais en parallèle (entre elles ni avec le reste). **Vérifié 5/5 runs verts.**
+### P2-M2-01 — World + rooting AOT [code+infra, L] — todo — OWNER src/Agapanthe.World, src/Agapanthe.World.SourceGen, tools/AotComponentProbe ⚠️
+Projet World (réf. Arch + Core), `[Component]`, 7 composants (`GlobalId`, `LocalTransform`, `Parent`(interne), `WorldTransform`, `MeshRef`, `Bounds`, `RenderOrder`), `GameWorld` (wrapper : `SpawnImported`/`PropagateTransforms`/`AggregateBounds`/`CollectRenderLists`, ctor→`RootAll()`). World.SourceGen : `ComponentRegistry.RootAll/All` + analyzer. `AotComponentProbe`. **AC : probe publie AOT et sort 0 ; analyzer erreur sur non-`[Component]`. Second avis csharp-lowlevel.**
 
-### ✅ P2-M1-02 — Mode "précuit seul" (cache-only) [code, S] — done — OWNER ShaderCompiler.cs
-Paramètre ctor `bool precompiledOnly = false` (défaut = full, garde tests/legacy inchangés). Dans `Compile`, sur cache miss en mode précuit-seul → `GraphicsException` explicite (nomme la clé `{stage}_{hash}.spv` + le dossier + « no shaderc ; must be produced by the build-time precompiler »), **avant** tout appel à `CompileWithShaderc` — pas de repli silencieux (spec §4). Rien n'est compilé ni écrit. Tests : miss cache-only → exception (`pre-cooked`) + cache reste vide ; hit cache-only (cache pré-cuit par un compiler full) → renvoie les octets exacts sans shaderc.
+### P2-M2-02 — Systèmes 1 & 2 [code, M] — todo — OWNER World/Systems [dep 01]
+Propagation local→world + détection cycle (chemin dans `WorldHierarchyException`) ; agrégation bounds `Double3`. Zéro-alloc (stamps réutilisés, pas de HashSet/frame).
 
-### ✅ P2-M1-03 — Sélection du mode Debug/Release + hot reload Debug-only [code, S] — done — OWNER ShaderCompiler.cs / Renderer.cs / IblGenerator.cs
-Fabrique `ShaderCompiler.CreateForBuild()` = **seul** point où vit le `#if DEBUG` du choix de mode (Debug = full, Release = cache-only). Les **2 instances** (`Renderer._shaderCompiler`, `IblGenerator._compiler`) l'utilisent. Le `ShaderHotReloader` (montage `watchedFiles` + instanciation) et le champ `ShaderReloadDebounce` sont gardés `#if DEBUG` → en Release aucun thread watcher, `_reloader` null, `PollShaderReload` no-op (déjà gardé). AC vérifié : Debug → watching 7 shaders, hot reload actif ; Release compile 0 warning (pas de CS0414 sur le champ debounce). Preuve Release/AOT bout-en-bout = P2-M1-05 (après W3, quand le cache livré est pré-rempli).
+### P2-M2-03 — ResourceRegistry + split Renderer [code, L] — todo — OWNER Rendering [dep 00]
+`ResourceRegistry` (possession ex-Scene, teardown ordre inverse), `SceneBuilder`→(registry, specs) fold float conservé, `Renderer.DrawScene(RenderList, RenderList, …, ResourceRegistry, …, in Double3Bounds)`, boucles sur listes+`Resolve`, `RenderListBuilder` (tri `RenderOrder` zéro-alloc).
 
-### ✅ P2-M1-04 — Précompilateur build + target MSBuild [infra, M] — done — OWNER tools/ShaderPrecompiler (new) + Sandbox.csproj + Agapanthe.slnx
-Outil console `tools/ShaderPrecompiler` (réutilise `ShaderCompiler` + `ShaderIncludeResolver` en mode full — shaderc au build OK) : glob `shaders/*.{vert,frag,comp}`, stage dérivé de l'extension, résout includes, `CompileFileResolved` écrit les `.spv` keyés à l'identique dans un cache de staging (`obj/shadercache`). **Pas de ProjectReference depuis Sandbox** (sinon shaderc entrerait dans la closure AOT) : le build invoque l'outil via `<MSBuild>` (RemoveProperties RID/AOT) + `<Exec dotnet exec>`. 2 targets : `PrecompileShaders` (incrémental, Inputs=sources shaders/Outputs=stamp) + `IncludePrecompiledShaders` (toujours, `BeforeTargets=AssignTargetPaths`, `DependsOnTargets`) ship les `.spv` en Content vers `.shadercache/` de l'output.
-**Pièges rencontrés** : (a) `$(IntermediateOutputPath)` vide à l'éval top-level du corps csproj → staging basé sur `$(MSBuildProjectDirectory)\obj` ; (b) chemin à backslash final entre guillemets dans l'`Exec` → échappe le guillemet, args fusionnent → `TrimEnd('\')` ; (c) wildcard passé directement à `<Content Include>` dans un target ne ship rien → pré-expansion en item intermédiaire `_PrecookedSpv` puis `Content Include="@(_PrecookedSpv)"`.
-**AC dépassé** : build (Debug & Release) produit 15 `.spv` dans l'output ; clés identiques (run **Debug** = cache chaud, **aucun** « cache miss — loading shaderc »). **Publish Release/AOT win-x64** : binaire natif 4,47 Mo, 15 `.spv` livrés, run cache-only → **aucune `GraphicsException`, aucun miss** = toutes les clés matchent, **0 leak, capture byte-identique 24001B24…** ⇒ **P2-M1-05 (vérif) de facto acquis**.
-**shaderc retiré de la prod** ✅ : target `StripShadercFromRelease` (Release-only, `AfterTargets=CopyFilesToOutputDirectory;Publish`) supprime `shaderc_shared.dll` (+ variantes `runtimes/**`) de l'output/publish. Debug le garde (hot reload). **Vérifié** : publish AOT → DLL **absent**, 15 `.spv` conservés, run **sans le DLL** = aucun `DllNotFound`/exception, 0 leak, capture byte-identique 24001B24… ⇒ but littéral du jalon (« retirer shaderc de la prod ») atteint.
+### P2-M2-04 — Câblage Sandbox + gate byte-identique [code, M] — todo — OWNER Program.cs [dep 02,03]
+Spawn ECS + collect + DrawScene ; retrait `Scene`/`MeshInstance`. **AC : capture byte-identique + 0 validation + 0 leak + publish AOT + probe complet.**
 
-### 🟡 P2-M1-05 — Vérification [test, S] — largement acquis via W3 — todo (reste : hot reload Debug live + décision shaderc.dll)
-Release/AOT : démarre **sans charger shaderc** (aucun log « cache miss ») et **sans compiler** (tout hit, sinon `GraphicsException`) — **prouvé** au run AOT ; capture byte-identique M8 (24001B24…) ; 0 leak. **Reste** : re-confirmer le hot reload Debug **live** à la fenêtre (edit shader → recompile < 1 s) — non re-testé depuis W2/W3. (Retrait physique de `shaderc_shared.dll` : **fait** en W3.)
+### P2-M2-05 — Double audit + archive [test, S] — todo [dep 04]
+csharp-lowlevel + engine-architect PASS 0 critique ; archive → board-session11-P2M2.md ; AVANCEMENT.
 
-### ✅ P2-M1-06 — Double audit + archive [test, S] — done
-**Deux audits PASS, zéro finding critique.** `csharp-lowlevel` : PASS (repli silencieux impossible, disposal natif propre sur tous les chemins, pas de contamination AOT — tous re-vérifiés adversarialement). `engine-architect` : PASS conditionnel (couture saine, `#if DEBUG` unique, shaderc retiré de la sortie Release Windows).
-**Durcissements appliqués (in-milestone) et re-vérifiés (Debug byte-identique + AOT sans DLL, 0 leak, 207 tests)** :
-- ctor `ShaderCompiler` → `internal` + `[InternalsVisibleTo("ShaderPrecompiler")]` (Tests déjà couverts) → le code applicatif ne peut plus contourner `CreateForBuild` et obtenir le mode full en Release [archi #1].
-- garde défensive `if (_precompiledOnly) throw` en tête d'`EnsureShaderc` [archi #2 / low M4b].
-- `_shaderc` → `volatile` : le DCL prétendait une thread-safety fausse sur ARM64 (Apple silicon/MoltenVK, cible) — corrigé (write release / read acquire publient `_compiler`) [low m1].
-- `IblGenerator.Compile` : `CompileFile` → `CompileFileResolved` — même clé que le précompilateur et les passes ; bombe à retardement au 1er `#include` dans un `ibl_*.comp` désamorcée [low M3].
-- MSBuild `ShaderSourceFile` (Inputs incrémentaux) : `**\*.{vert,frag,comp}` → `**\*` (tout `shaders/`) — l'édition d'un futur `#include` re-cuit ; sinon `.spv` sous clé périmée → miss Release [low M2 / archi #3].
-- `StripShadercFromRelease` : couvre `.dll` + `libshaderc_shared.so*` + `.dylib` + `runtimes/**/*shaderc_shared*` → critère (a) tenable cross-platform [low M1 / archi #5].
-- tool : énumération récursive `AllDirectories` (align csproj) [m4] + catch élargi `IOException`/`UnauthorizedAccessException` [m5].
-- **Finding m6 REJETÉ** (ne pas stripper les GLSL en Release) : le runtime cache-only **lit la source** pour hasher la clé (`CompileFileResolved`→`Resolve`) → les shaders sont **requis** en Release.
-Archive board → **fait** (`archive/board-session10-P2M1.md`).
+## Dette (rappel P2-M0/M1 — pour mémoire)
 
-## Dette (rappel, issue de P2-M0 — pour mémoire, traitée plus tard)
-
-- Rooting AOT des composants = contrainte de conception P2-M2 (source-gen piloté par le registre + test AOT).
-- Sérialisation maison source-gen = Phase 3 (même générateur).
+- Sérialisation maison source-gen (Arch.Persistence NO-GO) = même générateur que le rooting, Phase 3.
 - AOT prouvé Windows-only → re-prouver Linux/macOS.
-- Smoke `[Query]` source-gen d'Arch.System non exercé → P2-M2.
+- P2-M1 : pas d'assertion auto du critère §6 SPIR-V ; includes non exercés.
 - CI : keyer le gate 0-leak sur la ligne de rapport, pas l'exit code.
-- shaderc natif embarqué → **c'est CE jalon (P2-M1) qui le retire de la prod**.
-
-## Dette laissée par P2-M1 (à consigner dans AVANCEMENT, non bloquante)
-
-- 🟠 **Pas d'assertion automatique du critère de sortie §6** : (a) « lib native absente du publish » et (b) « shaderc jamais chargé en Release » reposent sur l'inspection humaine (absence du log « loading shaderc »). Recommandé ≤ P2-M5 : un test qui publie et asserte l'absence du binaire natif (par nom, plateforme courante) + un gate CI. La garde `EnsureShaderc` couvre partiellement (b).
-- 🔴 **Chemin hors-ligne prouvé Windows uniquement** : re-prouver publish AOT + cache-only + strip (nom de lib natif correct) sur Linux/macOS dès qu'une machine est dispo (rejoint la dette « Linux jamais validé »).
-- 🟡 **Includes non exercés** : le resolver + la clé include-aware sont en place mais aucun shader n'a de `#include` aujourd'hui. Les fixes M2/M3 les rendent corrects par construction, mais rien ne les **teste** — ajouter un shader à include (ou un test) avant de s'appuyer dessus en prod.
-- 🟢 mineurs notés (non corrigés) : staging `obj/shadercache` jamais purgé → orphelins `.spv` shippés (bloat inerte) [low m3] ; nom `CreateForBuild` trompeur (appelé par le runtime, pas le build) [archi mineur] ; stamp d'incrément périmé si on modifie le tool sans toucher les shaders → `rebuild --no-incremental` [archi/low mineur] ; finalizer `ShaderCompiler` signale mais ne libère pas (cohérent philosophie projet) [low m2].
 
 ## Log
 
-- 2026-07-13: **P2-M1-06 (audits) DONE** — 2 audits PASS (0 critique). 8 durcissements appliqués + re-vérifiés (ctor internal, garde EnsureShaderc, `_shaderc` volatile ARM64, IblGenerator→CompileFileResolved, Inputs MSBuild `**\*`, strip cross-platform .so/.dylib, tool récursif + catch élargi). Debug byte-identique + AOT sans DLL, 0 leak, 207 tests. Dette consignée (assertion §6, Linux/macOS, includes non exercés). Reste : archive + AVANCEMENT + commit.
-- 2026-07-13: **W3 DONE** — précompilateur build `tools/ShaderPrecompiler` + 2 targets MSBuild dans Sandbox.csproj (+ projet ajouté à Agapanthe.slnx). Réutilise notre ShaderCompiler+resolver → clés identiques. Debug & Release : 15 `.spv` livrés dans `.shadercache/` de l'output. **Publish Release/AOT** : 4,47 Mo, cache-only trouve tout (0 miss / 0 exception), 0 leak, capture byte-identique 24001B24… ⇒ P2-M1-05 de facto acquis. 3 pièges MSBuild documentés (IntermediateOutputPath vide top-level ; backslash final entre guillemets ; wildcard direct dans Content). **shaderc_shared.dll strippé en Release** (target `StripShadercFromRelease`) + vérifié : run AOT sans le DLL OK (0 leak, byte-identique) ⇒ shaderc retiré de la prod. **Non committé.**
-- 2026-07-13: **W2 DONE** — mode cache-only + sélection Debug/Release. `ShaderCompiler(precompiledOnly)` : miss précuit-seul → `GraphicsException` explicite (pas de repli shaderc, spec §4). Fabrique `CreateForBuild()` = source unique du `#if DEBUG` (Debug full / Release cache-only), utilisée par les 2 compilers (Renderer + IblGenerator). Hot reloader + debounce gardés `#if DEBUG` (Release : 0 watcher, `PollShaderReload` no-op). **Debug/Release build 0 warning · 207 tests (+2) verts · run Debug : hot reload actif, 0 validation, 0 leak (135), capture byte-identique M8 (24001B24…).** Preuve Release/AOT bout-en-bout reportée à P2-M1-05 (dépend de W3). Prêt pour W3 (précompilateur build + target MSBuild). **Non committé** (l'humain pilote).
-- 2026-07-12: **W1 DONE** — shaderc paresseux dans ShaderCompiler. Cache chaud → shaderc jamais chargé (prouvé : log absent). + fix collatéral d'un gate de fuites flaky (ResourceTracker statique global × parallélisme xUnit) → collection non-parallélisable, 5/5 runs verts. Prêt pour W2 (mode cache-only + sélection Debug/Release).
-- 2026-07-12: **Phase 2, session 10 ouverte — P2-M1 (SPIR-V hors-ligne).** P2-M0 clos et committé (`0da5a1d`/`9bf42b9`/`4cc930e`). Design fork tranché : le précompilateur build réutilise notre ShaderCompiler+resolver (clés identiques). DAG 6 tâches, 4 vagues. En attente feu vert pour W1 (shaderc lazy).
+- 2026-07-13: **Session 11 ouverte — P2-M2 (couture ECS).** Passe `engine-architect` faite : conception tranchée (frontière modules avec nouveau projet World + World.SourceGen ; rooting AOT source-gen + analyzer + probe ; Double3 = stockage seul en M2 ; byte-identique via bake sans TRS + tri RenderOrder ; ResourceRegistry reprend la possession de Scene). DAG 6 tâches, 6 vagues (W2∥W3). 2 déviations à valider aux audits (RenderList en Core, Bounds monde en M2). **En attente feu vert pour W0.**

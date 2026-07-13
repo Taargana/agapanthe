@@ -19,8 +19,8 @@ Spec Phase 1 : [docs/plans/2026-07-02-graphics-engine-design.md](plans/2026-07-0
 |---|---|---|
 | P2-M0 | Gate AOT + verdict Arch | ✅ **PASSÉ** (S9) — double audit PASS, Arch validé |
 | P2-M1 | Chemin SPIR-V hors-ligne | ✅ **PASSÉ** (S10) — double audit PASS, prod sans shaderc (prouvé Windows AOT) |
-| P2-M2 | `Double3` + camera-relative + couture ECS render-list | **prochain** |
-| P2-M3 | (camera-relative / ECS — voir spec §6) | à venir |
+| P2-M2 | Couture ECS : Arch + `ResourceRegistry` + 2 listes (passthrough, sans culling) — refactor **byte-identique** | **prochain** |
+| P2-M3 | `Double3` + camera-relative rendering (précision grande distance) | à venir |
 | P2-M4 | Frustum culling + montée en charge (= critère de sortie) | à venir |
 | P2-M5 | Audits + clôture | à venir |
 
