@@ -1,6 +1,6 @@
 # Agapanthe — Plan complet & état d'avancement
 
-**Mis à jour** : 2026-07-13 (session 10 — **PHASE 2 EN COURS**, **P2-M1 CLOS** — chemin SPIR-V hors-ligne livré, double audit PASS) · **Machines de dev** : macOS (Apple M3, MoltenVK) + Windows 11 (RTX 5070 Ti, Vulkan 1.3 core) · **Cibles** : Windows / Linux / macOS
+**Mis à jour** : 2026-07-13 (session 11 — **PHASE 2 EN COURS**, **P2-M2 CLOS** — couture ECS livrée, capture byte-identique, double audit PASS) · **Machines de dev** : macOS (Apple M3, MoltenVK) + Windows 11 (RTX 5070 Ti, Vulkan 1.3 core) · **Cibles** : Windows / Linux / macOS
 
 ## Vision
 
@@ -19,8 +19,8 @@ Spec Phase 1 : [docs/plans/2026-07-02-graphics-engine-design.md](plans/2026-07-0
 |---|---|---|
 | P2-M0 | Gate AOT + verdict Arch | ✅ **PASSÉ** (S9) — double audit PASS, Arch validé |
 | P2-M1 | Chemin SPIR-V hors-ligne | ✅ **PASSÉ** (S10) — double audit PASS, prod sans shaderc (prouvé Windows AOT) |
-| P2-M2 | Couture ECS : Arch + `ResourceRegistry` + 2 listes (passthrough, sans culling) — refactor **byte-identique** | **prochain** |
-| P2-M3 | `Double3` + camera-relative rendering (précision grande distance) | à venir |
+| P2-M2 | Couture ECS : Arch + `ResourceRegistry` + 2 listes (passthrough, sans culling) — refactor **byte-identique** | ✅ **PASSÉ** (S11) — double audit PASS, capture byte-identique Debug + AOT |
+| P2-M3 | `Double3` + camera-relative rendering (précision grande distance) | **prochain** |
 | P2-M4 | Frustum culling + montée en charge (= critère de sortie) | à venir |
 | P2-M5 | Audits + clôture | à venir |
 
@@ -38,6 +38,18 @@ Spec Phase 1 : [docs/plans/2026-07-02-graphics-engine-design.md](plans/2026-07-0
 - **W3** : précompilateur build `tools/ShaderPrecompiler` (réutilise `ShaderCompiler`+`ShaderIncludeResolver` → clés **identiques** au runtime), 2 targets MSBuild (pré-cook incrémental → staging `obj/` ; ship `.spv` en Content vers `.shadercache/`), **non-ProjectReference** du Sandbox (pas de contamination AOT). `StripShadercFromRelease` retire la lib native shaderc du Release.
 - **Preuve** : publish **Release/AOT win-x64** → binaire 4,47 Mo, **shaderc absent**, 15 `.spv` livrés, run cache-only → aucun miss / aucune exception (clés matchent), 0 leak, **capture byte-identique M8 (24001B24…)**. Debug : hot reload conservé, aucun « loading shaderc » (cache chaud). 207 tests, 0 warning.
 - **Double audit PASS** (csharp-lowlevel + engine-architect, 0 critique) + 8 durcissements appliqués (ctor internal, garde `EnsureShaderc`, `_shaderc` volatile ARM64, IblGenerator→`CompileFileResolved`, Inputs MSBuild `**\*`, strip cross-platform, tool récursif + catch élargi). Détail : board session 10.
+
+**P2-M2 (couture ECS) — LIVRÉ (S11)** · Détail : [.absolute-human/archive/board-session11-P2M2.md](../.absolute-human/archive/board-session11-P2M2.md)
+
+**Ce qui change** : `Scene` (qui mélangeait possession GPU + draw list + bounds) est **débranchée en deux** — `ResourceRegistry` (possession, Rendering) + **`GameWorld`** (les entités, ECS **Arch 2.1.0**, nouveau projet `Agapanthe.World`). Le helmet est dessiné **entièrement via l'ECS** : entités → systèmes → 2 listes triées → **handles** résolus au draw. **Aucun type GPU dans le monde, aucun type Arch hors de World** (`PrivateAssets="compile"` → garantie *mécanique*, pas conventionnelle).
+
+- **Livré** : `Double3`/`Double3Bounds`/handles/`RenderItem`/`RenderList` (Core, GPU-free) · 7 composants + `ComponentRegistry` (rooting AOT) + `GameWorld` (seule API ; Arch confiné) · systèmes **1** (propagation hiérarchie + **détection de cycle**) et **2** (agrégation bounds) · `CollectRenderLists` **passthrough** (culling = M4) · `tools/AotComponentProbe` (gate AOT).
+- **🎯 Critère de sortie TENU** : capture **Debug ET NativeAOT** = **byte-identique** à la baseline M8 (`24001B24…`) → le refactor est **pur**. 0 validation, 0 leak (135), **234 tests** (5/5 runs), 0 warning.
+- **Rooting AOT** (le risque n°1) : `Root<T>()` roote `new T[1]` **et** enregistre le type — impossible d'enregistrer sans rooter. Le **source-gen + analyzer** prévus sont **abandonnés** (P2-M0 avait prouvé `new T[1]` suffisant) → registre à la main + test de complétude par réflexion + probe AOT. *L'architecte a validé : « le meilleur arbitrage du jalon ».* Source-gen reporté Phase 3 (avec la sérialisation).
+- **Course Arch fermée par construction** : Arch attribue les ids de types dans un état **global, sans verrou**, au premier contact (`World.Create`) → 2 mondes créés en parallèle = **tableaux de composants mésalignés** (composant relu **tout à zéro**, reproductible). Fix : `Root<T>` force `Component<T>.ComponentType` **sous notre verrou**, avant tout monde. *Prouvé : tests World en parallèle **5/5** vs **3/3 d'échec** avant.* Contrat mono-thread gardé par `AssertOwnerThread` (`[Conditional("DEBUG")]`, zéro coût Release).
+- **Leçon de guerre (le gate était vert par chance)** : le repli `(0,0,0)` des bounds était appliqué **par mesh** — or **zéro n'est pas l'élément neutre d'une union**. Un mesh **vide** tirait donc les bounds à l'origine : un modèle à (1000,1000,1000) aurait vu son extent **doublé** (cadrage + ombre faux). Invisible sur le casque (aucun mesh vide) → **trouvé par l'audit, pas par le gate**. Le fold vide (∞ inversés) est neutre ; le repli est désormais **global**.
+- **Piège byte-identique évité** : `Scene.BoundsCenter/Diagonal` calculaient **en float** ; calculer en `double` puis narrower donne **jusqu'à 1 ULP d'écart** → caméra et matrice d'ombre décalées. Partout où les bounds sont consommées : **narrow d'abord, arithmétique float ensuite**.
+- **`Span.Sort(structComparer)` alloue** (~88 B/appel : il boxe le comparateur) → tri maison `RenderList.SortByKey`. Trouvé par le test zéro-alloc.
 
 ## Décisions structurantes (verrouillées)
 
@@ -58,10 +70,14 @@ Spec Phase 1 : [docs/plans/2026-07-02-graphics-engine-design.md](plans/2026-07-0
 
 ```
 Sandbox ──► Rendering ──► Graphics ──► Core
-                │              (seul projet référençant Silk.NET.Vulkan)
-                └────► Assets ──► Core   (GPU-free : parsing testable sans GPU)
+   │            │              (seul projet référençant Silk.NET.Vulkan)
+   │            └────► Assets ──► Core   (GPU-free : parsing testable sans GPU)
+   └──────► World ─────────────► Core   (ECS Arch — SEUL projet référençant Arch, P2-M2)
 Platform ──► Core   (fenêtre GLFW, input, capture souris)
+
+tools/ShaderPrecompiler (P2-M1, SPIR-V hors-ligne) · tools/AotComponentProbe (P2-M2, gate rooting AOT)
 ```
+**Rendering ne référence PAS World** : le monde remplit une `RenderList` (type **Core**, GPU-free) que le Renderer consomme → le Renderer ne connaît pas l'ECS, et Arch (`PrivateAssets="compile"`) ne fuit chez personne.
 
 ## Jalons — état
 
@@ -158,11 +174,12 @@ Détail complet : [.absolute-human/archive/board-session8-M8.md](../.absolute-hu
 
 ## Reprise — où repartir
 
-**Point de reprise (2026-07-13, session 10)** : Phase 2 en cours. **P2-M0 et P2-M1 clos** (P2-M1 : W1/W2/W3 committés ; durcissements post-audit + docs de clôture **à committer**). Board courant : [.absolute-human/board.md](../.absolute-human/board.md) (session 10, à archiver en `board-session10-P2M1.md`) ; prochaine tâche = **ouvrir P2-M2**.
+**Point de reprise (2026-07-13, session 11)** : Phase 2 en cours. **P2-M0, P2-M1 et P2-M2 clos et committés.** Board session 11 archivé ([board-session11-P2M2.md](../.absolute-human/archive/board-session11-P2M2.md)) ; prochaine tâche = **ouvrir P2-M3**.
 
-**Branche** : `phase2-foundations` (partie de `main` à `264772e`). Commits P2-M1 : `2579389`/`89ddf1e` (W1 shaderc lazy + fix flaky) · `b202b92` (W2 cache-only + sélection Debug/Release) · `e79925b` (W3 précompilateur + strip shaderc). Durcissements post-audit + docs de clôture : arbre de travail à committer.
+**Branche** : `phase2-foundations` (partie de `main` à `264772e`). Commits P2-M2 : `f579074` (W0 fondations Core) · `899312e` (W1 World + rooting AOT) · `3640bc3` (durcissements audit W1) · `e383713` (W2 systèmes + listes) · `c9a7c21` (W3+W4 ResourceRegistry + Sandbox ECS, **gate byte-identique**) · `01c7e49` (durcissements audit de clôture).
 
-**Prochaine tâche : P2-M2** (spec §6) — `Double3` (monde `double`) + camera-relative rendering + couture ECS render-list (handles, pas de types GPU dans le monde). ⚠️ **Contrainte AOT dure** (les 2 audits P2-M0 convergent) : le rooting des tableaux de composants Arch doit venir d'un **registre source-unique** (source-gen `new T[1]` par type) **gardé par un test tournant sous AOT** — sinon échec runtime silencieux `'T[]' is missing native code`, corruption partielle.
+**Prochaine tâche : P2-M3** (spec §3.3, §3.6, §6) — **camera-relative rendering** : `Camera.Position` → `Double3`, lumières stockées en `Double3` et converties en relatif-caméra **par frame** (sinon elles dérivent dès que la caméra bouge), `CameraUniforms.Position` = 0 / view rotation-seule, `V = normalize(-worldPos)` dans `mesh.frag`, arithmétique `FreeCameraController` en `Double3`. **Critère** : rendu **à 10 000 km == à l'origine** (transforms relatifs **exactement** égaux en unitaire ; capture **≤ 1 LSB/canal** — le byte-identique strict n'est plus le critère, la reconstruction `double→float` ne retombe pas sur les mêmes bits).
+> ⚠️ **À traiter en ouverture de M3** (dette P2-M2, voir plus bas) : **handles sans génération** + **`ResourceRegistry` mono-modèle** (même changement : slot-map global) — types **publics**, le coût ne fera que monter. Et **`RenderView`** (agrégat portant l'**origine camera-relative** : lumières, caméra et monde doivent soustraire *exactement* la même origine).
 
 **Vérif humaine encore due (non bloquante, P2-M1)** : hot reload Debug **live** à la fenêtre (edit shader → recompile < 1 s) — non re-testé depuis M8 ; le headless ne le couvre pas.
 
@@ -189,4 +206,17 @@ Détail P2-M0 : [.absolute-human/archive/board-session9-P2M0.md](../.absolute-hu
 - **CI** : le gate 0-leak doit keyer sur la **ligne de rapport**, pas l'exit code (otage du crash Silk.NET au shutdown).
 - ~~**shaderc encore embarqué** sous AOT~~ → **retiré de la prod par P2-M1** (mode cache-only + `StripShadercFromRelease`).
 - **Dette issue de P2-M1** (détail : board session 10) : (a) pas d'**assertion automatique** du critère de sortie §6 (lib native absente / shaderc jamais chargé reposent sur l'œil humain) → test + gate CI ≤ P2-M5 ; (b) chemin hors-ligne + strip **prouvés Windows uniquement** → re-prouver Linux/macOS (nom de lib natif `.so`/`.dylib` déjà couvert dans le target, non testé) ; (c) **includes non exercés** (resolver + clé include-aware en place, corrects par construction mais aucun shader n'a de `#include` → ajouter un cas avant de s'y fier).
+
+**Dette issue de P2-M2** (détail : board session 11) — **à traiter en ouverture de M3/M4** :
+- 🔴 **Handles sans génération** : `MeshHandle(int)` est un index nu → après un unload/reload (streaming), un handle périmé résoudra **silencieusement une autre ressource** (contredit §3.2 « handle déchargé = erreur »). Types **publics** → corriger **avant** que gameplay/sérialisation s'y accrochent.
+- 🔴 **`ResourceRegistry` mono-modèle** : les handles sont des index **relatifs à un registre** → `MeshHandle(0)` de deux modèles se **collisionnent**. **Bloquant pour les 10 000 entités de M4.** Slot-map global (free-list + génération) = **le même changement** que le point ci-dessus. À trancher **avant** d'écrire le culling.
+- 🔴 **Tie-break du tri en M4** (*le vrai piège*) : quand `SortKey` portera matériau/pipeline/profondeur, les **ex æquo deviendront la norme** et leur ordre suivra l'itération Arch (non déterministe) → **le déterminisme byte-identique se perdra silencieusement**. La clé 64-bit doit **inclure un tie-break stable en bits de poids faible** (`RenderOrder`/`GlobalId`) — un tri stable ne suffit pas.
+- 🟠 **Séquencement M4 contre-intuitif** : le fit d'ombre sur **frustum caméra** (§3.5) doit précéder (ou accompagner) la bascule `Bounds` monde→locale — sinon la boîte (plus lâche) **déplace silencieusement la matrice d'ombre**. `ImportedEntitySpec` devra porter une AABB **locale**.
+- 🟠 **Propagation O(n·d)** : chaque entité re-walke toute sa chaîne parent (+ scan linéaire du walk-stack). N'alloue pas (gate vert) mais **catastrophique à 10k** → passe unique ordonnée par profondeur en M4.
+- 🟠 **`Parent` pendant** : dès que la destruction d'entités arrivera (M3), un `Parent` vers une entité morte → exception, ou **pire** : lecture silencieuse d'une **autre** entité (recyclage d'ids). À traiter avec l'API de destruction.
+- 🟠 **`SortByKey` = insertion sort O(n²)** → radix LSD 64-bit (scratch réutilisé) en M4.
+- 🟡 **`DrawScene` à 8 paramètres**, dont `sceneBounds` **transitoire** → introduire un agrégat **`RenderView`** en M3 : il portera l'**origine camera-relative**, le point le plus facile à désynchroniser (lumières, caméra et monde doivent soustraire **exactement** la même origine, sinon dérive silencieuse).
+- 🟡 **`AggregateBounds` ne doit PAS devenir un système par frame** : après le fit caméra, plus aucun lecteur → **requête à la demande**, pas un maillon de la chaîne §3.5 (défaut de la spec, pas du code).
+- 🟡 **Gates CI manquants** : assertion **automatique** du byte-identique (SHA vérifié à la main aujourd'hui) ; `publish -p:TrimmerSingleWarn=false` périodique **assertant que les assemblies fautives sont exactement `{Collections.Pooled}`** (sinon `NoWarn IL3053` masquera un futur tiers).
+- 🟡 **Zéro-alloc à re-mesurer en M3** : le test valide un monde à **archétypes figés** ; créer/détruire des entités en jeu allouera côté Arch. · `AotRootingSmoke` exerce les types **en dur** → le piloter par `All` avant d'ajouter un composant.
 - Reste hérité de M8 (voir « Dette d'ouverture Phase 2 (issue de M8) » plus haut) : invariant du reload par convention, feel souris/labels RenderDoc non observés, crash GLFW shutdown upstream, etc.
