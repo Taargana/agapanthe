@@ -1,3 +1,4 @@
+using System.Linq;
 using System.Numerics;
 using System.Runtime.CompilerServices;
 using Agapanthe.Core;
@@ -20,6 +21,16 @@ namespace Agapanthe.World;
 public sealed class GameWorld : IDisposable
 {
     private readonly ArchWorld _world;
+
+    // Reused across PropagateTransforms calls for on-stack cycle detection, so the steady-state propagation
+    // allocates nothing (Clear keeps capacity). Depth is tiny (hierarchy chains), a linear scan is cheapest.
+    private readonly List<Entity> _walkStack = new(16);
+
+    // Built once: constructing a QueryDescription per frame would defeat the zero-alloc goal.
+    private static readonly QueryDescription PropagateDesc = new QueryDescription().WithAll<LocalTransform, WorldTransform>();
+    private static readonly QueryDescription BoundsDesc = new QueryDescription().WithAll<Bounds>();
+    private static readonly QueryDescription DrawableDesc = new QueryDescription().WithAll<WorldTransform, MeshRef, RenderOrder>();
+
     private bool _disposed;
 
     public GameWorld()
@@ -82,12 +93,174 @@ public sealed class GameWorld : IDisposable
         cb.Add(deferred, new RenderOrder { Value = 99 });
         cb.Playback(_world);
 
-        // Query touching several component arrays.
-        var query = new QueryDescription().WithAll<WorldTransform, RenderOrder>();
+        // Hierarchy + the M2 systems, so the probe proves the exact chunk-iteration / entity-walk paths W2 uses
+        // survive AOT (audit W1 M2 gate), not only Create/Add/Remove.
+        var root = SpawnLocalRoot(new Double3(1, 0, 0), Quaternion.Identity, 1f);
+        SpawnLocalChild(root, new Double3(0, 2, 0), Quaternion.Identity, 1f);
+        PropagateTransforms();
+        _ = AggregateBounds();
+
+        // Chunk-iteration query (the path the systems use) touching several component arrays.
         var count = 0;
-        _world.Query(in query, (Entity _, ref WorldTransform _, ref RenderOrder _) => count++);
+        foreach (ref var chunk in _world.Query(new QueryDescription().WithAll<WorldTransform, RenderOrder>()))
+        {
+            count += chunk.Count;
+        }
+
         return count;
     }
+
+    // --- Systems (spec §3.5) ---------------------------------------------------------------------------------
+
+    /// <summary>
+    /// System 1: computes each hierarchical entity's <see cref="WorldTransform"/> from its
+    /// <see cref="LocalTransform"/> chain (spec §3.5). Imported drawables have no <see cref="LocalTransform"/>,
+    /// so their baked matrix is never touched (byte-identical guarantee). Throws <see cref="WorldHierarchyException"/>
+    /// on a parent cycle. Zero-alloc in steady state (reused <see cref="_walkStack"/>, chunk iteration, no lambda).
+    /// </summary>
+    public void PropagateTransforms()
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        foreach (ref var chunk in _world.Query(in PropagateDesc))
+        {
+            var entities = chunk.Entities;
+            var worlds = chunk.GetSpan<WorldTransform>();
+            var count = chunk.Count;
+            for (var i = 0; i < count; i++)
+            {
+                worlds[i].Value = ComputeWorldMatrix(entities[i]);
+            }
+        }
+    }
+
+    /// <summary>
+    /// System 2: unions every entity's world-space <see cref="Bounds"/> into the scene extent (spec §3.5). This
+    /// replaces <c>Scene.BoundsMin/Max/Center/Diagonal</c>. Zero-alloc (chunk iteration). Returns
+    /// <see cref="Double3Bounds.Empty"/> if there are no bounded entities (the caller guards degenerate extents).
+    /// </summary>
+    public Double3Bounds AggregateBounds()
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        var acc = Double3Bounds.Empty;
+        foreach (ref var chunk in _world.Query(in BoundsDesc))
+        {
+            var bounds = chunk.GetSpan<Bounds>();
+            var count = chunk.Count;
+            for (var i = 0; i < count; i++)
+            {
+                ref var b = ref bounds[i];
+                acc = Double3Bounds.Union(acc, new Double3Bounds(b.Min, b.Max));
+            }
+        }
+
+        return acc;
+    }
+
+    /// <summary>
+    /// Builds the two render lists (spec §3.5, systems 3-4 in PASSTHROUGH form for M2): every drawable entity
+    /// goes into both lists — no culling yet (that is M4). Both lists are sorted by <see cref="RenderOrder"/>, so
+    /// the draw order is deterministic even though Arch iterates by archetype/chunk (spec §6 condition b).
+    /// Zero-alloc: the lists are reused (Clear keeps capacity), iteration is chunk-based, the sort uses a struct
+    /// comparer.
+    /// <para>The shadow-caster list is a separate list on purpose: in M4 it is culled against the LIGHT volume,
+    /// never the camera frustum, or off-screen casters would pop their shadows in and out (spec §3.5).</para>
+    /// </summary>
+    public void CollectRenderLists(RenderList render, RenderList shadowCasters)
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        ArgumentNullException.ThrowIfNull(render);
+        ArgumentNullException.ThrowIfNull(shadowCasters);
+
+        render.Clear();
+        shadowCasters.Clear();
+
+        foreach (ref var chunk in _world.Query(in DrawableDesc))
+        {
+            var worlds = chunk.GetSpan<WorldTransform>();
+            var meshes = chunk.GetSpan<MeshRef>();
+            var orders = chunk.GetSpan<RenderOrder>();
+            var count = chunk.Count;
+            for (var i = 0; i < count; i++)
+            {
+                var item = new RenderItem(worlds[i].Value, meshes[i].Mesh, meshes[i].Material, orders[i].Value);
+                render.Add(item);
+                shadowCasters.Add(item); // passthrough in M2: every drawable casts
+            }
+        }
+
+        render.SortByKey();
+        shadowCasters.SortByKey();
+    }
+
+    // world(e) = local(e) · local(parent) · … · local(root) (row-vector convention). Walks the Parent chain,
+    // detecting cycles on the reused stack. A chain node without a LocalTransform ends the walk (it is a world
+    // anchor). In M2 position is narrowed to absolute float (camera-relative subtraction is M3).
+    private Matrix4x4 ComputeWorldMatrix(Entity entity)
+    {
+        _walkStack.Clear();
+        var m = Matrix4x4.Identity;
+        var node = entity;
+        while (node.Has<LocalTransform>())
+        {
+            for (var i = 0; i < _walkStack.Count; i++)
+            {
+                if (_walkStack[i] == node)
+                {
+                    throw new WorldHierarchyException(BuildCyclePath(node));
+                }
+            }
+
+            _walkStack.Add(node);
+            m *= LocalMatrix(node.Get<LocalTransform>());
+
+            if (!node.Has<Parent>())
+            {
+                break;
+            }
+
+            node = node.Get<Parent>().Value;
+        }
+
+        return m;
+    }
+
+    private static Matrix4x4 LocalMatrix(in LocalTransform lt)
+        => Matrix4x4.CreateScale(lt.Scale)
+         * Matrix4x4.CreateFromQuaternion(lt.Rotation)
+         * Matrix4x4.CreateTranslation(lt.Position.ToVector3(Double3.Zero));
+
+    private string BuildCyclePath(Entity repeated)
+    {
+        var ids = string.Join(" -> ", _walkStack.Select(e => e.Id));
+        return $"Cycle in entity hierarchy: {ids} -> {repeated.Id}";
+    }
+
+    // --- Test helpers (internal) : build hierarchies the public API does not yet expose (M2 W2). They take and
+    // return EntityRef (an opaque wrapper), NOT Arch's Entity — the test assembly cannot compile against Arch
+    // (PrivateAssets=compile), and this keeps the ECS type out of even the internal surface. ---
+
+    internal EntityRef SpawnLocalRoot(Double3 position, Quaternion rotation, float scale)
+        => new(_world.Create(new LocalTransform { Position = position, Rotation = rotation, Scale = scale },
+                             new WorldTransform { Value = Matrix4x4.Identity }));
+
+    internal EntityRef SpawnLocalChild(EntityRef parent, Double3 position, Quaternion rotation, float scale)
+        => new(_world.Create(new LocalTransform { Position = position, Rotation = rotation, Scale = scale },
+                             new WorldTransform { Value = Matrix4x4.Identity },
+                             new Parent { Value = parent.Value }));
+
+    internal void SetParent(EntityRef child, EntityRef parent)
+    {
+        if (child.Value.Has<Parent>())
+        {
+            child.Value.Set(new Parent { Value = parent.Value });
+        }
+        else
+        {
+            child.Value.Add(new Parent { Value = parent.Value });
+        }
+    }
+
+    internal Matrix4x4 GetWorld(EntityRef entity) => entity.Value.Get<WorldTransform>().Value;
 
     public void Dispose()
     {

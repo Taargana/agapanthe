@@ -8,11 +8,6 @@ public sealed class RenderListTests
     private static RenderItem Item(uint order)
         => new(Matrix4x4.Identity, new MeshHandle((int)order), new MaterialHandle(0), order);
 
-    private readonly struct BySortKey : IComparer<RenderItem>
-    {
-        public int Compare(RenderItem a, RenderItem b) => a.SortKey.CompareTo(b.SortKey);
-    }
-
     [Fact]
     public void Add_GrowsAndPreservesItemsInOrder()
     {
@@ -55,7 +50,7 @@ public sealed class RenderListTests
     }
 
     [Fact]
-    public void Sort_OrdersByStructComparer()
+    public void SortByKey_OrdersAscending()
     {
         var list = new RenderList();
         for (uint i = 10; i-- > 0;)
@@ -63,11 +58,33 @@ public sealed class RenderListTests
             list.Add(Item(i)); // inserted 9,8,...,0 (reverse)
         }
 
-        list.Sort(new BySortKey());
+        list.SortByKey();
 
         for (var i = 0; i < 10; i++)
         {
             Assert.Equal((ulong)i, list.Items[i].SortKey);
         }
+    }
+
+    [Fact]
+    public void SortByKey_IsAllocationFree()
+    {
+        // Span.Sort(structComparer) allocates ~88 bytes per call (it boxes the comparer internally) — which is
+        // why RenderList sorts by hand. This is the regression guard for that.
+        var list = new RenderList();
+        for (uint i = 64; i-- > 0;)
+        {
+            list.Add(Item(i));
+        }
+
+        list.SortByKey(); // warm up
+
+        var before = GC.GetAllocatedBytesForCurrentThread();
+        for (var i = 0; i < 100; i++)
+        {
+            list.SortByKey();
+        }
+
+        Assert.Equal(0, GC.GetAllocatedBytesForCurrentThread() - before);
     }
 }

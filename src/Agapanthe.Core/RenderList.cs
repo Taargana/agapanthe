@@ -40,12 +40,34 @@ public sealed class RenderList
     }
 
     /// <summary>
-    /// Sorts the current items in place with a <b>struct</b> comparer (no boxing, no allocation) — the
-    /// render-list builder uses this to impose the stable draw order (spec §6 condition b) before drawing.
+    /// Sorts the items in place by <see cref="RenderItem.SortKey"/> ascending, imposing the stable draw order
+    /// (spec §6 condition b) — Arch iterates by archetype/chunk, which is not insertion-stable.
+    /// <para>
+    /// Hand-written insertion sort rather than <c>Span.Sort(comparer)</c>: the BCL overload allocates ~88 bytes
+    /// per call even with a struct comparer (it boxes it into <c>IComparer&lt;T&gt;</c> internally), which breaks
+    /// the zero-alloc-per-frame invariant — measured, not assumed. Insertion sort is allocation-free, stable, and
+    /// O(n) on the near-sorted input we actually have (spawn order ≈ chunk order).
+    /// </para>
+    /// <para><b>M4</b>: with thousands of culled entities and a real material/depth key the O(n²) worst case must
+    /// be replaced — an LSD radix sort over the 64-bit key with a reused scratch buffer is the natural fit
+    /// (O(n), still zero-alloc).</para>
     /// </summary>
-    public void Sort<TComparer>(TComparer comparer)
-        where TComparer : IComparer<RenderItem>
-        => _items.AsSpan(0, _count).Sort(comparer);
+    public void SortByKey()
+    {
+        var items = _items.AsSpan(0, _count);
+        for (var i = 1; i < items.Length; i++)
+        {
+            var item = items[i];
+            var j = i - 1;
+            while (j >= 0 && items[j].SortKey > item.SortKey)
+            {
+                items[j + 1] = items[j];
+                j--;
+            }
+
+            items[j + 1] = item;
+        }
+    }
 
     private void Grow()
     {
