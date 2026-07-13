@@ -98,9 +98,27 @@ window.Loaded += () =>
     // The whole point of camera-relative rendering is that the image must be IDENTICAL wherever this puts it —
     // which is exactly what the M3 precision proof asserts (10 000 km == the origin, to within 1 LSB).
     registry = new ResourceRegistry();
+
+    // AGAPANTHE_UNLOAD_TEST=N runs N load/unload cycles before the real load. Unload had NO caller anywhere in the
+    // engine (audit M3), so the streaming path the registry exists for was entirely unproven — and it was in fact
+    // leaking a descriptor set per material, invisibly, because the leak gate counts pools and not sets. This puts
+    // it under the real gate: N cycles must end with the same resource count as zero cycles. Safe here — no frame
+    // is in flight yet, so the synchronous destruction of the model's descriptor pools has nothing to race.
+    if (int.TryParse(Environment.GetEnvironmentVariable("AGAPANTHE_UNLOAD_TEST"), out var unloadCycles)
+        && unloadCycles > 0)
+    {
+        for (var i = 0; i < unloadCycles; i++)
+        {
+            var (throwaway, _) = registry.Load(device, model, renderer.MaterialSetLayout);
+            registry.Unload(throwaway);
+        }
+
+        Log.Info($"Sandbox: [unload-test] {unloadCycles} load/unload cycles done; the leak report below covers them.");
+    }
+
     var worldOrigin = ParseDouble3(Environment.GetEnvironmentVariable("AGAPANTHE_WORLD_ORIGIN"));
     var (modelId, specs) = registry.Load(
-        device, model, renderer.MaterialAllocator, renderer.MaterialSetLayout, worldOrigin);
+        device, model, renderer.MaterialSetLayout, worldOrigin);
 
     world = new GameWorld();
     foreach (var spec in specs)

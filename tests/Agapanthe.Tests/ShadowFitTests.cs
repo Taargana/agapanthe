@@ -99,10 +99,73 @@ public sealed class ShadowFitTests
     }
 
     [Fact]
-    public void FrustumFit_IsCameraRelative_SoFarOutIsIdenticalToTheOrigin()
+    public void FrustumFit_TexelSnap_KeepsAStaticPointStableWhenTheCameraCreepsForward()
     {
-        // Same invariant as the render lists (spec §3.3): 10 000 km out, with the world moved with it, the light
-        // matrix must be the same one — it is expressed in the frame's camera-relative space.
+        // The audit's catch, and the reason the snap must be anchored to the WORLD: quantizing the
+        // camera-relative centre is a no-op, because that centre does not depend on where the eye is. The shadow
+        // map would then slide continuously with the camera and every static edge would crawl.
+        // Here the camera creeps by a fraction of a texel per frame; the light-clip position of a FIXED world
+        // point must stay put (it may jump by whole texels, never drift smoothly).
+        var world = Box(Double3.Zero, 50_000);
+        var worldPoint = new Double3(3, 0, -20); // a static object in front of the camera
+
+        // texelSize = 2 * frustumRadius / resolution; the frustum here is ~100 m across, so a texel is centimetric.
+        var step = 0.001;
+        var projections = new List<Vector2>();
+        for (var frame = 0; frame < 8; frame++)
+        {
+            var eye = new Double3(0, 0, -step * frame); // creeping forward, sub-texel each frame
+            var view = View(eye, far: 10_000f);
+            var lightViewProj = ShadowFit.ComputeLightViewProj(view, in world, Sun, 100f, Resolution);
+
+            // The shadow pass receives camera-relative positions, so that is what we project.
+            var relative = worldPoint.ToVector3(eye);
+            var clip = Vector4.Transform(new Vector4(relative, 1f), lightViewProj);
+            projections.Add(new Vector2(clip.X / clip.W, clip.Y / clip.W));
+        }
+
+        // One shadow texel in NDC is 2/resolution. A drifting grid would move the point a little EVERY frame;
+        // a world-anchored one holds it to well under a texel.
+        var texelNdc = 2f / Resolution;
+        foreach (var p in projections)
+        {
+            Assert.True(
+                Vector2.Distance(p, projections[0]) < texelNdc,
+                $"the static point moved {Vector2.Distance(p, projections[0]) / texelNdc:F2} texels: the shadow grid is drifting with the camera");
+        }
+    }
+
+    [Fact]
+    public void FrustumFit_KeepsUpstreamCastersInsideTheDepthRange()
+    {
+        // A caster far behind the fitted sphere (along the light) still throws its shadow INTO it. If the light's
+        // near plane does not clear it, it is clipped and simply stops casting — a shadow that vanishes with no
+        // error anywhere. The old fixed [0.5r, 3.5r] range only cleared 0.5r of upstream world.
+        var sun = Vector3.Normalize(new Vector3(0f, -1f, 0f)); // straight down
+        var view = View(Double3.Zero, far: 10_000f);
+
+        // A world 2 km tall: the top is far above anything the frustum sphere covers.
+        var world = new Double3Bounds(new Double3(-50_000, 0, -50_000), new Double3(50_000, 2_000, 50_000));
+
+        var lightViewProj = ShadowFit.ComputeLightViewProj(view, in world, sun, 100f, Resolution);
+
+        // A caster at the very top of that world, above the camera, must land inside the light's depth range.
+        var caster = new Vector3(0f, 1_999f, 0f);
+        var clip = Vector4.Transform(new Vector4(caster, 1f), lightViewProj);
+        var depth = clip.Z / clip.W;
+
+        Assert.InRange(depth, 0f, 1f); // Vulkan clip depth: outside [0,1] means clipped, i.e. no shadow at all
+    }
+
+    [Fact]
+    public void FrustumFit_IsCameraRelative_SoFarOutMatchesTheOriginToWithinATexel()
+    {
+        // Camera-relative (spec §3.3): 10 000 km out, with the world moved with it, the fit must be the same —
+        // same extent, and a caster must project to the same place in the shadow map.
+        // NOT bit-identical, and that is by design: the texel grid is anchored to the ABSOLUTE world (it has to
+        // be, or it would drift with the camera — see the snap test above), so 1e7 m out lands on a different
+        // phase of that grid. The residue is bounded by one texel, which is the price of a grid that does not
+        // crawl. The render lists themselves remain exactly bit-identical; this is only the shadow map's phase.
         var far = new Double3(1e7, 1e7, 1e7);
 
         var atOrigin = ShadowFit.ComputeLightViewProj(
@@ -110,7 +173,17 @@ public sealed class ShadowFitTests
         var atFar = ShadowFit.ComputeLightViewProj(
             View(far, far: 10_000f), Box(far, 50_000), Sun, 100f, Resolution);
 
-        Assert.Equal(atOrigin, atFar);
+        Assert.Equal(FittedWidth(atOrigin), FittedWidth(atFar), 3); // same extent = same shadow texel density
+
+        // The same caster, expressed camera-relative in both frames, lands within a texel of the same shadow texel.
+        var caster = new Vector3(4f, 1f, -25f);
+        var here = Vector4.Transform(new Vector4(caster, 1f), atOrigin);
+        var there = Vector4.Transform(new Vector4(caster, 1f), atFar);
+        var drift = Vector2.Distance(
+            new Vector2(here.X / here.W, here.Y / here.W),
+            new Vector2(there.X / there.W, there.Y / there.W));
+
+        Assert.True(drift < 2f / Resolution, $"drift of {drift * Resolution / 2f:F2} texels between the origin and 1e7 m");
     }
 
     [Fact]

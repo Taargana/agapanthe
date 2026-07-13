@@ -83,7 +83,7 @@ public static class SceneBuilder
                 var entries = BuildEntries(model, defaultMaterialIndex);
 
                 return new ModelResources(
-                    meshes, materials, textures, placeholders, samplerCache, model.Name, entries);
+                    meshes, materials, textures, placeholders, samplerCache, materialAllocator, model.Name, entries);
             }
         }
         catch

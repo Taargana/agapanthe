@@ -87,6 +87,7 @@ public sealed class GameWorld : IDisposable
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
         AssertOwnerThread();
+        AssertNoTranslation(spec.RotationScale);
         _world.Create(
             new GlobalId { Value = spec.Order },
             new WorldTransform { Value = spec.RotationScale },
@@ -253,6 +254,26 @@ public sealed class GameWorld : IDisposable
 
         render.SortByKey();
         shadowCasters.SortByKey();
+    }
+
+    /// <summary>
+    /// Guards the split (spec §3.3): the translation row of a <see cref="WorldTransform"/> must be zero, because
+    /// <see cref="ComposeModel"/> OVERWRITES it with the camera-relative position. A translation baked in there —
+    /// by an importer, an animation, a physics step — would be silently thrown away, and the entity would simply
+    /// render in the wrong place with nothing to show for it. Debug-only: the check costs nothing in Release, and
+    /// this is a coding error, not a runtime condition.
+    /// </summary>
+    [Conditional("DEBUG")]
+    private static void AssertNoTranslation(in Matrix4x4 rotationScale)
+    {
+        if (rotationScale.M41 != 0f || rotationScale.M42 != 0f || rotationScale.M43 != 0f)
+        {
+            throw new WorldHierarchyException(
+                "WorldTransform carries a translation " +
+                $"({rotationScale.M41}, {rotationScale.M42}, {rotationScale.M43}), but the position must live in " +
+                "WorldPosition (Double3): the render list overwrites that row, so this translation would be " +
+                "silently dropped.");
+        }
     }
 
     // Recombines the two halves of a world transform into the float model matrix the GPU consumes: the baked

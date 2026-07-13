@@ -34,6 +34,14 @@ public readonly struct RenderView
     /// <summary>Viewport aspect ratio (width / height).</summary>
     public readonly float AspectRatio;
 
+    /// <summary>
+    /// The eye, expressed in this frame's own space — zero by construction, since the origin IS the eye. It is a
+    /// value rather than a hard-coded <c>Vector3.Zero</c> in the renderer so that the day the origin stops being
+    /// the eye (a quantized origin, or one shared with the physics simulation), that decision changes here and
+    /// not across the renderer and the shaders.
+    /// </summary>
+    public Vector3 EyeRelative => Vector3.Zero;
+
     /// <summary>Near plane distance.</summary>
     public readonly float Near;
 

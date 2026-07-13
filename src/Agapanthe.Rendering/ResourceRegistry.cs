@@ -57,52 +57,101 @@ public sealed class ResourceRegistry : IDisposable
     public (int ModelId, ImportedEntitySpec[] Specs) Load(
         GraphicsDevice device,
         ModelAsset model,
-        DescriptorAllocator materialAllocator,
         DescriptorSetLayout materialSetLayout,
         Double3 worldOrigin = default)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
 
-        // The builder creates the GPU objects (and disposes them itself if it throws part-way); the registry
-        // assigns the handles, so handle minting lives in exactly one place.
-        var resources = SceneBuilder.Build(device, model, materialAllocator, materialSetLayout);
+        // ONE descriptor allocator per model (audit M3): a DescriptorAllocator never frees an individual set — its
+        // sets die with their pool, and the pool dies with the allocator. Sharing the Renderer's allocator meant
+        // Unload disposed the materials' UBOs but left their set-1 descriptors allocated FOREVER, so a
+        // load/unload streaming loop (the very reason this registry exists) grew the GPU's descriptor memory
+        // without bound — invisibly, because the leak gate counts pools, not sets. Owning the allocator per model
+        // makes Unload release the pools too, in one shot.
+        var materialAllocator = new DescriptorAllocator(device);
 
+        ModelResources resources;
+        try
+        {
+            // The builder creates the GPU objects (and disposes them itself if it throws part-way); the registry
+            // assigns the handles, so handle minting lives in exactly one place.
+            resources = SceneBuilder.Build(device, model, materialAllocator, materialSetLayout);
+        }
+        catch
+        {
+            materialAllocator.Dispose();
+            throw;
+        }
+
+        // Everything below can still throw (three allocations, and the slot tables resize internally). Without
+        // this guard the GPU objects the builder just created would be unreachable AND undisposed — a leak with
+        // no owner left to blame (audit M3).
         var meshHandles = new MeshHandle[resources.Meshes.Length];
-        for (var i = 0; i < resources.Meshes.Length; i++)
-        {
-            var (index, generation) = _meshes.Add(resources.Meshes[i]);
-            meshHandles[i] = new MeshHandle(index, generation);
-        }
-
         var materialHandles = new MaterialHandle[resources.Materials.Length];
-        for (var i = 0; i < resources.Materials.Length; i++)
+        var mintedMeshes = 0;
+        var mintedMaterials = 0;
+        try
         {
-            var (index, generation) = _materials.Add(resources.Materials[i]);
-            materialHandles[i] = new MaterialHandle(index, generation);
-        }
+            for (var i = 0; i < resources.Meshes.Length; i++)
+            {
+                var (index, generation) = _meshes.Add(resources.Meshes[i]);
+                meshHandles[i] = new MeshHandle(index, generation);
+                mintedMeshes++;
+            }
 
-        var specs = new ImportedEntitySpec[resources.Entries.Length];
-        for (var i = 0; i < specs.Length; i++)
+            for (var i = 0; i < resources.Materials.Length; i++)
+            {
+                var (index, generation) = _materials.Add(resources.Materials[i]);
+                materialHandles[i] = new MaterialHandle(index, generation);
+                mintedMaterials++;
+            }
+
+            var specs = new ImportedEntitySpec[resources.Entries.Length];
+            for (var i = 0; i < specs.Length; i++)
+            {
+                var entry = resources.Entries[i];
+                specs[i] = new ImportedEntitySpec(
+                    meshHandles[i],
+                    materialHandles[entry.LocalMaterialIndex],
+                    entry.Position + worldOrigin,
+                    entry.RotationScale,
+                    entry.BoundsMin + worldOrigin,
+                    entry.BoundsMax + worldOrigin,
+                    (uint)i);
+            }
+
+            _models.Add(new LoadedModel(resources, meshHandles, materialHandles));
+            return (_models.Count - 1, specs);
+        }
+        catch
         {
-            var entry = resources.Entries[i];
-            specs[i] = new ImportedEntitySpec(
-                meshHandles[i],
-                materialHandles[entry.LocalMaterialIndex],
-                entry.Position + worldOrigin,
-                entry.RotationScale,
-                entry.BoundsMin + worldOrigin,
-                entry.BoundsMax + worldOrigin,
-                (uint)i);
-        }
+            // Give back the slots taken so far (else the tables keep orphans that nothing can ever free), then
+            // release the GPU resources.
+            for (var i = 0; i < mintedMaterials; i++)
+            {
+                _materials.Free(materialHandles[i].Index);
+            }
 
-        _models.Add(new LoadedModel(resources, meshHandles, materialHandles));
-        return (_models.Count - 1, specs);
+            for (var i = 0; i < mintedMeshes; i++)
+            {
+                _meshes.Free(meshHandles[i].Index);
+            }
+
+            DisposeResources(resources);
+            throw;
+        }
     }
 
     /// <summary>
-    /// Disposes a loaded model's GPU resources and frees its slots, bumping their generation so every handle it
-    /// minted becomes permanently stale (resolving one is then an explicit error, not a wrong draw). Entities
-    /// still referencing the model must be despawned by the caller — the registry cannot see the world.
+    /// Disposes a loaded model's GPU resources — including its descriptor pools — and frees its slots, bumping
+    /// their generation so every handle it minted becomes permanently stale (resolving one is then an explicit
+    /// error, not a wrong draw). Entities still referencing the model must be despawned by the caller: the
+    /// registry cannot see the world.
+    /// <para>
+    /// <b>The GPU must be idle.</b> The model's <see cref="DescriptorAllocator"/> destroys its pools
+    /// synchronously, so a set still referenced by an in-flight frame would be destroyed under the GPU's feet.
+    /// Wait on the frame renderer before calling this.
+    /// </para>
     /// </summary>
     public void Unload(int modelId)
     {
@@ -128,20 +177,36 @@ public sealed class ResourceRegistry : IDisposable
 
     /// <summary>The name of a loaded model, for diagnostics.</summary>
     public string NameOf(int modelId)
-        => (uint)modelId < (uint)_models.Count && _models[modelId] is { } loaded
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        return (uint)modelId < (uint)_models.Count && _models[modelId] is { } loaded
             ? loaded.Resources.Name
             : throw new GraphicsException($"Model id {modelId} is not loaded.");
+    }
 
     /// <summary>
     /// Resolves a mesh handle. An out-of-range index, a freed slot, or a generation mismatch (a stale handle from
-    /// an unloaded model) is a hard error (spec §4) — never a silently wrong draw.
+    /// an unloaded model) is a hard error (spec §4) — never a silently wrong draw. Resolving after
+    /// <see cref="Dispose"/> throws too: it used to hand back a destroyed <see cref="Mesh"/>, which the renderer
+    /// would happily bind — a use-after-free instead of the explicit error this promises (audit M3).
     /// </summary>
-    public Mesh Resolve(MeshHandle handle) => _meshes.Resolve(handle.Index, handle.Generation);
+    public Mesh Resolve(MeshHandle handle)
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        return _meshes.Resolve(handle.Index, handle.Generation);
+    }
 
     /// <inheritdoc cref="Resolve(MeshHandle)"/>
-    public Material Resolve(MaterialHandle handle) => _materials.Resolve(handle.Index, handle.Generation);
+    public Material Resolve(MaterialHandle handle)
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        return _materials.Resolve(handle.Index, handle.Generation);
+    }
 
-    /// <summary>Releases every loaded model, in reverse load order.</summary>
+    /// <summary>
+    /// Releases every loaded model, in reverse load order. The caller must have waited for the GPU to idle: the
+    /// per-model descriptor allocators destroy their pools synchronously.
+    /// </summary>
     public void Dispose()
     {
         if (_disposed)
@@ -155,6 +220,18 @@ public sealed class ResourceRegistry : IDisposable
         {
             if (_models[i] is { } loaded)
             {
+                // Free the slots as well, so every handle this registry ever minted is left stale rather than
+                // pointing at a destroyed resource.
+                foreach (var handle in loaded.MaterialHandles)
+                {
+                    _materials.Free(handle.Index);
+                }
+
+                foreach (var handle in loaded.MeshHandles)
+                {
+                    _meshes.Free(handle.Index);
+                }
+
                 DisposeResources(loaded.Resources);
                 _models[i] = null;
             }
@@ -186,5 +263,10 @@ public sealed class ResourceRegistry : IDisposable
         }
 
         resources.SamplerCache.Dispose();
+
+        // Last: the model's own descriptor allocator. Its pools carry every set-1 descriptor of the materials
+        // disposed above, and a set can only die with its pool — this is what makes an unload actually give the
+        // descriptor memory back (audit M3).
+        resources.MaterialAllocator.Dispose();
     }
 }

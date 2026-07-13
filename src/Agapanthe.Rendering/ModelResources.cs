@@ -16,6 +16,7 @@ internal sealed record ModelResources(
     GpuImage[] Textures,
     GpuImage[] Placeholders,
     SamplerCache SamplerCache,
+    DescriptorAllocator MaterialAllocator,
     string Name,
     MeshEntry[] Entries);
 

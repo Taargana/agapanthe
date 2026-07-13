@@ -65,17 +65,51 @@ internal static class ShadowFit
         }
         else
         {
-            center = SnapToTexelGrid(frustumCenter, dir, frustumRadius, shadowResolution);
+            center = SnapToTexelGrid(frustumCenter, view.Origin, dir, frustumRadius, shadowResolution);
             radius = frustumRadius;
         }
 
-        // The eye sits back along the light direction far enough that casters BEHIND the fitted sphere (which
-        // are off-screen, but whose shadows fall into it) are still inside the depth range.
+        // Depth range. The eye must sit UPSTREAM of every caster: a caster outside the fitted sphere still throws
+        // its shadow INTO it, and one that falls outside the light's depth range is clipped — it simply stops
+        // casting. A fixed setback (the eye at 2r with a [0.5r, 3.5r] range) only leaves 0.5r of room upstream, so
+        // a tall building behind the frustum would drop its shadow silently. Measure the real upstream extent of
+        // the world along the light instead.
         var up = MathF.Abs(dir.Y) > 0.99f ? Vector3.UnitZ : Vector3.UnitY;
-        var eye = center - (dir * (radius * 2f));
+        var upstream = UpstreamExtent(in sceneBounds, view.Origin, center, dir);
+        var eyeDistance = MathF.Max(radius * 2f, upstream + radius);
+        var eye = center - (dir * eyeDistance);
+
         var lightView = MathHelpers.LookAt(eye, center, up);
-        var lightProj = MathHelpers.OrthographicVulkan(2f * radius, 2f * radius, radius * 0.5f, radius * 3.5f);
+        var lightProj = MathHelpers.OrthographicVulkan(
+            2f * radius, 2f * radius, MathF.Max(radius * 0.01f, 1e-4f), eyeDistance + radius);
         return lightView * lightProj;
+    }
+
+    /// <summary>
+    /// How far the scene extends UPSTREAM of the fitted centre along the light (i.e. on the side the light comes
+    /// from), in the frame's camera-relative space. That is the distance the light's eye must clear for every
+    /// caster to stay inside the depth range. Lateral casters are NOT covered — the ortho box is exactly the
+    /// fitted sphere, and widening it would cost shadow resolution everywhere; the answer to those is to cull the
+    /// caster list against the light volume (spec §3.5, M4).
+    /// </summary>
+    private static float UpstreamExtent(in Double3Bounds bounds, Double3 origin, Vector3 center, Vector3 dir)
+    {
+        if (bounds.IsEmpty)
+        {
+            return 0f;
+        }
+
+        var min = bounds.Min.ToVector3(origin);
+        var max = bounds.Max.ToVector3(origin);
+
+        // The most upstream corner of the AABB along the light: pick, per axis, whichever bound lies further
+        // against the light direction. dot(center - corner, dir) is then the extent we must clear.
+        var corner = new Vector3(
+            dir.X > 0f ? min.X : max.X,
+            dir.Y > 0f ? min.Y : max.Y,
+            dir.Z > 0f ? min.Z : max.Z);
+
+        return MathF.Max(Vector3.Dot(center - corner, dir), 0f);
     }
 
     /// <summary>
@@ -148,14 +182,11 @@ internal static class ShadowFit
     /// by a fraction of a texel shifts the whole map by that fraction, and every shadow edge crawls along the
     /// surfaces — the classic shimmer. Snapped, the map moves in whole texels: the edges stay put.
     /// </summary>
-    private static Vector3 SnapToTexelGrid(Vector3 center, Vector3 dir, float radius, uint resolution)
+    private static Vector3 SnapToTexelGrid(
+        Vector3 center, Double3 origin, Vector3 dir, float radius, uint resolution)
     {
         var up = MathF.Abs(dir.Y) > 0.99f ? Vector3.UnitZ : Vector3.UnitY;
         var lightRotation = MathHelpers.LookAt(Vector3.Zero, dir, up); // rotation only: the eye is irrelevant here
-        if (!Matrix4x4.Invert(lightRotation, out var inverseRotation))
-        {
-            return center;
-        }
 
         var texelSize = 2f * radius / resolution;
         if (texelSize <= 0f)
@@ -163,10 +194,30 @@ internal static class ShadowFit
             return center;
         }
 
-        var inLight = Vector3.Transform(center, lightRotation);
-        inLight.X = MathF.Floor(inLight.X / texelSize) * texelSize;
-        inLight.Y = MathF.Floor(inLight.Y / texelSize) * texelSize;
-        // Z is NOT snapped: depth is not quantized by the map's texel grid, only x/y are.
-        return Vector3.Transform(inLight, inverseRotation);
+        // The grid must be anchored to the WORLD, not to the eye. Quantizing the camera-relative centre would be a
+        // no-op: that centre does not depend on where the eye IS (the view is rotation-only), so it never moves
+        // under a pure translation and there is nothing for the floor() to bite on — while the geometry handed to
+        // the shadow pass shifts by −Δcamera every frame. The map would slide continuously and every edge would
+        // crawl: exactly the shimmer this is meant to kill.
+        //
+        // But only the PHASE may travel through absolute coordinates. Round-tripping the absolute centre itself
+        // through the (float) light rotation would amplify that matrix's ~1e-7 relative error into METRES at
+        // 1e7 m — the grid phase would then jitter with the camera and the shimmer would come straight back.
+        // So: take the light-space coordinate of the origin (double, accurate), use it only to work out how far
+        // the grid is offset, and apply that small delta to the camera-relative centre.
+        var centerInLight = new Double3(center).TransformBy(lightRotation);
+        var originInLight = origin.TransformBy(lightRotation);
+        var absoluteX = centerInLight.X + originInLight.X;
+        var absoluteY = centerInLight.Y + originInLight.Y;
+
+        // A displacement of at most one texel — small, so it survives the trip back through the float rotation.
+        var deltaX = (Math.Floor(absoluteX / texelSize) * texelSize) - absoluteX;
+        var deltaY = (Math.Floor(absoluteY / texelSize) * texelSize) - absoluteY;
+
+        // Z is NOT snapped: only the map's x/y are quantized by its texel grid.
+        var snappedInLight = new Double3(centerInLight.X + deltaX, centerInLight.Y + deltaY, centerInLight.Z);
+
+        // A rotation's inverse is its transpose — exactly, with the same entries, so no Invert() error.
+        return snappedInLight.TransformBy(Matrix4x4.Transpose(lightRotation)).ToVector3(Double3.Zero);
     }
 }

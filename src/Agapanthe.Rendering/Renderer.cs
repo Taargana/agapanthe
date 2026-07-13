@@ -17,12 +17,12 @@ namespace Agapanthe.Rendering;
 ///   and bound every frame in <see cref="DrawScene"/>. Visible to the vertex stage only (M4: the fragment
 ///   shader does not read the camera; that is revisited if/when M5 needs view-space lighting).</item>
 ///   <item><b>Set 1</b> — per-material PBR (<see cref="MaterialLayout"/>), allocated from
-///   <see cref="MaterialAllocator"/> by <see cref="SceneBuilder"/> and bound per instance.</item>
+///   the model's own descriptor allocator (owned by the <see cref="ResourceRegistry"/>) and bound per instance.</item>
 /// </list>
 /// <para>
 /// <b>Ownership.</b> The Renderer owns its shaders, both set layouts, the material allocator, the pipeline
 /// and the camera UBOs. It does <b>not</b> own any <see cref="Scene"/> (the caller builds and disposes those
-/// against <see cref="MaterialAllocator"/> / <see cref="MaterialSetLayout"/>). <see cref="Dispose"/> releases
+/// against <see cref="MaterialSetLayout"/>). <see cref="Dispose"/> releases
 /// the owned objects but does <b>not</b> wait for the GPU to idle — the caller must
 /// <see cref="FrameRenderer.WaitIdle"/> first, because the material allocator destroys its pools
 /// synchronously and the camera UBOs may still be referenced by in-flight frames.
@@ -86,7 +86,6 @@ public sealed class Renderer : IDisposable
     // descriptor allocator. Owned here; ScenePass borrows the two layouts to build its pipeline.
     private DescriptorSetLayout? _frameSetLayout;
     private DescriptorSetLayout? _materialSetLayout;
-    private DescriptorAllocator? _materialAllocator;
 
     // The four reloadable passes (M8-04 seam). Each POSSESSES its shader modules, its GraphicsPipeline and a
     // copy of the stable pipeline description (formats, set layouts, cull/depth — everything but the modules),
@@ -201,7 +200,6 @@ public sealed class Renderer : IDisposable
             // Set 1 = per-material, frozen 6-binding PBR shape. The allocator is public so SceneBuilder can
             // allocate persistent material sets against this layout.
             _materialSetLayout = MaterialLayout.CreateLayout(device);
-            _materialAllocator = new DescriptorAllocator(device);
 
             for (var i = 0; i < _cameraUbos.Length; i++)
             {
@@ -299,9 +297,6 @@ public sealed class Renderer : IDisposable
             throw;
         }
     }
-
-    /// <summary>The persistent per-material descriptor allocator (set 1). Passed to <see cref="SceneBuilder"/>.</summary>
-    public DescriptorAllocator MaterialAllocator => _materialAllocator!;
 
     /// <summary>The frozen set-1 layout (<see cref="MaterialLayout"/>). Passed to <see cref="SceneBuilder"/>.</summary>
     public DescriptorSetLayout MaterialSetLayout => _materialSetLayout!;
@@ -793,7 +788,7 @@ public sealed class Renderer : IDisposable
         // zero and the view carries no translation. mesh.frag's V = normalize(eyePos - worldPos) therefore becomes
         // normalize(-worldPos) with no shader change: both sides are already camera-relative.
         var ubo = _cameraUbos[frame.Slot]!;
-        var uniforms = new CameraUniforms(view.View, view.Projection, Vector3.Zero);
+        var uniforms = new CameraUniforms(view.View, view.Projection, view.EyeRelative);
         ubo.Write(new ReadOnlySpan<CameraUniforms>(in uniforms));
 
         var lightsUbo = _lightsUbos[frame.Slot]!;
@@ -1000,7 +995,6 @@ public sealed class Renderer : IDisposable
 
         _materialSetLayout?.Dispose();
         _frameSetLayout?.Dispose();
-        _materialAllocator?.Dispose();
         for (var i = 0; i < _cameraUbos.Length; i++)
         {
             _cameraUbos[i]?.Dispose();
@@ -1011,7 +1005,6 @@ public sealed class Renderer : IDisposable
 
         _materialSetLayout = null;
         _frameSetLayout = null;
-        _materialAllocator = null;
         _shaderCompiler = null;
     }
 }
