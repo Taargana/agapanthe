@@ -28,9 +28,9 @@
 
 `objet − snap(eye) = (objet − eye) + (eye − snap(eye))`. Le 2e terme (offset sous-cellule de l'œil) **diffère selon la position absolue** → les float intermédiaires ne sont plus bit-identiques entre le run à l'origine et le run lointain. **Le résultat en espace vue reste exact** (la `View` porte `−(eye−Origin)` qui l'annule), mais l'arrondi intermédiaire non.
 
-> **Reformulation** : « loin == origine » est **bit-exact SSI le déplacement est un multiple entier de la maille** ; pour un déplacement quelconque, c'est **≤ 1 LSB/canal**.
+> **Reformulation (mesurée en W1)** : « loin == origine » est **bit-exact SSI le déplacement est un multiple entier de la maille** (offset sous-cellule identique). Pour un déplacement quelconque : **visuellement indiscernable**, gros de la distribution à 1 LSB ; le résidu est confiné au **spéculaire**, où le miroir amplifie un offset d'œil lui-même ≤ 1 ULP à la magnitude des coordonnées. Le « ≤ 1 LSB par canal » du plan initial est **faux pris à la lettre** sur une scène chrome — c'est une propriété de rendu, pas une faute de précision.
 
-→ Le test de régression M3 **garde ses dents** si on place la caméra lointaine à un **multiple de la maille** (offset sous-cellule identique). Un **2e** test prouve le ≤ 1 LSB sur un déplacement non aligné. Sans ce découpage, le test M3 devient rouge et on croit à une régression alors que c'est la quantification qui parle.
+→ Le test de régression M3 **garde ses dents** en plaçant la caméra lointaine à un **multiple de la maille**. En W1 : correctif skybox (rayon reconstruit depuis la rotation de vue seule, jamais `point_monde − œil`) → le fond redevient origin-exact ; l'écart non-aligné tombe de 31 % à 0,9 % des canaux, résidu 100 % sur le casque chrome.
 
 ### Culling : linéaire, pas de structure spatiale (D4)
 

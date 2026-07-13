@@ -621,15 +621,34 @@ public sealed class Renderer : IDisposable
         }
     }
 
+    /// <summary>
+    /// The directional light's <c>view · proj</c> for this frame — see <see cref="ShadowFit"/> for the fit itself
+    /// (camera frustum, capped by <see cref="ShadowDistance"/>, never wider than the scene, texel-snapped).
+    /// Row-vector: a camera-relative point maps to light clip space as <c>p · result</c>, and std140 uploads it
+    /// transposed so the shaders multiply <c>result * vec4(worldPos, 1)</c>. One cascade (CSM is out of scope).
+    /// <para>
+    /// Public and computed by the CALLER before <see cref="DrawScene"/> (M4): the caller derives the light
+    /// volume's <see cref="Frustum"/> from this matrix and culls the shadow-caster list against it — which must
+    /// happen before the list is built, hence before the draw. Fitted in the frame's camera-relative space
+    /// (<see cref="RenderView.Origin"/>), the space the shaders receive world positions in.
+    /// </para>
+    /// </summary>
+    public Matrix4x4 ComputeLightViewProj(in RenderView view, in Double3Bounds sceneBounds)
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        return ShadowFit.ComputeLightViewProj(
+            in view, in sceneBounds, Lights.Directional.Direction, ShadowDistance, ShadowMapResolution);
+    }
+
     public void DrawScene(
         RenderList renderList,
         RenderList shadowCasters,
         ResourceRegistry registry,
         in RenderView view,
+        in Matrix4x4 lightViewProj,
         CommandList cmd,
         FrameContext frame,
-        SwapchainTarget target,
-        in Double3Bounds sceneBounds)
+        SwapchainTarget target)
     {
         ArgumentNullException.ThrowIfNull(renderList);
         ArgumentNullException.ThrowIfNull(shadowCasters);
@@ -647,25 +666,12 @@ public sealed class Renderer : IDisposable
         // resolution-invariant and lives outside this.
         EnsureTargets(target.Width, target.Height);
 
-        // One light-space transform per frame, shared by the shadow pass (render depth) and the scene pass
-        // (pack into the lights UBO for the PCF lookup). Fitted in the SAME camera-relative frame as the render
-        // lists (view.Origin), because that is the space the vertex/fragment stages hand it world positions in.
-        var lightViewProj = ComputeLightViewProj(in view, in sceneBounds);
-
+        // lightViewProj is computed by the caller (before the caster list is culled against the light volume) and
+        // shared by the shadow pass (render depth) and the scene pass (pack into the lights UBO for the PCF lookup).
         RecordShadowPass(cmd, shadowCasters, registry, in lightViewProj);
         RecordScenePass(cmd, frame, renderList, registry, in view, target, in lightViewProj);
         RecordTonemapPass(cmd, frame, target);
     }
-
-    /// <summary>
-    /// The directional light's <c>view · proj</c> for this frame — see <see cref="ShadowFit"/> for the fit
-    /// itself (camera frustum, capped by <see cref="ShadowDistance"/>, never wider than the scene, texel-snapped).
-    /// Row-vector: a camera-relative point maps to light clip space as <c>p · result</c>, and std140 uploads it
-    /// transposed so the shaders multiply <c>result * vec4(worldPos, 1)</c>. One cascade (CSM is out of scope).
-    /// </summary>
-    private Matrix4x4 ComputeLightViewProj(in RenderView view, in Double3Bounds sceneBounds)
-        => ShadowFit.ComputeLightViewProj(
-            in view, in sceneBounds, Lights.Directional.Direction, ShadowDistance, ShadowMapResolution);
 
     /// <summary>
     /// Pass 0 (M6, decision 7): renders scene depth from the directional light's viewpoint into the shadow

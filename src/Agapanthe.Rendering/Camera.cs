@@ -70,23 +70,28 @@ public sealed class Camera
     /// <summary>Unit up vector of the camera basis, <c>cross(right, forward)</c>.</summary>
     public Vector3 Up => Vector3.Cross(Right, Forward);
 
-    /// <summary>
-    /// Right-handed view matrix looking along <see cref="Forward"/>, <b>rotation only</b>: the eye sits at the
-    /// origin of the frame being rendered (spec §3.3), so the view carries no translation. The eye's world
-    /// position is instead subtracted from every object, in double, when the render lists are built — which is
-    /// what keeps precision far from the world origin.
-    /// </summary>
-    public Matrix4x4 ViewMatrix => MathHelpers.LookAt(Vector3.Zero, Forward, Vector3.UnitY);
-
     /// <summary>Vulkan perspective projection (Y flipped, depth [0,1]).</summary>
     public Matrix4x4 ProjectionMatrix => MathHelpers.PerspectiveVulkan(FovY, AspectRatio, Near, Far);
 
     /// <summary>
-    /// The frame's <see cref="RenderView"/>: this camera's position as the camera-relative origin, plus the
-    /// rotation-only view and the projection. Build it ONCE per frame and pass it to both the world (which
-    /// narrows every object against <see cref="RenderView.Origin"/>) and the renderer (which narrows the lights
-    /// and the shadow fit against the same origin) — one origin per frame, by construction.
+    /// The frame's <see cref="RenderView"/> (M4): the camera-relative origin is this camera's position
+    /// <b>snapped to the <see cref="RenderView.CellSize"/> grid</b>, the eye sits at <c>Position − Origin</c>
+    /// within the frame, and the view matrix carries that sub-cell translation. Build it ONCE per frame and pass
+    /// it to both the world (which narrows every object against <see cref="RenderView.Origin"/>) and the renderer
+    /// (lights + shadow fit against the same origin) — one origin per frame, by construction.
+    /// <para>
+    /// Snapping the origin (rather than tracking the eye exactly, as M3 did) keeps a static object's
+    /// camera-relative position stable frame to frame: it only shifts when the camera crosses a cell boundary.
+    /// The precision cost is that the same scene, seen from a position that is NOT a whole number of cells away,
+    /// no longer round-trips bit-for-bit (the sub-cell eye offset differs) — the on-screen result is identical,
+    /// but the intermediate floats are not. See <see cref="RenderView"/>.
+    /// </para>
     /// </summary>
     public RenderView CreateView()
-        => new(Position, ViewMatrix, ProjectionMatrix, FovY, AspectRatio, Near, Far);
+    {
+        var origin = RenderView.Snap(Position);
+        var eyeRelative = (Position - origin).ToVector3(Double3.Zero); // bounded by one cell
+        var view = MathHelpers.LookAt(eyeRelative, eyeRelative + Forward, Vector3.UnitY);
+        return new RenderView(origin, eyeRelative, in view, ProjectionMatrix, FovY, AspectRatio, Near, Far);
+    }
 }

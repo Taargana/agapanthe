@@ -9,38 +9,57 @@ public class CameraTests
     private const float MaxPitch = 89f * (MathF.PI / 180f);
 
     [Fact]
-    public void ViewMatrix_IsRotationOnly_AndMapsCameraRelativePointsToNegativeViewZ()
+    public void CreateView_SnapsTheOriginAndPlacesTheEyeWithinTheCell()
     {
-        // Camera-relative rendering (spec §3.3): the eye is the origin of the frame, so the view matrix carries
-        // NO translation whatever the camera's world position — the eye's position is instead subtracted from
-        // every object when the render lists are built. The world origin, seen from (0,0,5), is the
-        // camera-relative point (0,0,-5): 5 units ahead, so it lands at view-space z = -5 (right-handed view
-        // space looks down its own -Z).
+        // M4 quantized origin: the origin snaps DOWN to the cell grid, and the eye sits at the sub-cell offset.
+        // Cell = 1024 m. Eye at (1500, 0, -700) → origin (1024, 0, -1024), eyeRelative (476, 0, 324).
+        var camera = new Camera { Position = new Double3(1500, 0, -700) };
+
+        var view = camera.CreateView();
+
+        Assert.Equal(new Double3(1024, 0, -1024), view.Origin);
+        Assert.Equal(476f, view.EyeRelative.X, 4);
+        Assert.Equal(0f, view.EyeRelative.Y, 4);
+        Assert.Equal(324f, view.EyeRelative.Z, 4);
+        Assert.Equal(camera.ProjectionMatrix, view.Projection);
+    }
+
+    [Fact]
+    public void CreateView_SnappedRendering_MatchesTheExactCameraRelativeRendering()
+    {
+        // Quantization must not move anything on screen: a world point projected through the snapped view
+        // (origin on the grid, eye offset within the cell) must land where the exact M3 camera-relative setup
+        // (eye AT the origin) puts it. Origin and eyeRelative differ; the view's translation cancels the
+        // difference exactly.
+        var camera = new Camera { Position = new Double3(1500.3, 12.7, -700.9) };
+        var worldPoint = new Double3(2000, 10, -300);
+
+        var view = camera.CreateView();
+        var snapped = Vector4.Transform(new Vector4(worldPoint.ToVector3(view.Origin), 1f), view.View);
+
+        // Reference: eye exactly at the origin (rotation-only view), point narrowed against the eye itself.
+        var refView = MathHelpers.LookAt(Vector3.Zero, camera.Forward, Vector3.UnitY);
+        var refRel = (worldPoint - camera.Position).ToVector3(Double3.Zero);
+        var reference = Vector4.Transform(new Vector4(refRel, 1f), refView);
+
+        Assert.Equal(reference.X, snapped.X, 3);
+        Assert.Equal(reference.Y, snapped.Y, 3);
+        Assert.Equal(reference.Z, snapped.Z, 3);
+    }
+
+    [Fact]
+    public void CreateView_LooksDownNegativeZ_AtDefaultOrientation()
+    {
+        // A point 5 m ahead of the eye maps to view-space z = -5 (right-handed view space looks down its own -Z).
         var camera = new Camera { Position = new Double3(0, 0, 5) };
-        var view = camera.ViewMatrix;
+        var view = camera.CreateView();
 
-        Assert.Equal(0f, view.M41);
-        Assert.Equal(0f, view.M42);
-        Assert.Equal(0f, view.M43);
-
-        var viewSpace = Vector4.Transform(new Vector4(0f, 0f, -5f, 1f), view);
+        // Eye at (0,0,5) within the cell (origin snapped to 0); a point 5 m ahead is (0,0,0) in frame space.
+        var viewSpace = Vector4.Transform(new Vector4(0f, 0f, 0f, 1f), view.View);
 
         Assert.Equal(0f, viewSpace.X, 5);
         Assert.Equal(0f, viewSpace.Y, 5);
         Assert.Equal(-5f, viewSpace.Z, 5);
-    }
-
-    [Fact]
-    public void CreateView_CarriesThePositionAsTheOrigin()
-    {
-        // The whole frame — world, lights, shadow fit — subtracts THIS origin, and nothing else (spec §3.3).
-        var camera = new Camera { Position = new Double3(1e7, 0, -3e6) };
-
-        var view = camera.CreateView();
-
-        Assert.Equal(camera.Position, view.Origin);
-        Assert.Equal(camera.ViewMatrix, view.View);
-        Assert.Equal(camera.ProjectionMatrix, view.Projection);
     }
 
     [Fact]

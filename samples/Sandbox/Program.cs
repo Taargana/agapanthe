@@ -182,13 +182,19 @@ window.Loaded += () =>
     // AggregateBounds is NOT re-run per frame: nothing moves in M2, so the extent is folded once above.
     drawScene = (cmd, frame, target) =>
     {
-        // ONE view per frame (spec §3.3): the world narrows every object against view.Origin, and the renderer
-        // narrows the lights and the shadow fit against the same one. A single value = a single origin.
+        // ONE view per frame (spec §3.3): the world narrows every object against view.Origin, and the light fit
+        // uses the same one. A single value = a single origin.
         var view = camera.CreateView();
         world!.PropagateTransforms();
+
+        // Frame order (M4): the light matrix is computed HERE, before the render lists — so the shadow-caster
+        // list can be culled against the light volume derived from it (that culling arrives in W2; for now the
+        // lists are still passthrough). Hoisting it out of DrawScene is what makes that ordering possible.
+        var lightViewProj = renderer!.ComputeLightViewProj(in view, in sceneBounds);
         world.CollectRenderLists(renderList, shadowCasters, view.Origin);
-        renderer!.DrawScene(
-            renderList, shadowCasters, registry!, in view, cmd, frame, target, in sceneBounds);
+
+        renderer.DrawScene(
+            renderList, shadowCasters, registry!, in view, in lightViewProj, cmd, frame, target);
     };
 
     // Camera-relative proof (spec §3.3): both are world-space doubles, and the GPU sees neither — it only ever

@@ -13,17 +13,15 @@ public sealed class ShadowFitTests
     private static readonly Vector3 Sun = Vector3.Normalize(new Vector3(0.4f, -0.7f, -0.6f));
     private const uint Resolution = 2048;
 
+    // Builds a RenderView DIRECTLY with the given origin and the eye at that origin (eyeRelative = 0), bypassing
+    // Camera.CreateView's cell snapping — these tests exercise ShadowFit, not the M4 origin-quantization policy,
+    // so they want an origin they control exactly.
     private static RenderView View(Double3 origin, float yaw = 0f, float near = 0.1f, float far = 1000f)
     {
-        var camera = new Camera
-        {
-            Position = origin,
-            Yaw = yaw,
-            Near = near,
-            Far = far,
-            AspectRatio = 16f / 9f,
-        };
-        return camera.CreateView();
+        var camera = new Camera { Position = origin, Yaw = yaw, Near = near, Far = far, AspectRatio = 16f / 9f };
+        var view = MathHelpers.LookAt(Vector3.Zero, camera.Forward, Vector3.UnitY);
+        return new RenderView(
+            origin, Vector3.Zero, in view, camera.ProjectionMatrix, camera.FovY, camera.AspectRatio, near, far);
     }
 
     // The extent of the fitted ortho box along the light's right axis, recovered from the matrix: the ortho scales
