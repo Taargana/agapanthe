@@ -42,4 +42,74 @@
     </Content>
   </ItemGroup>
 
+  <!-- ============================ Offline SPIR-V pre-cook (Phase 2, P2-M1-04) ============================
+       A shipping (Release/AOT) build compiles no shaders at runtime and never loads shaderc (rule §2.1-2):
+       ShaderCompiler runs in cache-only mode and throws on a miss. This step fills that cache at build time by
+       running our own precompiler tool, which reuses the engine's ShaderCompiler + ShaderIncludeResolver so the
+       {stage}_{SHA256(resolved source)}.spv keys are identical to the ones the runtime looks up. The staged
+       .spv are then shipped as Content into .shadercache/ next to the exe — the runtime's default cache dir. -->
+  <!-- Staging cache lives under the project's obj/ (config-agnostic on purpose: our GLSL->SPIR-V is identical
+       across Debug/Release, so both configs share byte-identical .spv). MSBuildProjectDirectory is reliable at
+       top-level; IntermediateOutputPath is NOT yet expanded here. -->
+  <PropertyGroup>
+    <ShaderSourceDir>$([MSBuild]::NormalizeDirectory('$(MSBuildThisFileDirectory)..\..\shaders'))</ShaderSourceDir>
+    <ShaderPrecompilerProject>$([MSBuild]::NormalizePath('$(MSBuildThisFileDirectory)..\..\tools\ShaderPrecompiler\ShaderPrecompiler.csproj'))</ShaderPrecompilerProject>
+    <ShaderCacheStageDir>$([MSBuild]::NormalizeDirectory('$(MSBuildProjectDirectory)\obj\shadercache'))</ShaderCacheStageDir>
+    <ShaderCacheStamp>$(ShaderCacheStageDir).precooked.stamp</ShaderCacheStamp>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ShaderSourceFile Include="$(ShaderSourceDir)**\*.vert;$(ShaderSourceDir)**\*.frag;$(ShaderSourceDir)**\*.comp" />
+  </ItemGroup>
+
+  <!-- Incremental: only re-cooks when a shader source changes. RemoveProperties isolates the tool's build from
+       an outer `dotnet publish -r … ` so the tool stays a plain managed net10.0 assembly (no RID / no AOT).
+       Paths are passed to Exec without their trailing backslash: a quoted "...\" would escape the quote and
+       merge the arguments (the tool would then see the wrong argc). -->
+  <Target Name="PrecompileShaders"
+          Inputs="@(ShaderSourceFile)"
+          Outputs="$(ShaderCacheStamp)">
+    <MSBuild Projects="$(ShaderPrecompilerProject)"
+             Targets="Build"
+             Properties="Configuration=$(Configuration)"
+             RemoveProperties="RuntimeIdentifier;SelfContained;PublishAot;PublishTrimmed;PublishSingleFile">
+      <Output TaskParameter="TargetOutputs" ItemName="_ShaderPrecompilerAssembly" />
+    </MSBuild>
+    <MakeDir Directories="$(ShaderCacheStageDir)" />
+    <Exec Command="dotnet exec &quot;@(_ShaderPrecompilerAssembly)&quot; &quot;$(ShaderSourceDir.TrimEnd('\'))&quot; &quot;$(ShaderCacheStageDir.TrimEnd('\'))&quot;" />
+    <Touch Files="$(ShaderCacheStamp)" AlwaysCreate="true" />
+  </Target>
+
+  <!-- Always runs (after PrecompileShaders, before Content target-paths are assigned) so the .spv are added as
+       Content even on a build where the pre-cook step above was up-to-date and skipped. -->
+  <Target Name="IncludePrecompiledShaders"
+          DependsOnTargets="PrecompileShaders"
+          BeforeTargets="AssignTargetPaths">
+    <!-- Pre-expand the wildcard into concrete file items FIRST, then feed those to Content. A wildcard given
+         directly to <Content Include> inside a target is not reliably re-globbed for the copy-to-output step
+         (it ships nothing); expanding it into an intermediate item forces immediate filesystem evaluation. -->
+    <ItemGroup>
+      <_PrecookedSpv Include="$(ShaderCacheStageDir)*.spv" />
+      <Content Include="@(_PrecookedSpv)" Link=".shadercache\%(Filename)%(Extension)">
+        <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      </Content>
+    </ItemGroup>
+  </Target>
+
+  <!-- A Release build ships pre-cooked SPIR-V and runs ShaderCompiler in cache-only mode, so the native shaderc
+       library is never loaded (rule §2.1-2, proven: an AOT run with cache-only never logs a cache miss). Drop
+       the 6.6 MB shaderc_shared.dll from Release output and publish so it is not shipped at all — the literal
+       aim of this milestone. Debug keeps it: hot reload compiles GLSL at runtime. Delete ignores absent files,
+       so this is harmless when no RID/native copy is present. -->
+  <Target Name="StripShadercFromRelease"
+          Condition="'$(Configuration)' == 'Release'"
+          AfterTargets="CopyFilesToOutputDirectory;Publish">
+    <ItemGroup>
+      <_ShadercNativeToStrip Include="$(OutDir)shaderc_shared.dll;$(OutDir)runtimes\**\shaderc_shared.dll" />
+      <_ShadercNativeToStrip Include="$(PublishDir)shaderc_shared.dll;$(PublishDir)runtimes\**\shaderc_shared.dll"
+                             Condition="'$(PublishDir)' != ''" />
+    </ItemGroup>
+    <Delete Files="@(_ShadercNativeToStrip)" />
+  </Target>
+
 </Project>

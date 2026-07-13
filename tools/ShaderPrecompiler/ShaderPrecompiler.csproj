@@ -1,0 +1,19 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- Build-time only tool (Phase 2, P2-M1-04): pre-cooks the GLSL shaders to SPIR-V using the engine's own
+       ShaderCompiler so the disk-cache keys are identical to the ones the runtime looks up. It is deliberately
+       NOT referenced by any shipping project (a ProjectReference would drag shaderc into the AOT closure); the
+       Sandbox build invokes it via a nested <MSBuild> + <Exec> instead. Plain managed console, never AOT. -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\Agapanthe.Graphics\Agapanthe.Graphics.csproj" />
+    <ProjectReference Include="..\..\src\Agapanthe.Core\Agapanthe.Core.csproj" />
+  </ItemGroup>
+
+</Project>
