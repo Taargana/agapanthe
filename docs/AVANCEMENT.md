@@ -1,14 +1,14 @@
 # Agapanthe — Plan complet & état d'avancement
 
-**Mis à jour** : 2026-07-13 (session 12 — **PHASE 2 EN COURS**, **P2-M3 CLOS** — camera-relative rendering, capture à 10 000 km bit-identique à celle prise à l'origine, double audit PASS conditionnel) · **Machines de dev** : macOS (Apple M3, MoltenVK) + Windows 11 (RTX 5070 Ti, Vulkan 1.3 core) · **Cibles** : Windows / Linux / macOS
+**Mis à jour** : 2026-07-13 (session 13 — **PHASE 2 CLOSE** — frustum culling + montée en charge : 10 000 entités cullées à 10 000 km, 0 alloc/frame, en NativeAOT ; double audit signe la clôture) · **Machines de dev** : macOS (Apple M3, MoltenVK) + Windows 11 (RTX 5070 Ti, Vulkan 1.3 core) · **Cibles** : Windows / Linux / macOS
 
 ## Vision
 
-Moteur de jeu Vulkan en C# from scratch. **Phase 1 (TERMINÉE, 8/8)** : toute la chaîne graphique 3D, d'une fenêtre vide à une scène PBR complète — glTF, metallic-roughness, multi-lumières, ombres, skybox/IBL, hot reload shaders. **Phase 2 (EN COURS)** : transformer le viewer en moteur — fondations scalables (ECS, coordonnées grande échelle, culling, AOT). Physique/audio/gameplay = phases ultérieures.
+Moteur de jeu Vulkan en C# from scratch. **Phase 1 (TERMINÉE, 8/8)** : toute la chaîne graphique 3D, d'une fenêtre vide à une scène PBR complète — glTF, metallic-roughness, multi-lumières, ombres, skybox/IBL, hot reload shaders. **Phase 2 (TERMINÉE, 5/5)** : viewer → moteur — ECS (Arch), coordonnées `double` + camera-relative à origine quantifiée, couture render-list sans types GPU, frustum culling, montée en charge (10k entités cullées à 10 000 km, 0 alloc, NativeAOT). **Phase 3 (à venir)** : gameplay — lifecycle/scheduler, physique, sérialisation, audio.
 
 Spec Phase 1 : [docs/plans/2026-07-02-graphics-engine-design.md](plans/2026-07-02-graphics-engine-design.md) · **Spec Phase 2** : [docs/plans/2026-07-12-phase2-foundations-design.md](plans/2026-07-12-phase2-foundations-design.md) · Suivi de session : [.absolute-human/board.md](../.absolute-human/board.md) (+ archives par session)
 
-## Phase 2 — Fondations scalables (EN COURS)
+## Phase 2 — Fondations scalables (CLOSE — 5/5)
 
 **Cadre** (spec Phase 2) : la Phase 1 a livré un **viewer**, pas un moteur (`Mesh.WorldTransform` figé → rien ne bouge ; `Scene` mélange possession GPU et draw list). La Phase 2 pose **les fondations qui ne se retrofitent pas** : ECS (**Arch**), coordonnées monde `double` + camera-relative rendering, couture render-list (handles, pas de types GPU dans le monde), frustum culling. **Cible de sortie** : des milliers d'entités qui bougent, cullées, **à 10 000 km de l'origine sans trembler**, en NativeAOT, 0 leak. Horizon lointain (non construit ici, mais non condamné) : univers persistant streamé multi-serveurs.
 
@@ -21,8 +21,8 @@ Spec Phase 1 : [docs/plans/2026-07-02-graphics-engine-design.md](plans/2026-07-0
 | P2-M1 | Chemin SPIR-V hors-ligne | ✅ **PASSÉ** (S10) — double audit PASS, prod sans shaderc (prouvé Windows AOT) |
 | P2-M2 | Couture ECS : Arch + `ResourceRegistry` + 2 listes (passthrough, sans culling) — refactor **byte-identique** | ✅ **PASSÉ** (S11) — double audit PASS, capture byte-identique Debug + AOT |
 | P2-M3 | `Double3` + camera-relative rendering (précision grande distance) | ✅ **PASSÉ** (S12) — double audit PASS conditionnel, **10 000 km == origine, bit-pour-bit** |
-| P2-M4 | Frustum culling + montée en charge (= critère de sortie) | **prochain** |
-| P2-M5 | Audits + clôture | à venir |
+| P2-M4 | Frustum culling + montée en charge (= critère de sortie) | ✅ **PASSÉ** (S13) — **PHASE 2 CLOSE** · 10k cullées à 10 000 km, 0 alloc, AOT, double audit signe |
+| P2-M5 | Audits + clôture | ✅ **absorbé par M4** — le double audit de clôture a été mené dans W4 |
 
 **P2-M0 (gate AOT) — acquis clés** :
 - Le Sandbox **publie et tourne en NativeAOT** (binaire natif 4,3 Mo, capture **byte-identique à M8**). Prérequis : PATH avec `vswhere` (VS Installer) sinon le linker ILC échoue (code 123, non lié à l'AOT).
@@ -62,6 +62,15 @@ Spec Phase 1 : [docs/plans/2026-07-02-graphics-engine-design.md](plans/2026-07-0
 - **Écarts au plan, assumés** : W2 (lumières) **absorbé par W1** · byte-identique vs M8 **perdu comme prévu** (la translation sort de la matrice de vue → l'ordre des opérations flottantes change ; 14 pixels sur 921 600 dépassent 1 LSB, tous sur le bord d'ombre) · le chemin « fit frustum » **n'est pas exercé par une capture** (la scène du casque emprunte toujours le chemin « scène ») — couvert par 9 tests unitaires, **c'est la condition posée par l'architecte** : scène large = **tâche 1 de M4**.
 - **Métriques** : 257 tests · 0 warning · 0 message de validation · 0 leak · probe NativeAOT PASS (8 composants rootés).
 - **Env vars nouvelles** : `AGAPANTHE_WORLD_ORIGIN="x,y,z"` (place le modèle en `double` — l'image doit être identique où qu'il soit) · `AGAPANTHE_UNLOAD_TEST=N` (N cycles Load/Unload sous le gate de leak).
+
+**P2-M4 (frustum culling + montée en charge) — LIVRÉ (S13), CLÔT LA PHASE 2** · Détail : [.absolute-human/archive/board-session13-P2M4.md](../.absolute-human/archive/board-session13-P2M4.md)
+
+- **Le résultat** (critère de sortie §6.2, chaque gate vérifié) : **10 000 entités** (un seul upload) · **2556 visibles** après cull caméra · **0 B alloc/frame** (animation incluse) · **bit-identique à 10 000 km** avec caméra ET entités en mouvement (maille alignée) · **tourne en NativeAOT** · 0 validation · 0 leak.
+- **Ce qui a été bâti** : `Frustum` (Core, GPU-free, 6 plans Gribb-Hartmann) · `Bounds` → **sphère locale** transformée par frame · **origine quantifiée** (snap 1024 m dans `RenderView` — l'œil vit à `EyeRelative` dans la cellule ; débloque le buffer d'instances persistant et la stabilité physique de la Phase 3) · ordre de frame inversé (`ShadowFit` avant la collecte, pour culler les casters contre le **volume de lumière**) · skybox reconstruit depuis la rotation de vue seule (origin-exact) · culling linéaire (sphère vs 2 frustums) · `SortKey` matériau + tie-break + **tri radix LSD** · `AnimateDrawables<T>` (écriture directe, zéro-alloc, AOT-safe).
+- **Précision reformulée (D3, mesurée)** : « loin == origine » est **bit-exact ssi le déplacement est un multiple de la maille**, sinon visuellement indiscernable (le « ≤ 1 LSB » du plan est faux pris à la lettre sur une scène spéculaire — propriété de rendu, pas faute de précision).
+- **Audits de clôture** : `engine-architect` PASS sans réserve ; `csharp-lowlevel` FAIL conditionnel **levé** — M1 (`MaxAxisScale` sous-couvrait le rayon sous shear → faux négatif de culling) corrigé par la **σ_max exacte** (`MathHelpers.MaxStretch`), tight (casque bit-identique), 3 tests de régression.
+- **Écart assumé** : cull+collect **3,7 ms JIT-Release / ~6 ms AOT** à 10k, > cible **indicative** 1 ms — dette perf comprise (~80 % = liste d'ombres à 10 000 casters ; cull lumière conservateur sur scène plate, safe).
+- **Métriques finales de phase** : 275 tests · 0 warning · 0 message de validation · 0 leak · probe NativeAOT PASS.
 
 ## Décisions structurantes (verrouillées)
 
@@ -186,18 +195,27 @@ Détail complet : [.absolute-human/archive/board-session8-M8.md](../.absolute-hu
 
 ## Reprise — où repartir
 
-**Point de reprise (2026-07-13, session 12)** : Phase 2 en cours. **P2-M0 → P2-M3 clos et committés.** Board session 12 archivé ([board-session12-P2M3.md](../.absolute-human/archive/board-session12-P2M3.md)) ; prochaine tâche = **ouvrir P2-M4** (frustum culling + montée en charge = **critère de sortie de la phase**).
+**Point de reprise (2026-07-13, session 13)** : **PHASE 2 CLOSE.** P2-M0 → P2-M4 clos et committés ; la Phase 2 est signée par le double audit de clôture. Board session 13 archivé ([board-session13-P2M4.md](../.absolute-human/archive/board-session13-P2M4.md)). Prochaine tâche = **ouvrir la Phase 3** (gameplay : lifecycle/scheduler, physique, sérialisation, audio, streaming à l'horizon).
 
-**Branche** : `phase2-foundations`. Commits P2-M3 : `0d3d0ae` (W0 — dettes rouges : handles générationnels + registry globale) · `8ef912c` (W1+W2 — camera-relative, `Double3`, lumières) · `0d3670a` (W3 — fit d'ombre sur frustum) · `62df5ea` (W4 — caméra, wrap du yaw) · `fc1d876` (durcissements des 2 audits).
+**Branche** : `phase2-foundations`. Commits P2-M4 : `12a07e3` (W0 Frustum+sphère+banc) · `7d9428a` (W1 origine quantifiée + ordre de frame + skybox origin-exact) · `c5b7da7` (W2 culling) · `458e017` (W3 radix + SortKey) · `99076c1` (W4 banc + AnimateDrawables) · `2827777` (durcissements audits : σ_max exact).
 
-**Prochaine tâche : P2-M4.** ⚠️ **Trois décisions à prendre AVANT d'écrire la boucle de culling** (les deux audits convergent — détail dans le board S12) :
-1. **Scène large de test** (`AGAPANTHE_SCENE=grid:NxN`, le même mesh instancié — gratuit maintenant que les handles sont globaux). **Tâche 1** : sans elle, le chemin « fit frustum » reste du code non exercé, et il n'y a pas de banc de montée en charge.
-2. **`Bounds` → sphère locale** (`Center` + `Radius`, 16 o au lieu de 48). L'AABB **monde statique** actuelle est fausse dès qu'une entité tourne ou bouge ; transformer une AABB par frame donne une boîte gonflée. Une sphère est invariante en rotation et se teste en 6 dots.
-3. **Ordre de la frame à inverser** : `ShadowFit` tourne aujourd'hui *dans* `DrawScene`, donc **après** `CollectRenderLists` — or les casters doivent être cullés contre le **volume de lumière**, qui n'existe pas encore à ce moment. Hisser `ShadowFit` avant la collecte ; type `Frustum` (6 plans) **dans Core**.
+**Séquencement Phase 3 recommandé (engine-architect)** — par dépendances et par ce que chaque jalon *prouve* :
+1. **P3-M0 — Validation Linux/macOS + durcissement du gate shutdown.** *En premier* : AOT et SPIR-V hors-ligne sont **prouvés Windows uniquement** ; « fondations cross-platform » est une hypothèse tant qu'un vrai Linux n'a pas tourné. Cheap, demi-jalon.
+2. **P3-M1 — Buffer d'instances persistant + les 2 dettes de culling** (bounds per-frame dirty-tracké + cull des casters contre le frustum caméra extrudé). Paiement direct de l'origine quantifiée, rendu pur, rembourse la dette perf de M4.
+3. **P3-M2 — Cycle de vie d'entités (`Despawn`, `Parent` pendant) + scheduler de systèmes minimal.** Le substrat du gameplay.
+4. **P3-M3 — Physique** (dépend de : origine quantifiée ✓, lifecycle, bounds per-frame).
+5. **P3-M4 — Sérialisation source-gen** (partage le générateur du rooting ; parallélisable). **Audio** en dernier / opportuniste.
 
-**Et un arbitrage qui engage la Phase 3** : **origine continue (actuelle) vs origine quantifiée** (snap sur une grille de 256 m / 1 km). Le continu interdit de fait tout buffer d'instances persistant / culling GPU-driven, et **la physique de Phase 3 exigera une origine par palier** (caches de contact, warm starting, sleeping). Coût aujourd'hui : ~5 lignes. Si on garde le continu, l'inscrire comme dette **assumée**, pas implicite.
+**Dette léguée par la Phase 2 (détail : board S13), par « quand ça mord »** :
+- 🔴 **`AggregateBounds` plié une fois → périmé dès qu'une entité TRANSLATE** (le banc survit « par chance de géométrie », le spin ne déplace pas les centres). À corriger **avant la physique** — sinon `FitSceneSphere`/`UpstreamExtent` deviennent faux → clipping d'ombre (celui que M3 a corrigé) ou cadrage faux.
+- 🔴 **Cull du volume de lumière conservateur** (tous casters gardés sur scène plate) → resserrer via le frustum caméra extrudé le long de −lightDir (sans faux négatif) ; CSM = vrai correctif plus tard.
+- 🔴 **Linux/macOS jamais validés** (AOT + SPIR-V hors-ligne Windows-only) — premier item P3.
+- 🟠 `SortKey` sans profondeur (pas de front-to-back opaque ; transparence future **fausse** sans tri profondeur) · déterminisme du tri exige `(matériau, RenderOrder)` globalement unique · propagation O(n·d) déférée (hiérarchies profondes) · pas d'API `Despawn`.
+- 🟡 `AssertOwnerThread` Debug-only vs futur job system · **crash shutdown Silk.NET reproductible** (`AGAPANTHE_UNLOAD_TEST=20`, ~2/10, après le rapport propre — garder le gate CI keyé sur la ligne de rapport, pas l'exit code) · pas d'assertion CI du critère de sortie.
 
-**Vérifs humaines encore dues (non bloquantes)** : (a) **P2-M3** — feel de la caméra en fenêtre après le wrap du yaw, et l'ombre (jugée en headless seulement). Le test à faire soi-même : lancer avec `AGAPANTHE_WORLD_ORIGIN="10000000,10000000,10000000"` → l'image et le pilotage doivent être **indiscernables** de l'origine (et à `1e15`, tout se met à claquer : c'est la même panne que le `float` à 10 000 km, repoussée de 8 ordres de grandeur). (b) **P2-M1** — hot reload Debug **live** à la fenêtre (edit shader → recompile < 1 s), non re-testé depuis M8 ; le headless ne le couvre pas.
+**Vérifs humaines encore dues (non bloquantes)** : (a) **P2-M4** — verdict visuel du banc `grid:100x100` en fenêtre + le skybox de W1 (nouveau shader, jugé headless seulement). (b) **P2-M3** — feel caméra (wrap du yaw) ; démo précision : `AGAPANTHE_WORLD_ORIGIN="10000000,10000000,10000000"` → indiscernable de l'origine ; à `1e15`, tout claque (même panne que le `float` à 10 000 km, repoussée de 8 ordres de grandeur). (c) **P2-M1** — hot reload Debug live (edit shader → recompile < 1 s), non re-testé depuis M8.
+
+**Env vars du banc (P2-M4)** : `AGAPANTHE_SCENE=grid:NxN` (réplique le modèle en grille — un upload) · `AGAPANTHE_CULL_STATS=1` (mode banc : caméra dans la scène, spin déterministe, log visibles/total + temps + alloc).
 
 **Run de sanity Debug** (0 validation / 0 leak) :
 ```powershell

@@ -1,7 +1,7 @@
 # Agapanthe — contexte projet (à lire en premier)
 
 Moteur de jeu **Vulkan en C# from scratch** (.NET 10), cross-platform (Windows / Linux / macOS).
-**Phase 1 (TERMINÉE, 8/8 jalons)** : toute la chaîne graphique 3D. **Phase 2 (à venir)** : ECS/scene graph, audio, physique, gameplay.
+**Phase 1 (TERMINÉE, 8/8)** : chaîne graphique 3D. **Phase 2 (TERMINÉE, 5/5)** : fondations scalables — ECS (Arch), `double` + camera-relative à origine quantifiée, culling, montée en charge (10k entités à 10 000 km, NativeAOT). **Phase 3 (à venir)** : gameplay — lifecycle/scheduler, physique, sérialisation, audio.
 
 ## Où est la vérité (lis ces fichiers avant d'agir)
 
@@ -60,10 +60,10 @@ Sessions pilotées via **absolute-human** (décomposition en tâches, vagues par
 
 ## État courant
 
-**PHASE 1 CLOSE (8/8). PHASE 2 EN COURS — P2-M0 → P2-M3 clos** (gate AOT + Arch · SPIR-V hors-ligne · couture ECS · **camera-relative rendering**). Métriques : 257 tests, 0 warning, 0 message de validation, 0 leak, probe NativeAOT PASS.
+**PHASE 1 CLOSE (8/8). PHASE 2 CLOSE (5/5) — P2-M0 → P2-M4 clos** (gate AOT + Arch · SPIR-V hors-ligne · couture ECS · camera-relative · **frustum culling + montée en charge**). Métriques : 275 tests, 0 warning, 0 message de validation, 0 leak, probe NativeAOT PASS. Double audit signe la clôture de la phase.
 
-**P2-M3 (session 12)** : le monde stocke les positions en `double` (`Double3`) et le GPU ne voit jamais que `objet − caméra`. Preuve : la capture du casque **à 10 000 km est identique bit-pour-bit** à celle prise à l'origine. Env vars : `AGAPANTHE_WORLD_ORIGIN="x,y,z"` (place le modèle en double) · `AGAPANTHE_UNLOAD_TEST=N` (cycles Load/Unload sous le gate de leak).
+**P2-M4 (session 13)** : le monde stocke les positions en `double` à **origine quantifiée** (snap 1024 m), ne dessine que ce que voit la caméra (frustum culling), et le prouve à l'échelle — **10 000 entités cullées à 10 000 km, 0 alloc/frame, en NativeAOT**, image bit-identique à l'origine (maille alignée). Env vars : `AGAPANTHE_WORLD_ORIGIN="x,y,z"` · `AGAPANTHE_SCENE=grid:NxN` (banc) · `AGAPANTHE_CULL_STATS=1` (stats) · `AGAPANTHE_UNLOAD_TEST=N`.
 
-**Prochain : P2-M4** (frustum culling + montée en charge = **critère de sortie de la phase**). ⚠️ Trois décisions à prendre **avant** d'écrire la boucle de culling (scène large de test · `Bounds` → sphère locale · `ShadowFit` hissé *avant* `CollectRenderLists`), plus un arbitrage qui engage la Phase 3 (origine continue vs quantifiée). Détail + point de reprise dans `docs/AVANCEMENT.md`.
+**Prochain : Phase 3** (gameplay). Ordre recommandé (engine-architect) : **P3-M0 validation Linux/macOS** (les titres de la Phase 2 — AOT + SPIR-V hors-ligne — sont **prouvés Windows uniquement**), puis buffer d'instances persistant + dettes de culling, puis lifecycle/scheduler, physique, sérialisation, audio. Détail + point de reprise dans `docs/AVANCEMENT.md`.
 
-**Dette persistante** : 🔴 **Linux jamais validé** (AOT et chemin SPIR-V hors-ligne **prouvés Windows uniquement**) · tri `RenderList` O(n²) (radix dû en M4) · crash au shutdown (GLFW/Silk.NET) désormais **reproductible** via `AGAPANTHE_UNLOAD_TEST=20` (~2 runs/10, après le rapport de leak propre).
+**Dette persistante (détail : board S13)** : 🔴 **Linux jamais validé** · 🔴 **`AggregateBounds` plié une fois** → périmé dès qu'une entité translate (à corriger avant la physique) · 🔴 cull du volume de lumière conservateur · 🟠 `SortKey` sans profondeur (transparence future fausse) · crash au shutdown (GLFW/Silk.NET) **reproductible** via `AGAPANTHE_UNLOAD_TEST=20` (~2 runs/10, après le rapport propre).
