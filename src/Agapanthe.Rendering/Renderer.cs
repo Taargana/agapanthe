@@ -790,9 +790,9 @@ public sealed class Renderer : IDisposable
         cmd.SetViewportScissor(target.Width, target.Height);
 
         // Write this frame slot's camera UBO in place (host-visible), then point a fresh per-frame set 0 at it.
-        // The eye is at the origin of the frame being rendered (spec §3.3), so the packed eye position is exactly
-        // zero and the view carries no translation. mesh.frag's V = normalize(eyePos - worldPos) therefore becomes
-        // normalize(-worldPos) with no shader change: both sides are already camera-relative.
+        // The packed eye is view.EyeRelative — the eye's position within the frame's QUANTIZED cell (M4), up to a
+        // cell (1024 m) from the origin, and the view carries that sub-cell translation. mesh.frag's
+        // V = normalize(eyePos - worldPos) is correct because both are in the same camera-relative frame.
         var ubo = _cameraUbos[frame.Slot]!;
         var uniforms = new CameraUniforms(view.View, view.Projection, view.EyeRelative);
         ubo.Write(new ReadOnlySpan<CameraUniforms>(in uniforms));

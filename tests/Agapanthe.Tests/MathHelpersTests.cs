@@ -133,4 +133,61 @@ public class MathHelpersTests
         Assert.Equal(0f, viewSpace.X, 5);
         Assert.Equal(0f, viewSpace.Y, 5);
     }
+
+    [Fact]
+    public void MaxStretch_IsExactForRotationTimesUniformScale()
+    {
+        // The common case must NOT be inflated (else every entity's cull radius grows and the captures shift):
+        // a rotation composed with a uniform scale stretches every direction by exactly the scale.
+        var m = Matrix4x4.CreateScale(2.5f) * Matrix4x4.CreateRotationY(0.7f) * Matrix4x4.CreateRotationX(0.3f);
+
+        Assert.Equal(2.5f, MathHelpers.MaxStretch(m), 4);
+    }
+
+    [Fact]
+    public void MaxStretch_UpperBoundsTheStretchOfEveryDirection()
+    {
+        // The load-bearing property (audit P2-M4 M1): σ_max must be >= the actual stretch of ANY unit vector,
+        // or a bounding sphere grown by it would UNDER-cover and a visible object would be culled. A sheared
+        // transform (rotation + non-uniform scale) is the case the old longest-row heuristic got wrong.
+        var m = Matrix4x4.CreateScale(3f, 1f, 0.5f) * Matrix4x4.CreateRotationZ(0.6f) * Matrix4x4.CreateRotationY(1.1f);
+        var sigmaMax = MathHelpers.MaxStretch(m);
+
+        var rng = new Random(987);
+        for (var i = 0; i < 2000; i++)
+        {
+            var v = Vector3.Normalize(new Vector3(
+                (float)(rng.NextDouble() * 2 - 1),
+                (float)(rng.NextDouble() * 2 - 1),
+                (float)(rng.NextDouble() * 2 - 1)));
+            if (!float.IsFinite(v.X))
+            {
+                continue;
+            }
+
+            var stretched = Vector3.TransformNormal(v, m).Length();
+            Assert.True(stretched <= sigmaMax + 1e-3f, $"direction {v} stretched to {stretched} > σ_max {sigmaMax}");
+        }
+
+        // And it is the TIGHT bound: the largest scale (3) is achievable, so σ_max must equal it, not exceed it.
+        Assert.Equal(3f, sigmaMax, 3);
+    }
+
+    [Fact]
+    public void MaxStretch_LongestRowWouldHaveUnderCovered_Shear()
+    {
+        // Pins the actual bug: for this sheared matrix the longest basis row is strictly shorter than σ_max, so
+        // the old MaxAxisScale returned a radius that dropped visible geometry. σ_max does not.
+        // Rotate THEN scale (R·S): this is the order whose basis rows are shorter than σ_max. (Scale-then-rotate
+        // keeps the rows at exactly σ_max, which is why the old heuristic looked fine on simple cases.)
+        var m = Matrix4x4.CreateRotationZ(MathF.PI / 4f) * Matrix4x4.CreateScale(2f, 1f, 1f);
+        var longestRow = MathF.Sqrt(MathF.Max(
+            new Vector3(m.M11, m.M12, m.M13).LengthSquared(),
+            MathF.Max(
+                new Vector3(m.M21, m.M22, m.M23).LengthSquared(),
+                new Vector3(m.M31, m.M32, m.M33).LengthSquared())));
+
+        Assert.True(longestRow < 2f - 0.05f, $"expected the longest row ({longestRow}) to under-cover σ_max = 2");
+        Assert.Equal(2f, MathHelpers.MaxStretch(m), 3);
+    }
 }

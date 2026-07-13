@@ -292,7 +292,7 @@ public sealed class GameWorld : IDisposable
         in Matrix4x4 rotationScale, Double3 position, in Bounds local, out Double3 center, out float radius)
     {
         center = position + new Double3(Vector3.Transform(local.Center, rotationScale));
-        radius = local.Radius * MathHelpers.MaxAxisScale(rotationScale);
+        radius = local.Radius * MathHelpers.MaxStretch(rotationScale);
     }
 
     /// <summary>

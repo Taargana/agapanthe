@@ -213,10 +213,12 @@ window.Loaded += () =>
         // move (spin preserves the bounding sphere), so sceneBounds stays valid without a per-frame refold.
         if (benchMode)
         {
+            // Capture BEFORE animating so the alloc measurement below covers AnimateDrawables too (it is the only
+            // new per-frame path in W4, and must be zero-alloc like the rest).
+            benchAllocBefore = GC.GetAllocatedBytesForCurrentThread();
             var spin = new SpinAnimator(0.02f);
             world!.AnimateDrawables(ref spin);
             camera.Yaw += 0.01f;
-            benchAllocBefore = GC.GetAllocatedBytesForCurrentThread();
         }
 
         var cpuStart = benchMode ? System.Diagnostics.Stopwatch.GetTimestamp() : 0;
@@ -647,7 +649,7 @@ static double ModelDiagonal(ImportedEntitySpec[] specs)
     var max = new Double3(double.NegativeInfinity, double.NegativeInfinity, double.NegativeInfinity);
     foreach (var s in specs)
     {
-        var r = s.BoundsRadius * MathHelpers.MaxAxisScale(s.RotationScale);
+        var r = s.BoundsRadius * MathHelpers.MaxStretch(s.RotationScale);
         var c = s.Position + new Double3(Vector3.Transform(s.BoundsCenter, s.RotationScale));
         var rr = new Double3(r, r, r);
         min = Double3.Min(min, c - rr);

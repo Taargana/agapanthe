@@ -273,10 +273,12 @@ public sealed class WorldSystemsTests
 
         var render = new RenderList();
         var shadow = new RenderList();
+        var spin = new TestSpin();
 
         // Warm up: first calls may grow the reused buffers (walk stack, render lists).
         for (var i = 0; i < 5; i++)
         {
+            world.AnimateDrawables(ref spin);
             world.PropagateTransforms();
             _ = world.AggregateBounds();
             world.CollectRenderLists(render, shadow, ViewAt(Double3.Zero), in Wide, in Wide);
@@ -285,6 +287,7 @@ public sealed class WorldSystemsTests
         var before = GC.GetAllocatedBytesForCurrentThread();
         for (var i = 0; i < 100; i++)
         {
+            world.AnimateDrawables(ref spin); // the W4 path — its zero-alloc must be covered too (audit Med1)
             world.PropagateTransforms();
             _ = world.AggregateBounds();
             world.CollectRenderLists(render, shadow, ViewAt(Double3.Zero), in Wide, in Wide);
@@ -292,5 +295,12 @@ public sealed class WorldSystemsTests
 
         var allocated = GC.GetAllocatedBytesForCurrentThread() - before;
         Assert.Equal(0, allocated); // zero managed allocation per frame on the hot path
+    }
+
+    // Rotation-only animator (keeps the translation row zero): the AnimateDrawables path for the alloc test.
+    private struct TestSpin : IDrawableAnimator
+    {
+        public void Animate(ulong globalId, ref Double3 position, ref Matrix4x4 rotationScale)
+            => rotationScale = Matrix4x4.CreateRotationY(0.01f) * rotationScale;
     }
 }
