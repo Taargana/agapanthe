@@ -1,140 +1,127 @@
-# Absolute-Human Board — Agapanthe Session 12 (P2-M3 : Camera-relative rendering)
+# Absolute-Human Board — Agapanthe Session 13 (P2-M4 : Frustum culling + montée en charge)
 
-**Status**: CLOSED (2026-07-13) — P2-M3 PASSÉ, double audit PASS conditionnel. Voir « CLÔTURE » en bas.
-**But** : **le monde ne tremble plus à 10 000 km.** Le GPU ne sait faire que du `float32` (ULP ≈ **1 m** à 1e7 m) ⇒ on garde le monde en `double` et on met **la caméra à l'origine** : le GPU ne voit que `objet − caméra`, toujours petit. On commence par les **2 dettes rouges** de P2-M2 (handles/registry) : elles touchent des types **publics** et M3 va bâtir dessus.
+**Status**: OPEN — session ouverte 2026-07-13. Cinquième et **dernier** jalon Phase 2 = **critère de sortie de la phase**. P2-M3 clos (camera-relative, capture à 10 000 km bit-identique à l'origine, double audit PASS conditionnel).
+**But** : **des milliers d'entités qui bougent, cullées, à 10 000 km, sans trembler, en NativeAOT, 0 leak.** On ne dessine plus que ce que la caméra voit (frustum culling), et on le prouve à l'échelle. On tranche d'abord l'**origine quantifiée** (décision de l'humain — engage la Phase 3), puis on pose les fondations GPU-free (Frustum, sphère locale), on inverse l'ordre de frame, on culle, on trie (radix), on charge.
 **Créé**: 2026-07-13
-**Spec**: docs/plans/2026-07-12-phase2-foundations-design.md §3.3 (camera-relative — table d'impact CPU/shaders), §3.6 (Double3), §5 (preuve de précision), §6 P2-M3 (critère).
+**Spec**: docs/plans/2026-07-12-phase2-foundations-design.md §3.5 (systèmes render-list), §3.4 (composants), §6.2 (critère M4). Conception détaillée : passage engine-architect S13 (résumé ci-dessous).
 **Board persistence**: git-tracked
-**Sessions passées**: S1-S11 → .absolute-human/archive/ (S11 = board-session11-P2M2.md).
+**Sessions passées**: S1-S12 → .absolute-human/archive/ (S12 = board-session12-P2M3.md).
 
-## Intake (spec §3.3 — actée)
+## Intake (conception engine-architect — actée)
 
-- **Principe** : la caméra est **toujours à l'origine**. `objet_monde − caméra_monde` calculé **en `double` sur le CPU**, dans la boucle qui construit les listes de rendu (celle que P2-M2 vient de livrer — c'est cet ordre qui rend M3 bon marché).
-- **Les shaders bougent peu** : `mesh.vert` **inchangé** (il ne lit jamais `camera.position` — seule la *sémantique* de `push.model` change) · `mesh.frag` : `camera.position` = `vec3(0)` → **`V = normalize(-worldPos)`** (plus simple qu'avant) · `skybox.vert`, IBL, tonemap **intacts** (directions seulement).
-- **C'est le CPU qui casse**, pas le GPU. 5 sites lisent des positions monde **absolues en float** :
+### L'origine quantifiée (le sujet structurant, décision humaine)
 
-| Site | Correction |
-|---|---|
-| `Renderer.ComputeLightViewProj` | **Fitte sur le frustum CAMÉRA**, plus sur les bounds monde (§3.5) — *obligatoire dès M3* : les bounds absolues en float cassent à 1e7 m |
-| **Stockage** des lumières ponctuelles (`Lights.cs`, réécrites chaque frame) | Stockées en **`Double3`**, converties en **relatif-caméra À CHAQUE FRAME**. ⚠️ **Corriger `SetupLights` ne suffit PAS** : sans conversion par frame, elles **dérivent dès que la caméra bouge** |
-| `Program.SetupLights` / `FrameCamera` | Consomment les bounds `Double3` |
-| `FreeCameraController` | Arithmétique en **`Double3`** — sinon on reperd la précision juste après l'avoir gagnée |
-| `Camera.Position` / `Camera.ViewMatrix` | → `Double3` ; view **rotation seule** (translation nulle par construction) |
+- **Le snap vit dans `RenderView` (via `Camera.CreateView`)** — déjà le point unique de l'origine de frame. Trois champs changent de sémantique, **zéro nouvelle plomberie** (le hook `EyeRelative` a été posé exprès en M3) :
 
-- `CameraUniforms.Position` **reste dans l'UBO** (toujours 0) : l'identité du bloc doit rester byte-identique entre `mesh.vert` et `mesh.frag`.
+| Champ | M3 (origine = œil) | M4 (origine quantifiée) |
+|---|---|---|
+| `Origin` | `eye` exact | `Snap(eye, cell)` = `floor(eye/cell)·cell` par axe, en `double` |
+| `View` | rotation seule | rotation **+ translation `−(eye − Origin)`** (l'œil n'est plus à 0) |
+| `EyeRelative` | `Vector3.Zero` | `(eye − Origin)` narrow — borné à une cellule |
 
-## Critère de sortie (spec §6 P2-M3, §5)
+- **Maille = 1024 m FIXE**, jamais dérivée de la scène (sinon l'origine sauterait au streaming). Retunable, **non irréversible**. Borne les coords float à `≈ far + cell` → ULP sub-mm. **D1.**
+- Lumières et `ShadowFit` **ne changent pas** : ils narrow déjà contre `view.Origin`, ils héritent de l'origine snappée gratuitement (dividende de l'agrégat M3).
+- **⚠️ Coût assumé (D2)** : quantifier réintroduit un œil ≠ 0 → **défait la simplification de M3**. `mesh.frag` revient à `V = normalize(camera.Position − worldPos)` et `CameraUniforms.Position` redevient une valeur vivante (`= EyeRelative`), plus zéro. Erreur ici = spéculaire/Fresnel décalé, **ne crashe pas** → gate par capture.
+- **Payoff Phase 3** : origine **discrète et stable inter-frame** (ne saute qu'au franchissement de cellule) → un buffer d'instances persistant devient viable (dirty-track les objets déplacés + rebase complet sur snap). C'est *pourquoi* l'humain a tranché quantifié. On **conçoit** pour, on ne **construit** pas le buffer en M4.
 
-**Rendu à 10 000 km == rendu à l'origine** :
-- **unitaire** : les transforms relatifs caméra sont **exactement égaux** (comparaison **bit-à-bit**) ;
-- **capture GPU** : **≤ 1 LSB par canal** — ⚠️ **le byte-identique strict n'est PLUS le critère** (la reconstruction `double→float` ne retombe pas nécessairement sur les mêmes bits ; exiger l'identité binaire serait un critère **faux**). C'est **assumé**, pas subi.
-- Gate permanent : 0 validation, 0 leak, publish AOT OK, tests verts.
+### ⚠️ L'invariant de précision CHANGE (D3 — à ne pas rater)
+
+`objet − snap(eye) = (objet − eye) + (eye − snap(eye))`. Le 2e terme (offset sous-cellule de l'œil) **diffère selon la position absolue** → les float intermédiaires ne sont plus bit-identiques entre le run à l'origine et le run lointain. **Le résultat en espace vue reste exact** (la `View` porte `−(eye−Origin)` qui l'annule), mais l'arrondi intermédiaire non.
+
+> **Reformulation** : « loin == origine » est **bit-exact SSI le déplacement est un multiple entier de la maille** ; pour un déplacement quelconque, c'est **≤ 1 LSB/canal**.
+
+→ Le test de régression M3 **garde ses dents** si on place la caméra lointaine à un **multiple de la maille** (offset sous-cellule identique). Un **2e** test prouve le ≤ 1 LSB sur un déplacement non aligné. Sans ce découpage, le test M3 devient rouge et on croit à une régression alors que c'est la quantification qui parle.
+
+### Culling : linéaire, pas de structure spatiale (D4)
+
+- **Cull linéaire sur les chunks Arch, 6 dots/entité.** À 10k mobiles : ~60k dots ≈ **< 0,1 ms**, cache-friendly, 0 alloc. Une grille/BVH devrait **se refit chaque frame** (tout bouge) → plus cher que l'O(N). Le point de bascule pour des entités mobiles est vers **~100k–1M**, pas 10k.
+- Le cull linéaire est le **test-feuille** que toute large-phase future réutilise. La grille arrivera avec le streaming (keyée sur la même maille — jolie symétrie), pas maintenant.
+
+### Ordre de frame inversé
+
+`ShadowFit` doit tourner **avant** `CollectRenderLists` (les casters se cullent contre le **volume de lumière**, pas le frustum caméra). Orchestration **dans Program** (voit World + Rendering ; World reçoit un `Frustum` **Core**, ne référence pas Rendering) :
+```
+view = camera.CreateView()                     // origine snappée
+(move entities)
+bounds = world.AggregateBounds()               // O(n), zéro-alloc, PRÉCÈDE ShadowFit
+lightVP = ShadowFit.ComputeLightViewProj(view, bounds, …)
+camFrustum   = Frustum.FromViewProjection(view.View * view.Projection)
+lightFrustum = Frustum.FromViewProjection(lightVP)
+world.CollectRenderLists(render, shadowCasters, in view, in camFrustum, in lightFrustum)
+renderer.DrawScene(render, shadowCasters, registry, in view, lightVP, …)
+```
+
+## Critère de sortie (spec §6.2 — critère de sortie de PHASE)
+
+- **N ≥ 10 000** entités instanciées, **≥ 2000 visibles** après cull ;
+- **0 alloc/frame** (test GC delta entre frame 2 et K) ;
+- cull+collect **< 1 ms** à 10k sur RTX 5070 Ti (indicatif, pas gate dur) ;
+- **0 message de validation, 0 leak** ;
+- tourne en **NativeAOT** ;
+- capture à 10 000 km : **bit-exacte si décalage = multiple de la maille**, **≤ 1 LSB sinon** (D3) ; « sans trembler » prouvé par l'égalité des transforms relatifs ;
+- **test anti-popping** : un caster hors frustum caméra dont l'ombre entre dans le champ est conservé.
+
+## Vagues
+
+### P2-M4-W0 — Fondations GPU-free (parallélisables) [code+test, L]
+- **(a) `Frustum` dans Core** : 6 plans, `FromViewProjection(Matrix4x4)` (Gribb-Hartmann) + `Intersects(center, radius)` (6 dots). **Un type, deux usages** (frustum caméra + volume lumière). GPU-free → réutilisable par un interest-management serveur.
+- **(b) `Bounds` → sphère locale** : `Vector3 Center` + `float Radius` bakée à l'import (16 o vs 48). Par frame : `worldCenter = Center·WorldTransform + WorldPosition` (Double3), `worldRadius = Radius × maxScale`. `AggregateBounds` dérive l'AABB du fold des sphères. `ImportedEntitySpec` porte une AABB **locale**.
+- **(c) Banc scène large** : `AGAPANTHE_SCENE=grid:NxN` instancie un mesh via handles globaux. **Tâche 1** (condition de clôture M3).
+- **Gate** : build vert, tests `Frustum` (in/out/straddle) + sphère, scène large en passthrough (pas encore de cull), 0 validation/leak, capture sanity.
+
+### P2-M4-W1 — Ordre de frame + origine quantifiée [code+test, M] [dep W0a]
+- Hisser `ShadowFit` hors de `DrawScene` (ordre ci-dessus). Snap dans `RenderView`/`Camera`. `mesh.frag` + `CameraUniforms.Position` → `EyeRelative` (D2).
+- **Gate** : capture à l'origine **≤ 1 LSB vs baseline M3** (PAS bit-identique — D3, assumé) ; test précision **reframé** (aligné maille = bit-exact ; arbitraire = ≤ 1 LSB) ; culling encore passthrough ; 0 leak/validation/alloc.
+
+### P2-M4-W2 — Boucle de culling [code+test, M] [dep W0, W1]
+- Cull frustum caméra → `RenderList` ; cull **volume de lumière** (frustum ortho de `ShadowFit` étendu upstream) → `ShadowCasterList`.
+- **Gate** : tests in/out/straddle ; **≥ 2000 visibles/10k** ; **test anti-popping** ; capture ; 0 alloc.
+
+### P2-M4-W3 — Tri radix + SortKey réelle [code+test, M] [dep W2]
+- `SortKey` : matériau/pipeline/profondeur (bits hauts) + **tie-break stable `GlobalId`/`RenderOrder` (bits bas)**. ⚠️ *le* piège des audits : sans tie-break DANS la clé, les ex æquo suivent l'itération Arch non déterministe → déterminisme perdu **silencieusement** (un tri stable ne suffit pas). **Radix LSD 64-bit**, scratch réutilisé, remplace l'insertion sort O(n²).
+- **Gate** : test déterminisme (ex æquo stables), zéro-alloc (scratch ne réalloue pas), capture inchangée.
+
+### P2-M4-W4 — Montée en charge + preuve + audits + archive [test, L] [dep W3]
+- Banc N=10k, mouvement déterministe (seedé par index), à 10 000 km. Mesures du critère de sortie. `Stopwatch` alloc-free autour de cull+collect sous `AGAPANTHE_CULL_STATS=1` (diagnostic). Double audit (`csharp-lowlevel` + `engine-architect`). Archive → board-session13-P2M4.md. **Clôture de la Phase 2.**
 
 ## Project Conventions
 
-- .NET 10, xUnit, TreatWarningsAsErrors, **AOT-pur**, **aucun Vk* hors Graphics**, **aucun type Arch hors World**, IDisposable + DeletionQueue N+2, **zéro alloc/frame**, ResourceTracker (leak = échec), 0 message de validation.
-- Baseline M8/M2 : `24001B240C6C6B956F3F1AC6ABC1FE1D2CAA8914D9013169DFB049027E3309B7` (référence **jusqu'à W1** ; ensuite le critère devient ≤ 1 LSB).
+- .NET 10, xUnit, TreatWarningsAsErrors, **AOT-pur**, **aucun Vk* hors Graphics**, **aucun type Arch hors World** (Frustum vit dans Core), IDisposable + DeletionQueue N+2, **zéro alloc/frame**, ResourceTracker (leak = échec), 0 message de validation.
+- Baseline M3 (capture origine) : la capture de `fc1d876` fait foi ; le critère est **≤ 1 LSB** (le byte-identique strict n'est plus le critère depuis M3).
 - Publish AOT : PATH doit inclure `C:\Program Files (x86)\Microsoft Visual Studio\Installer` (vswhere).
+- Env vars debug : `AGAPANTHE_WORLD_ORIGIN` · `AGAPANTHE_UNLOAD_TEST` · (nouvelles M4) `AGAPANTHE_SCENE=grid:NxN` · `AGAPANTHE_CULL_STATS=1`.
+
+## Décisions à confirmer avant W0 (pour feu vert)
+
+- **D1** : maille = **1024 m** fixe. (Retunable, non irréversible.)
+- **D2** : `RenderView.View` porte la translation sous-cellule ; `mesh.frag` + `CameraUniforms.Position` reviennent à `EyeRelative`. (Défait la simplif M3 — assumé.)
+- **D3** : invariant reformulé — **bit-exact ssi déplacement aligné maille, ≤ 1 LSB sinon**. Le test M3 déplace la caméra lointaine à un multiple de la maille.
+- **D4** : cull **linéaire**, pas de structure spatiale (bascule vers ~100k mobiles, pas 10k).
+- **D5** : banc **à plat** (drawables importés, mouvement par écriture directe `WorldPosition`/`WorldTransform`) → court-circuite `PropagateTransforms` → la réécriture de la propagation O(n·d) **reste déférée** (pas sur le chemin critique M4).
+
+## Hors périmètre M4 (garder le jalon fini)
+
+Culling GPU-driven (→ P3, buffer persistant) · CSM cascades (une cascade suffit) · multi-thread/job system (contrat mono-thread gardé) · LOD · buffer d'instances persistant (on **conçoit** pour, on ne construit pas) · occlusion culling · réécriture propagation profondeur-ordonnée (déférée, D5). Chacun est **ordonnancé, pas oublié** — rien dans M4 ne le condamne.
+
+## Portes Phase 3 ouvertes par M4 (à surveiller)
+
+Origine discrète → buffer persistant + GPU-cull + îlots physiques · maille = sous-multiple de la future cellule de streaming (noter, pas coupler) · `GlobalId` dans le tie-break → ordre de draw **réplicable réseau** · sphère locale → réutilisable large-phase physique + LOD · `Frustum` Core GPU-free → interest-management serveur.
 
 ## Rollback Point
 
-`e0c8ffc` (P2-M2 clos, branche phase2-foundations).
+`fc1d876` (durcissements M3) / `fad6c06` (clôture docs M3) — dernier état vert : 257 tests, 0 warning, 0 validation, 0 leak, AOT PASS.
 
-## Task Graph
+## Dette (rappel, à traiter en M4 ou léguée)
 
-```
-W0 (dettes rouges) ──► W1 (origine + RenderView) ──► W2 (lumières) ──► W3 (fit ombre frustum) ──► W4 (caméra) ──► W5 (preuve + audits)
-```
-**L'ordre est un contrat** : W0 d'abord (types publics, M3 bâtit dessus) ; W3 (fit ombre) **doit** précéder toute montée en distance, sinon la matrice d'ombre est le prochain site à casser.
+- 🔴 (M4) Scène large · `Bounds` sphère locale · ShadowFit hissé · SortKey+radix avec tie-break → **ce sont les vagues W0-W3**.
+- 🟠 `AggregateBounds` plié une fois au chargement → dès que le monde bouge, dirty-flag (sinon reduce O(n)/frame gaspillé dans un grand monde).
+- 🟡 (M5/P3) `AssertOwnerThread` `[Conditional("DEBUG")]` → non vérifié en Release (config du futur job system) · `_models` registry ne recycle pas ses ids · `FitSceneSphere` demi-diagonale (sur-dimensionne sur scène plate) · **crash shutdown reproductible** (`AGAPANTHE_UNLOAD_TEST=20`, ~2/10, `Silk.NET.Input`→GLFW) · **AOT/SPIR-V hors-ligne prouvés Windows only** → Linux/macOS.
 
-## Waves
+## Vérifs humaines dues (non bloquantes)
 
-| Vague | Contenu | Critère de vérification |
-|---|---|---|
-| **W0** 🔴 | **Dettes rouges P2-M2** : handles **avec génération** (index+generation) + **`ResourceRegistry` global** (slot-map free-list, plusieurs modèles). | **Capture reste byte-identique `24001B24…`** (refactor pur) ; handle périmé/hors-plage → `GraphicsException` (test) ; 0 leak. |
-| **W1** | `Double3 Camera.Position` + view **rotation seule** + agrégat **`RenderView`** (Core) portant **l'origine camera-relative** (source unique — lumières/caméra/monde doivent soustraire *exactement* la même) + soustraction dans `CollectRenderLists`. | Rendu **à l'origine** inchangé (≤ 1 LSB) ; unitaire : transform relatif **bit-exact** à 1e7 m. |
-| **W2** | Lumières : `Double3` dans `SceneLights` + **conversion relatif-caméra par frame** (le piège §3.3) ; `mesh.frag` `V = normalize(-worldPos)` ; `CameraUniforms.Position` = 0. | Lumières **ne dérivent pas** quand la caméra bouge (test + capture) ; hot reload shaders OK. |
-| **W3** | `ComputeLightViewProj` **fitte sur le frustum caméra** (sphère englobante, distance d'ombre max) — plus sur les bounds monde. | Ombres correctes à l'origine **et** à 1e7 m ; pas de pop. |
-| **W4** | `FreeCameraController` en `Double3` (intégration du déplacement). | Déplacement à 1e7 m sans saccade/perte de précision. |
-| **W5** | **Preuve de précision** (§5) : capture **à 1e7 m** vs **à l'origine** ≤ 1 LSB/canal + unitaire bit-à-bit · publish AOT · double audit · archive. | **Critère de sortie du jalon.** |
-
-## Tâches
-
-### P2-M3-00 — 🔴 Dettes rouges : handles avec génération + registry global [code, L] — todo — OWNER Core/Handles.cs, Rendering/ResourceRegistry.cs, SceneBuilder.cs
-**Pourquoi maintenant** (audit P2-M2, 2 findings MAJEURS) : (1) `MeshHandle(int)` est un **index nu** → après un unload/reload, un handle périmé résout **silencieusement une autre ressource** (contredit §3.2 « handle déchargé = erreur ») ; (2) le registry est **par modèle** → `MeshHandle(0)` de 2 modèles **se collisionnent** → **bloquant pour les 10k entités de M4**. **C'est le même changement** : slot-map global (free-list + génération). Types **publics** → le coût ne fera que monter.
-**AC** : `Resolve` d'un handle périmé (slot recyclé) ou hors-plage → `GraphicsException` explicite (tests) · 2 modèles chargés simultanément sans collision de handles (test) · **capture byte-identique `24001B24…`** (c'est encore un refactor pur) · 0 leak.
-
-### P2-M3-01 — `RenderView` + origine + `Double3 Camera.Position` [code, M] — todo [dep 00]
-Agrégat `RenderView` (Core) : `{ Double3 Origin, RenderList Render, RenderList ShadowCasters, … }` — **une seule source pour l'origine** (audit : « le point le plus facile à désynchroniser en M3 »). `Camera.Position` → `Double3` ; `ViewMatrix` **rotation seule**. `CollectRenderLists` soustrait l'origine (`Double3.ToVector3(origin)`). Résorbe aussi les 8 paramètres de `DrawScene`.
-
-### P2-M3-02 — Lumières en `Double3` + conversion par frame [code, M] — todo [dep 01]
-`SceneLights`/`PointLight` stockent en `Double3` ; `Renderer` les convertit en **relatif-caméra à chaque frame** dans `LightsUniforms` (⚠️ le piège explicite de la spec : corriger `SetupLights` seul = **dérive** dès que la caméra bouge). `mesh.frag` : `V = normalize(-worldPos)` ; `CameraUniforms.Position` = 0 (bloc conservé).
-
-### P2-M3-03 — Fit d'ombre sur le frustum caméra [code, M] — todo [dep 01]
-`ComputeLightViewProj` : sphère englobante du **frustum caméra** (bornée par une distance d'ombre max), **plus** les bounds monde. Prérequis du CSM (hors portée). ⚠️ **Doit précéder la bascule `Bounds` locale de M4** (sinon la boîte plus lâche déplace silencieusement la matrice d'ombre).
-
-### P2-M3-04 — `FreeCameraController` en `Double3` [code, S] — todo [dep 01]
-Intégration du déplacement en `double` — sinon la précision gagnée est reperdue à la 1re frame de mouvement.
-
-### P2-M3-05 — Preuve de précision + audits + archive [test, M] — todo [dep 02,03,04]
-`AGAPANTHE_ORIGIN="1e7,0,0"` (nouveau ?) ou fixture : capture **à 10 000 km** vs **à l'origine** → **≤ 1 LSB/canal** ; unitaire : transforms relatifs **bit-à-bit égaux**. Publish AOT. Double audit (`csharp-lowlevel` : zéro-alloc/précision/AOT ; `engine-architect` : RenderView, origine unique, prêt pour M4). Archive → board-session12-P2M3.md.
-
-## Dette (rappel P2-M2 — traitée ou à traiter)
-
-- 🔴 handles sans génération + registry mono-modèle → **c'est W0 de ce jalon**.
-- 🔴 **tie-break du tri en M4** : quand `SortKey` portera matériau/profondeur, les ex æquo suivront l'itération Arch (non déterministe) → déterminisme perdu **silencieusement**. Clé 64-bit doit inclure un **tie-break stable** (`RenderOrder`/`GlobalId`).
-- 🟠 propagation O(n·d) · `Parent` pendant (dès la destruction d'entités → **M3 si on l'ajoute**) · `SortByKey` O(n²) → radix M4.
-- 🟡 `AggregateBounds` = requête à la demande (pas un système/frame) · gates CI (byte-identique auto, IL3053) · zéro-alloc à re-mesurer si le monde bouge · `AotRootingSmoke` piloté par `All` avant tout nouveau composant.
-- AOT prouvé Windows-only → Linux/macOS.
+- **P2-M3** : feel caméra en fenêtre (wrap du yaw) + ombre (jugée headless seulement). Démo : `AGAPANTHE_WORLD_ORIGIN="10000000,10000000,10000000"` → indiscernable de l'origine.
+- **P2-M1** : hot reload Debug live (edit shader → recompile < 1 s), non re-testé depuis M8.
 
 ## Log
 
-- 2026-07-13: **Session 12 ouverte — P2-M3 (camera-relative).** Ordre acté : **W0 = les 2 dettes rouges** (handles+registry, types publics), puis origine/RenderView → lumières → fit ombre frustum → caméra → preuve. Critère : **≤ 1 LSB/canal** à 1e7 m (le byte-identique strict cesse d'être le critère après W1 — assumé, pas subi). En attente feu vert pour W0.
-
----
-
-## CLÔTURE — P2-M3 PASSÉ (2026-07-13)
-
-**Status**: CLOSED. Double audit **PASS conditionnel** (`csharp-lowlevel` + `engine-architect`), condition = tâche 1 de M4 (scène large, cf. dette ci-dessous).
-
-**Résultat central** : capture headless à **10 000 km IDENTIQUE bit-pour-bit** à celle prise à l'origine (0 canal sur 2 764 800). Le critère « ≤ 1 LSB » est donc **dépassé** : on a l'égalité exacte. Anti-faux-positif : le log affiche `eye at 9999999.99751842`, valeur qu'un `float` **ne peut pas représenter** (ULP = 1 m à 1e7), ce qui prouve que l'origine est réellement appliquée.
-
-**Commits** : `0d3d0ae` (W0 dettes rouges) · `8ef912c` (W1+W2 camera-relative, lumières) · `0d3670a` (W3 fit ombre frustum) · `62df5ea` (W4 caméra) · `fc1d876` (durcissements audits).
-
-**Écarts au plan, assumés** :
-- **W2 absorbé par W1** : impossible de différer les lumières. Dès que les meshes passent en camera-relative, des lumières ponctuelles en float absolu éclairent à côté (le shader compare des positions relatives à des positions absolues).
-- **Byte-identique vs M8 perdu**, comme prévu (la translation sort de la matrice de vue → l'ordre des opérations flottantes change). 0,14 % des canaux, dont 14 pixels > 1 LSB, tous sur le bord d'ombre (bascule d'un tap de PCF).
-- **Chemin « fit frustum » non exercé par une capture** : la scène du casque emprunte toujours le chemin « scène » (plus petit). Couvert par 9 tests unitaires. → **condition de l'architecte**.
-
-**Gates finaux** : 257 tests · 0 warning · 0 message de validation · **0 leak** (135 ressources ; et **842 créées ET détruites sur 20 cycles Load/Unload**) · probe NativeAOT PASS (8 composants rootés).
-
-**Ce que les audits ont trouvé (corrigé dans `fc1d876`)** :
-- 🔴 le **snap texel anti-shimmer était un no-op** : il quantifiait le centre du frustum *relatif à la caméra*, or la vue est rotation-seule → ce centre ne bouge jamais en translation. La shadow map glissait en continu. Grille désormais ancrée au **monde** ; seule la **phase** transite par les coordonnées absolues (en `double`) — router le vecteur lui-même par la rotation float amplifiait son erreur ~1e-7 en **mètres** à 1e7 m (3,65 texels, mesurés).
-- 🔴 **casters en amont clippés** (marge de seulement 0,5·r) → ombres qui disparaissent sans erreur. Plage de profondeur mesurée sur l'extension réelle du monde.
-- 🔴 **`Unload` fuyait un descriptor set par matériau, définitivement** (un `DescriptorAllocator` ne libère jamais un set isolé) → la boucle de streaming, raison d'être de la registry, grossissait la mémoire descripteur sans borne, et **le gate « 0 leak » passait en mentant** (il compte les pools, pas les sets). Allocateur **par modèle**. `Unload` n'avait **aucun appelant** → désormais exercé sous le gate réel (`AGAPANTHE_UNLOAD_TEST=N`).
-- 🟠 `Load` sans `try/catch` autour du minting (ressources GPU orphelines) · pas de garde `_disposed` sur `Resolve` (use-after-free) · invariant « `WorldTransform` sans translation » non gardé · œil câblé en dur à `Vector3.Zero`.
-
-## Dette léguée à P2-M4 / P2-M5 (issue des audits)
-
-**Bloquant, tâche 1 de M4** :
-- 🔴 **Scène large de test** (ex. `AGAPANTHE_SCENE=grid:32x32`, le même mesh instancié — gratuit maintenant que les handles sont globaux). Sans elle, le chemin « fit frustum » reste du code non exercé, et le banc de montée en charge n'existe pas.
-
-**Décisions de conception à prendre AVANT d'écrire la boucle de culling** :
-- 🔴 **`Bounds` → sphère locale** (`Vector3 Center` + `float Radius`, 16 o au lieu de 48). L'AABB **monde statique** actuelle est fausse dès qu'une entité tourne ou bouge ; transformer une AABB par frame donne une boîte gonflée. Une sphère est invariante en rotation et se teste en 6 dots.
-- 🔴 **Ordre de la frame inversé** : `ShadowFit` tourne aujourd'hui *dans* `DrawScene`, donc **après** `CollectRenderLists` — or les casters doivent être cullés contre le **volume de lumière**, qui n'existe pas encore à ce moment. Hisser `ShadowFit` avant la collecte ; introduire un type `Frustum` (6 plans) **dans Core** (c'est le World qui l'utilise).
-- 🔴 **Tri** : `SortKey` (sémantique) et l'algo (insertion O(n²) → radix LSD) sont **le même changement** — ne pas les séparer en deux vagues. Trier des paires `(clé, index)` puis gather, pas des `RenderItem` de 88 o. Tie-break stable obligatoire (`RenderOrder`/`GlobalId`), sinon le déterminisme part silencieusement.
-- 🟠 **Ne pas faire référencer `World` par `Rendering`** au moment du culling (interface Core, ou orchestration par le Sandbox). C'est la seule frontière que M4 peut détruire.
-- 🟠 `AggregateBounds` plié une fois au chargement : dès que le monde bouge, soit il est faux, soit c'est un reduce O(n)/frame **entièrement gaspillé** (dans un grand monde la sphère scène est toujours plus grande que le frustum). Dirty-flag.
-
-**Arbitrage à trancher (engage la Phase 3)** :
-- 🟠 **Origine continue (actuelle) vs origine quantifiée** (snap sur une grille de 256 m / 1 km). L'origine continue interdit de fait tout buffer d'instances persistant / culling GPU-driven, et **la physique de Phase 3 exigera une origine par palier** (caches de contact, warm starting, sleeping). Coût du changement **aujourd'hui : ~5 lignes** ; il croît avec chaque consommateur. Si on garde le continu, l'inscrire comme dette **assumée**, pas implicite.
-
-**Plus tard (M5 / Phase 3)** :
-- 🟡 `AssertOwnerThread` est `[Conditional("DEBUG")]` → le contrat mono-thread n'est plus vérifié en Release, la config où tournera le job system.
-- 🟡 `_models` de la registry ne recycle pas ses ids · `FitSceneSphere` utilise la demi-diagonale (sur-dimensionne jusqu'à ×√3 sur une scène plate — un terrain).
-- 🟡 **Crash au shutdown (M8-14) désormais REPRODUCTIBLE** : `AGAPANTHE_UNLOAD_TEST=20` le déclenche ~2 runs sur 10 (0/5 sans). `0xC0000005` dans `Silk.NET.Input` → GLFW (`GetDelegateForFunctionPointer`), **après** le rapport de leak propre. Les cycles ne le causent pas : ils augmentent la pression GC, donc sa probabilité. Une dette « non reproductible » vient de gagner une recette de repro.
-- 🟡 AOT/SPIR-V hors-ligne toujours **prouvés Windows uniquement** → Linux/macOS (dette P2-M1).
-
-## Log (suite)
-
-- 2026-07-13: **P2-M3 CLOS.** W0→W4 livrés + durcissements des 2 audits. Preuve : 10 000 km == origine, **bit-pour-bit**. Vérif visuelle humaine (feel caméra après wrap du yaw, ombre) **encore due**.
+- 2026-07-13: **Session 13 ouverte — P2-M4 (frustum culling + charge = critère de sortie Phase 2).** Passage engine-architect fait. Humain a tranché **origine quantifiée**. Ordre : W0 fondations GPU-free (Frustum Core + sphère locale + banc) → W1 ordre de frame + snap → W2 culling → W3 radix → W4 charge/preuve/audits/clôture. 5 décisions (D1-D5) en attente de feu vert avant W0.
