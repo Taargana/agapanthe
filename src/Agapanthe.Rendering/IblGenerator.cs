@@ -74,7 +74,7 @@ public sealed class IblGenerator : IDisposable
 
         try
         {
-            _compiler = new ShaderCompiler();
+            _compiler = ShaderCompiler.CreateForBuild();
             _equirectShader = Compile(shaderDirectory, "ibl_equirect_to_cube.comp");
             _irradianceShader = Compile(shaderDirectory, "ibl_irradiance.comp");
             _prefilterShader = Compile(shaderDirectory, "ibl_prefilter.comp");

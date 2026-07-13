@@ -145,9 +145,12 @@ public sealed class Renderer : IDisposable
     // boundary. The reloader is a managed object (not a GPU resource) so the ResourceTracker never sees it.
     private ShaderHotReloader? _reloader;
 
+#if DEBUG
     // Debounce window for the shader watcher: long enough to coalesce an editor's save burst (write-temp +
     // rename) and to let a half-written file finish, short enough to stay well inside the <1s reload budget.
+    // Debug-only: the watcher (and hence this window) does not exist in a shipping build (Phase 2 rule §2.1-2).
     private static readonly TimeSpan ShaderReloadDebounce = TimeSpan.FromMilliseconds(200);
+#endif
 
     // Bounded retry for a changed file that is not readable yet (audit M8-09 M1). Consecutive failed read
     // attempts per path; the dictionary is created lazily on the FIRST failure, so the steady-state poll never
@@ -176,8 +179,9 @@ public sealed class Renderer : IDisposable
 
         try
         {
-            // Owned by the Renderer and borrowed by every pass for its Build + Reload path.
-            _shaderCompiler = new ShaderCompiler();
+            // Owned by the Renderer and borrowed by every pass for its Build + Reload path. CreateForBuild picks
+            // the mode (Debug = full runtime compilation + hot reload; Release = pre-cooked only, no shaderc).
+            _shaderCompiler = ShaderCompiler.CreateForBuild();
 
             // Set 0 = per-frame data (spec §3.4): binding 0 camera (view/proj/position — the PBR
             // fragment stage needs the eye position), binding 1 lights (M5, decision 4), binding 2 the
@@ -274,6 +278,9 @@ public sealed class Renderer : IDisposable
             // files to watch. The reloader spins up FileSystemWatcher(s) on their source directories; the
             // resulting change flag is drained in PollShaderReload at the frame boundary.
             _reloadablePasses = [_shadowPass, _scenePass, _skyboxPass, _tonemapPass];
+#if DEBUG
+            // Hot reload is a Debug-only luxury (Phase 2 rule §2.1-2): a shipping build spins up no watcher thread
+            // and _reloader stays null, so PollShaderReload is a no-op. Only Debug watches the source files.
             var watchedFiles = new HashSet<string>(ShaderIncludeResolver.PathComparer);
             foreach (var pass in _reloadablePasses)
             {
@@ -284,6 +291,7 @@ public sealed class Renderer : IDisposable
             }
 
             _reloader = new ShaderHotReloader(watchedFiles, ShaderReloadDebounce);
+#endif
         }
         catch
         {

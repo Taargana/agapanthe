@@ -23,13 +23,39 @@ public sealed unsafe class ShaderCompiler : IDisposable
     private Shaderc? _shaderc;
     private Compiler* _compiler;
     private readonly string _cacheDirectory;
+    private readonly bool _precompiledOnly;
     private bool _disposed;
 
-    public ShaderCompiler(string? cacheDirectory = null)
+    /// <param name="cacheDirectory">Where <c>.spv</c> blobs live; defaults to <c>.shadercache</c> beside the app.</param>
+    /// <param name="precompiledOnly">
+    /// When <c>true</c> (Phase 2 rule §2.1-2, a shipping build), a cache miss is a hard failure: it throws a
+    /// <see cref="GraphicsException"/> instead of loading shaderc and compiling. The build ships a fully
+    /// pre-cooked cache (W3 precompiler); a miss means a shader is missing from it, and silently falling back to
+    /// runtime compilation would defeat the whole point (shaderc would be loaded in prod). Defaults to
+    /// <c>false</c> (full runtime compilation) — the Debug/hot-reload behaviour and every unit test rely on it.
+    /// Prefer <see cref="CreateForBuild"/> over passing this directly so the Debug/Release choice lives in one place.
+    /// </param>
+    public ShaderCompiler(string? cacheDirectory = null, bool precompiledOnly = false)
     {
         _cacheDirectory = cacheDirectory ?? Path.Combine(AppContext.BaseDirectory, ".shadercache");
+        _precompiledOnly = precompiledOnly;
         Directory.CreateDirectory(_cacheDirectory);
         ResourceTracker.Register(nameof(ShaderCompiler));
+    }
+
+    /// <summary>
+    /// Builds a <see cref="ShaderCompiler"/> in the mode appropriate to the build configuration — the single
+    /// place the Debug/Release policy of Phase 2 rule §2.1-2 is decided. Debug: full runtime compilation (shaderc
+    /// loaded lazily on the first miss, hot reload active). Release: pre-cooked only — a miss throws rather than
+    /// loading shaderc, so a shipping build never embeds nor loads the native compiler.
+    /// </summary>
+    public static ShaderCompiler CreateForBuild(string? cacheDirectory = null)
+    {
+#if DEBUG
+        return new ShaderCompiler(cacheDirectory, precompiledOnly: false);
+#else
+        return new ShaderCompiler(cacheDirectory, precompiledOnly: true);
+#endif
     }
 
     /// <summary>
@@ -81,10 +107,22 @@ public sealed unsafe class ShaderCompiler : IDisposable
         ArgumentNullException.ThrowIfNull(sourceName);
         ObjectDisposedException.ThrowIf(_disposed, this);
 
-        var cachePath = Path.Combine(_cacheDirectory, CacheKey(source, stage));
+        var cacheKey = CacheKey(source, stage);
+        var cachePath = Path.Combine(_cacheDirectory, cacheKey);
         if (TryReadCache(cachePath, out var cached))
         {
             return cached;
+        }
+
+        // Pre-cooked-only build (Phase 2 rule §2.1-2, spec §4): a miss is an explicit failure, never a silent
+        // fall-back to runtime compilation — shaderc is not meant to be loaded here. The message names the exact
+        // key so the missing shader can be added to the shipped cache (W3 precompiler).
+        if (_precompiledOnly)
+        {
+            throw new GraphicsException(
+                $"Shader '{sourceName}' ({stage}) is not in the pre-cooked SPIR-V cache " +
+                $"('{cacheKey}' under '{_cacheDirectory}'). This build compiles no shaders at runtime " +
+                "(no shaderc); the shader must be produced by the build-time precompiler.");
         }
 
         var spirv = CompileWithShaderc(source, stage, sourceName);

@@ -164,6 +164,41 @@ public sealed class ShaderCompilerTests : IDisposable
         Assert.Equal(spirv, File.ReadAllBytes(cachePath));
     }
 
+    // --- Pre-cooked-only mode (Phase 2 rule §2.1-2, spec §4) ------------------------------------------------
+
+    [Fact]
+    public void PrecompiledOnly_CacheMiss_ThrowsExplicitlyInsteadOfLoadingShaderc()
+    {
+        // A shipping build (precompiledOnly: true) must never fall back to runtime compilation. A shader absent
+        // from the shipped cache is a hard, explicit failure — not a silent shaderc load.
+        using var compiler = new ShaderCompiler(_cacheDir, precompiledOnly: true);
+
+        var ex = Assert.Throws<GraphicsException>(
+            () => compiler.Compile(ValidVertex, ShaderStage.Vertex, "missing.vert"));
+
+        Assert.Contains("pre-cooked", ex.Message, StringComparison.OrdinalIgnoreCase);
+        // Nothing was compiled or written: the cache stays empty (no fall-back to shaderc).
+        Assert.Empty(Directory.GetFiles(_cacheDir, "*.spv"));
+    }
+
+    [Fact]
+    public void PrecompiledOnly_CacheHit_ReturnsCachedBlobWithoutCompiling()
+    {
+        // Pre-cook the cache with a full compiler (stands in for the W3 build-time precompiler), then a
+        // precompiled-only compiler reading the same source must return the exact cached bytes — a miss would
+        // have thrown, so a successful return proves the pre-cooked cache path serves it with no shaderc.
+        byte[] expected;
+        using (var precook = new ShaderCompiler(_cacheDir))
+        {
+            expected = precook.Compile(ValidVertex, ShaderStage.Vertex, "test.vert");
+        }
+
+        using var shipping = new ShaderCompiler(_cacheDir, precompiledOnly: true);
+        var served = shipping.Compile(ValidVertex, ShaderStage.Vertex, "test.vert");
+
+        Assert.Equal(expected, served);
+    }
+
     [Fact]
     public void Compile_InvalidGlsl_Throws()
     {
