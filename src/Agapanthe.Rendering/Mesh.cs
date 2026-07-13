@@ -17,8 +17,8 @@ namespace Agapanthe.Rendering;
 /// (deferred through the device DeletionQueue by <see cref="GpuBuffer"/> itself).
 /// </para>
 /// <para>
-/// <b>Conventions.</b> Positions/normals are in the mesh's local space; <see cref="WorldTransform"/> (glTF
-/// hierarchy already flattened, <c>System.Numerics</c> row-vector convention) maps them to world space.
+/// <b>Conventions.</b> Positions/normals are in the mesh's local space; the local-to-world matrix belongs to the
+/// entity that references this mesh (the ECS <c>WorldTransform</c> component), not to the mesh itself.
 /// Tangent <c>w</c> is glTF handedness: <c>bitangent = w · cross(normal, tangent.xyz)</c>.
 /// </para>
 /// </summary>
@@ -30,13 +30,12 @@ public sealed class Mesh : IDisposable
 
     private Mesh(
         GpuBuffer vertexBuffer, GpuBuffer indexBuffer, IndexFormat indexFormat, uint indexCount,
-        Matrix4x4 worldTransform, int materialIndex, string name)
+        int materialIndex, string name)
     {
         _vertexBuffer = vertexBuffer;
         _indexBuffer = indexBuffer;
         IndexFormat = indexFormat;
         IndexCount = indexCount;
-        WorldTransform = worldTransform;
         MaterialIndex = materialIndex;
         Name = name;
     }
@@ -53,8 +52,10 @@ public sealed class Mesh : IDisposable
     /// <summary>Number of indices to draw.</summary>
     public uint IndexCount { get; }
 
-    /// <summary>Local-to-world transform, copied from the source <see cref="MeshAsset.WorldTransform"/>.</summary>
-    public Matrix4x4 WorldTransform { get; }
+    // The local-to-world matrix used to live here. It is now carried by the ECS (the entity's WorldTransform
+    // component, baked into RenderItem by the render-list builder), and the draw loop reads it from there.
+    // Keeping a copy on the GPU mesh would be a second source of truth for the same matrix, free to diverge from
+    // the world the day anything moves (audit M2, minor 3).
 
     /// <summary>Material index into <see cref="ModelAsset.Materials"/>, or <c>-1</c> for the engine default material.</summary>
     public int MaterialIndex { get; }
@@ -136,7 +137,7 @@ public sealed class Mesh : IDisposable
 
             return new Mesh(
                 vertexBuffer, indexBuffer, indexFormat, indexCount,
-                asset.WorldTransform, asset.MaterialIndex, asset.Name);
+                asset.MaterialIndex, asset.Name);
         }
         catch
         {

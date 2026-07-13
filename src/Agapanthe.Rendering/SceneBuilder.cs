@@ -94,33 +94,10 @@ public static class SceneBuilder
         }
     }
 
-    /// <summary>
-    /// Folds a world-space axis-aligned bounding box over every mesh's positions, each transformed by its
-    /// <see cref="MeshAsset.WorldTransform"/>. Pure and GPU-free so it is unit-testable on synthetic meshes.
-    /// A model with no geometry (no meshes, or meshes with no positions) returns the degenerate box
-    /// <c>(0,0,0)–(0,0,0)</c> rather than the inverted infinities of an empty fold.
-    /// </summary>
-    public static (Vector3 Min, Vector3 Max) ComputeWorldBounds(IReadOnlyList<MeshAsset> meshes)
-    {
-        ArgumentNullException.ThrowIfNull(meshes);
-
-        var min = new Vector3(float.PositiveInfinity);
-        var max = new Vector3(float.NegativeInfinity);
-
-        foreach (var mesh in meshes)
-        {
-            var world = mesh.WorldTransform;
-            foreach (var localPos in mesh.Positions)
-            {
-                var p = Vector3.Transform(localPos, world);
-                min = Vector3.Min(min, p);
-                max = Vector3.Max(max, p);
-            }
-        }
-
-        // min.X > max.X only when the fold never ran (no vertices): collapse to a point at the origin.
-        return min.X > max.X ? (Vector3.Zero, Vector3.Zero) : (min, max);
-    }
+    // ComputeWorldBounds (the whole-model fold) is gone: the scene extent is now the world's union of the
+    // per-entity bounds (system 2). Keeping it would have left a second, already-diverging source of truth for
+    // the same quantity (audit M2 MEDIUM-2). Its unit tests now exercise the production path —
+    // ComputeMeshWorldBounds + Double3Bounds.Union.
 
     /// <summary>
     /// The three shared 1×1 placeholders bound to absent texture slots (index order matches the array
@@ -295,8 +272,16 @@ public static class SceneBuilder
 
     /// <summary>
     /// World-space AABB of a single mesh: its positions transformed by its own <see cref="MeshAsset.WorldTransform"/>.
-    /// Same float arithmetic as <see cref="ComputeWorldBounds"/> — that one is now its union over all meshes.
-    /// A mesh with no positions yields the degenerate point box at the origin.
+    /// Float arithmetic, so the union of these folds is bit-for-bit the whole-model fold the old
+    /// <c>Scene.Bounds*</c> used (min/max are exact and associative).
+    /// <para>
+    /// A mesh with no positions returns the <b>empty</b> fold (inverted infinities), NOT a zero box: the zero box
+    /// is not the neutral element of a union, so a single empty primitive would drag the scene bounds back to the
+    /// origin — doubling the extent of a model that sits far from it, and silently moving the camera framing and
+    /// the shadow matrix (audit M2 MEDIUM-1). Inverted infinities are absorbed by <see cref="Double3Bounds.Union"/>,
+    /// and if EVERY mesh is empty the consumers' <see cref="Double3Bounds.IsEmpty"/> guard collapses the result to
+    /// the degenerate zero box — exactly the old whole-model behaviour.
+    /// </para>
     /// </summary>
     public static (Vector3 Min, Vector3 Max) ComputeMeshWorldBounds(MeshAsset mesh)
     {
@@ -313,7 +298,7 @@ public static class SceneBuilder
             max = Vector3.Max(max, p);
         }
 
-        return min.X > max.X ? (Vector3.Zero, Vector3.Zero) : (min, max);
+        return (min, max);
     }
 
     private static void DisposeAll(Material[] materials)

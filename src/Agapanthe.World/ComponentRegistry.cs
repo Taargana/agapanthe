@@ -1,3 +1,5 @@
+using Arch.Core;
+
 namespace Agapanthe.World;
 
 /// <summary>
@@ -22,15 +24,18 @@ public static class ComponentRegistry
 {
     private static readonly Lock InitLock = new();
     private static readonly List<Type> Components = new(8);
+    private static readonly IReadOnlyList<Type> ReadOnlyComponents = Components.AsReadOnly();
     private static volatile bool _initialized;
 
     /// <summary>Every registered component type. Accessing it guarantees <see cref="RootAll"/> has run.</summary>
+    /// <remarks>Wrapped, not the backing list: an <c>IReadOnlyList</c> returning the live <c>List</c> could be
+    /// cast back and mutated by a caller (audit M2, minor).</remarks>
     public static IReadOnlyList<Type> All
     {
         get
         {
             EnsureInitialized();
-            return Components;
+            return ReadOnlyComponents;
         }
     }
 
@@ -78,6 +83,16 @@ public static class ComponentRegistry
         // is what makes the ILC keep the T[] type — it is the reachability of the opcode, not the survival of the
         // instance, that roots the array. GC.KeepAlive only stops the (harmless) allocation being collected early.
         GC.KeepAlive(new T[1]);
+
+        // Force Arch to assign this component's type id HERE, inside our lock (audit M2: both auditors converged
+        // on this). Arch assigns those ids in process-global state on first touch, WITHOUT a lock: left lazy, the
+        // first touch happened later — at World.Create, off this lock — so two worlds built concurrently could
+        // race and end up with mismatched chunk arrays (a component read back as all-zero: observed,
+        // reproducible). Touching Component<T>.ComponentType here means every id is assigned exactly once,
+        // serialized, before any world exists — the race is closed by construction rather than by convention.
+        // (Creating the worlds themselves is still not thread-safe on Arch's side: see GameWorld's contract.)
+        _ = Component<T>.ComponentType;
+
         Components.Add(typeof(T));
     }
 }

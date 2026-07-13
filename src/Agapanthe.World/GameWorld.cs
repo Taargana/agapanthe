@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Linq;
 using System.Numerics;
 using System.Runtime.CompilerServices;
@@ -19,11 +20,17 @@ namespace Agapanthe.World;
 /// (spec §6.1) before any entity exists.
 /// </summary>
 /// <remarks>
-/// <b>Threading contract: construct and drive a GameWorld from ONE thread.</b> Arch assigns component-type ids in
-/// process-global state on first touch, and that registration is not thread-safe: two worlds built concurrently
-/// can end up with mismatched chunk arrays (observed — a component read back as all-zero). The engine creates a
-/// single world on the main thread, and the tests serialize their world-touching classes for the same reason.
-/// Parallel iteration inside a world (a future job system) is a separate question, unaffected by this.
+/// <b>Threading contract: construct and drive a GameWorld from ONE thread</b> — enforced by
+/// <see cref="AssertOwnerThread"/> in Debug, free in Release.
+/// <para>
+/// The component-type-id race is closed by construction: Arch assigns those ids in process-global state on first
+/// touch, without a lock, and that touch used to happen lazily at <c>World.Create</c> — so two worlds built
+/// concurrently could end up with mismatched chunk arrays (a component read back as all-zero, reproducible).
+/// <see cref="ComponentRegistry"/> now forces every id to be assigned inside its own lock before any world
+/// exists. Arch's world creation itself (a static world table) remains unguarded, which is why the contract
+/// above still stands and the tests still serialize their world-touching classes.
+/// </para>
+/// <para>Parallel iteration WITHIN one world (a future job system) is a separate question, unaffected by this.</para>
 /// </remarks>
 public sealed class GameWorld : IDisposable
 {
@@ -38,7 +45,28 @@ public sealed class GameWorld : IDisposable
     private static readonly QueryDescription BoundsDesc = new QueryDescription().WithAll<Bounds>();
     private static readonly QueryDescription DrawableDesc = new QueryDescription().WithAll<WorldTransform, MeshRef, RenderOrder>();
 
+    // The thread that built this world. Arch's world creation and entity storage are not thread-safe, so a world
+    // is owned by one thread; the guard below turns that contract from a comment into a checked invariant
+    // (audit M2: "a contract that is not guarded is a contract that will be violated at the first job system").
+    private readonly int _ownerThreadId = Environment.CurrentManagedThreadId;
+
     private bool _disposed;
+
+    /// <summary>
+    /// Debug-only guard: a GameWorld must be driven from the thread that created it. <see cref="ConditionalAttribute"/>
+    /// compiles the call away entirely in Release, so the zero-alloc hot path pays nothing for it.
+    /// </summary>
+    [Conditional("DEBUG")]
+    private void AssertOwnerThread([CallerMemberName] string caller = "")
+    {
+        if (Environment.CurrentManagedThreadId != _ownerThreadId)
+        {
+            throw new InvalidOperationException(
+                $"GameWorld.{caller} was called from thread {Environment.CurrentManagedThreadId}, but the world is " +
+                $"owned by thread {_ownerThreadId}. A world is single-threaded (Arch's world creation and entity " +
+                "storage are not thread-safe).");
+        }
+    }
 
     public GameWorld()
     {
@@ -56,6 +84,7 @@ public sealed class GameWorld : IDisposable
     public void SpawnImported(in ImportedEntitySpec spec)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
+        AssertOwnerThread();
         _world.Create(
             new GlobalId { Value = spec.Order },
             new WorldTransform { Value = spec.World },
@@ -74,6 +103,7 @@ public sealed class GameWorld : IDisposable
     internal int AotRootingSmoke()
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
+        AssertOwnerThread();
 
         // Imported-shape entities (GlobalId, WorldTransform, MeshRef, Bounds, RenderOrder).
         for (var i = 0; i < 8; i++)
@@ -107,7 +137,20 @@ public sealed class GameWorld : IDisposable
         PropagateTransforms();
         _ = AggregateBounds();
 
-        // Chunk-iteration query (the path the systems use) touching several component arrays.
+        // ALL THREE systems, so the probe covers exactly what the game runs per frame (audit M2, minor 1):
+        // CollectRenderLists is the only user of GetSpan<MeshRef>() / GetSpan<RenderOrder>(), which the smoke
+        // would otherwise leave untested under AOT. It sees the 8 imported drawables — not the CommandBuffer
+        // entity above, which has no MeshRef.
+        var render = new RenderList();
+        CollectRenderLists(render, new RenderList());
+        if (render.Count != 8)
+        {
+            throw new InvalidOperationException(
+                $"AOT smoke: CollectRenderLists produced {render.Count} drawables, expected 8.");
+        }
+
+        // Chunk-iteration query (the path the systems use) touching several component arrays. Counts the 8
+        // imported entities plus the deferred CommandBuffer one (WorldTransform + RenderOrder, no MeshRef).
         var count = 0;
         foreach (ref var chunk in _world.Query(new QueryDescription().WithAll<WorldTransform, RenderOrder>()))
         {
@@ -128,6 +171,7 @@ public sealed class GameWorld : IDisposable
     public void PropagateTransforms()
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
+        AssertOwnerThread();
         foreach (ref var chunk in _world.Query(in PropagateDesc))
         {
             var entities = chunk.Entities;
@@ -148,6 +192,7 @@ public sealed class GameWorld : IDisposable
     public Double3Bounds AggregateBounds()
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
+        AssertOwnerThread();
         var acc = Double3Bounds.Empty;
         foreach (ref var chunk in _world.Query(in BoundsDesc))
         {
@@ -175,6 +220,7 @@ public sealed class GameWorld : IDisposable
     public void CollectRenderLists(RenderList render, RenderList shadowCasters)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
+        AssertOwnerThread();
         ArgumentNullException.ThrowIfNull(render);
         ArgumentNullException.ThrowIfNull(shadowCasters);
 
