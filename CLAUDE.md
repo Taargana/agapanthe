@@ -56,7 +56,7 @@ Sessions pilotées via **absolute-human** (décomposition en tâches, vagues par
 - **Travail en vagues + feu vert** : décomposer en vagues, attendre l'accord de l'humain entre les étapes, lancer les audits subagents (`csharp-lowlevel` + `engine-architect`) avant de clore un jalon.
 - **Vérification visuelle headless** : captures headless (`AGAPANTHE_CAPTURE`) à chaque vague pour prouver le rendu ; **verdict visuel humain** requis avant de marquer un jalon `done`.
 - **Gate 0 leak / 0 validation** : tout message de validation layer ou tout leak ResourceTracker est **bloquant**, jamais ignoré ni contourné.
-- **Langue** : conversation en **français** (phrases complètes) ; **code, commits, PRs et docs techniques en anglais**.
+- **Langue** : conversation en **français** (phrases complètes) ; **code, commits, PRs et docs techniques en anglais**. Dans la prose française, les **termes techniques du domaine restent en anglais** (shader baking, culling, frustum, shadow mapping, tie-break, radix sort, lockstep, instance buffer, server meshing…) — ne pas les traduire (« précuit » pour *baking* est à proscrire).
 
 ## État courant
 
