@@ -11,3 +11,4 @@ artifacts/
 
 # Session-local temp captures/scripts (never pushed)
 scratchpad_run/
+TestResults/
