@@ -268,42 +268,49 @@ public static class SceneBuilder
             rotationScale.M42 = 0f;
             rotationScale.M43 = 0f;
 
-            var (min, max) = ComputeMeshWorldBounds(meshAsset);
-            entries[i] = new MeshEntry(resolved, position, rotationScale, new Double3(min), new Double3(max));
+            var (center, radius) = ComputeMeshLocalSphere(meshAsset);
+            entries[i] = new MeshEntry(resolved, position, rotationScale, center, radius);
         }
 
         return entries;
     }
 
     /// <summary>
-    /// World-space AABB of a single mesh: its positions transformed by its own <see cref="MeshAsset.WorldTransform"/>.
-    /// Float arithmetic, so the union of these folds is bit-for-bit the whole-model fold the old
-    /// <c>Scene.Bounds*</c> used (min/max are exact and associative).
+    /// The mesh's LOCAL bounding sphere (spec §3.4, M4): centre = the local-space vertex AABB's centre, radius =
+    /// the farthest vertex from that centre. Local — the positions are NOT transformed by the mesh's world matrix,
+    /// because the entity's placement travels separately (position + rotation/scale) and the world sphere is
+    /// derived from this one per frame. The farthest-vertex radius is tight (it hugs the geometry, not the AABB
+    /// corner), so culling keeps false positives to a minimum.
     /// <para>
-    /// A mesh with no positions returns the <b>empty</b> fold (inverted infinities), NOT a zero box: the zero box
-    /// is not the neutral element of a union, so a single empty primitive would drag the scene bounds back to the
-    /// origin — doubling the extent of a model that sits far from it, and silently moving the camera framing and
-    /// the shadow matrix (audit M2 MEDIUM-1). Inverted infinities are absorbed by <see cref="Double3Bounds.Union"/>,
-    /// and if EVERY mesh is empty the consumers' <see cref="Double3Bounds.IsEmpty"/> guard collapses the result to
-    /// the degenerate zero box — exactly the old whole-model behaviour.
+    /// A mesh with no positions yields a zero sphere at the local origin; unioned into the scene extent it is
+    /// harmless (a point at the entity's own position), and the empty-scene guards downstream still hold.
     /// </para>
     /// </summary>
-    public static (Vector3 Min, Vector3 Max) ComputeMeshWorldBounds(MeshAsset mesh)
+    public static (Vector3 Center, float Radius) ComputeMeshLocalSphere(MeshAsset mesh)
     {
         ArgumentNullException.ThrowIfNull(mesh);
 
+        if (mesh.Positions.Length == 0)
+        {
+            return (Vector3.Zero, 0f);
+        }
+
         var min = new Vector3(float.PositiveInfinity);
         var max = new Vector3(float.NegativeInfinity);
-        var world = mesh.WorldTransform;
-
-        foreach (var localPos in mesh.Positions)
+        foreach (var p in mesh.Positions)
         {
-            var p = Vector3.Transform(localPos, world);
             min = Vector3.Min(min, p);
             max = Vector3.Max(max, p);
         }
 
-        return (min, max);
+        var center = (min + max) * 0.5f;
+        var radiusSquared = 0f;
+        foreach (var p in mesh.Positions)
+        {
+            radiusSquared = MathF.Max(radiusSquared, Vector3.DistanceSquared(center, p));
+        }
+
+        return (center, MathF.Sqrt(radiusSquared));
     }
 
     private static void DisposeAll(Material[] materials)

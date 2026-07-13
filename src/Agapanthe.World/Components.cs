@@ -79,17 +79,23 @@ internal struct MeshRef
 }
 
 /// <summary>
-/// Axis-aligned bounds. In M2 this stores the WORLD-space box (static, baked from the vertex fold) so system 2
-/// is a pure union that byte-identically replaces <c>Scene.Bounds*</c>. It becomes a LOCAL AABB transformed per
-/// frame (<c>localAABB × WorldTransform</c>) in M4 when entities move and culling needs it (spec §3.4 deviation,
-/// board D5).
+/// A LOCAL bounding sphere (spec §3.4, M4) — centre and radius in the entity's own space, baked once at import.
+/// It is transformed to world space per frame for culling: <c>worldCentre = Centre·WorldTransform +
+/// WorldPosition</c>, <c>worldRadius = Radius × maxAxisScale(WorldTransform)</c>.
+/// <para>
+/// A sphere, not the M2/M3 world AABB, for two reasons the audit called out: a static world AABB is WRONG the
+/// moment an entity rotates or moves, and re-transforming an AABB each frame gives an inflated box (8 corners or
+/// 6 abs-dots). A sphere's radius is rotation-invariant, costs 16 bytes instead of 48, and the frustum test is
+/// six dot products. It over-covers slightly (never under-covers), so culling can keep an off-screen object,
+/// never drop a visible one.
+/// </para>
 /// </summary>
 [Component]
 [StructLayout(LayoutKind.Sequential)]
 internal struct Bounds
 {
-    public Double3 Min;
-    public Double3 Max;
+    public Vector3 Center;
+    public float Radius;
 }
 
 /// <summary>

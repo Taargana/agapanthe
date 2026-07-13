@@ -121,13 +121,30 @@ window.Loaded += () =>
         device, model, renderer.MaterialSetLayout, worldOrigin);
 
     world = new GameWorld();
-    foreach (var spec in specs)
+
+    // AGAPANTHE_SCENE=grid:NxN (or grid:N) replicates the loaded model across an N×N grid — the M4 load bench.
+    // One model loaded, its handles are global (M3), so every cell is just more entities pointing at the same GPU
+    // resources: thousands of drawables for one upload. Cells are spaced by the model's own diagonal so they do
+    // not overlap, and each cell bumps the draw order so no two entities share a SortKey (pre-empts the W3
+    // determinism tie-break). Unset / unparseable → the model once, as before.
+    var (rows, cols) = ParseGrid(Environment.GetEnvironmentVariable("AGAPANTHE_SCENE"));
+    if (rows * cols > 1)
     {
-        world.SpawnImported(in spec);
+        var spacing = ModelDiagonal(specs) * 1.5;
+        SpawnGrid(world, specs, rows, cols, spacing);
+        Log.Info($"Sandbox: [scene] grid {rows}x{cols} = {rows * cols * specs.Length} entities " +
+                 $"(spacing {spacing:F1} m), one model upload.");
+    }
+    else
+    {
+        foreach (var spec in specs)
+        {
+            world.SpawnImported(in spec);
+        }
     }
 
-    // System 2: the scene extent now comes from the world (union of per-entity world bounds), replacing
-    // Scene.Bounds*. Static in M2 (nothing moves), so it is folded once here rather than every frame.
+    // System 2: the scene extent now comes from the world (union of per-entity world spheres), replacing
+    // Scene.Bounds*. Static here (nothing moves yet), so it is folded once rather than every frame.
     sceneBounds = world.AggregateBounds();
 
     // Frame the model: sit the camera back by 1.5x the diagonal along a slightly-raised front direction,
@@ -529,6 +546,75 @@ static Double3 ParseDouble3(string? spec)
 
     Log.Warn($"Sandbox: could not parse '{spec}' as \"x,y,z\"; using the world origin.");
     return Double3.Zero;
+}
+
+// Parses AGAPANTHE_SCENE=grid:NxN or grid:N into (rows, cols). Anything else → (1, 1) = the model once.
+static (int Rows, int Cols) ParseGrid(string? spec)
+{
+    if (spec is null || !spec.StartsWith("grid:", StringComparison.OrdinalIgnoreCase))
+    {
+        return (1, 1);
+    }
+
+    var dims = spec[5..].Split('x');
+    if (dims.Length == 1 && int.TryParse(dims[0], out var n) && n > 0)
+    {
+        return (n, n);
+    }
+
+    if (dims.Length == 2 && int.TryParse(dims[0], out var r) && int.TryParse(dims[1], out var c) && r > 0 && c > 0)
+    {
+        return (r, c);
+    }
+
+    Log.Warn($"Sandbox: could not parse AGAPANTHE_SCENE='{spec}' (expected grid:N or grid:RxC); using one model.");
+    return (1, 1);
+}
+
+// The model's world-space diagonal, from the base specs: the span of every drawable's world sphere. Used to space
+// grid cells so copies of the model do not overlap. Differences cancel any world origin baked into the positions.
+static double ModelDiagonal(ImportedEntitySpec[] specs)
+{
+    if (specs.Length == 0)
+    {
+        return 1d;
+    }
+
+    var min = new Double3(double.PositiveInfinity, double.PositiveInfinity, double.PositiveInfinity);
+    var max = new Double3(double.NegativeInfinity, double.NegativeInfinity, double.NegativeInfinity);
+    foreach (var s in specs)
+    {
+        var r = s.BoundsRadius * MathHelpers.MaxAxisScale(s.RotationScale);
+        var c = s.Position + new Double3(Vector3.Transform(s.BoundsCenter, s.RotationScale));
+        var rr = new Double3(r, r, r);
+        min = Double3.Min(min, c - rr);
+        max = Double3.Max(max, c + rr);
+    }
+
+    return Math.Max(Double3.Distance(min, max), 1d);
+}
+
+// Spawns rows×cols copies of the model, centred on the base position, spaced on the X/Z plane. Each cell offsets
+// every spec's position and bumps its draw order so the whole grid has unique, deterministic SortKeys.
+static void SpawnGrid(GameWorld world, ImportedEntitySpec[] specs, int rows, int cols, double spacing)
+{
+    var halfR = (rows - 1) * 0.5;
+    var halfC = (cols - 1) * 0.5;
+    for (var r = 0; r < rows; r++)
+    {
+        for (var c = 0; c < cols; c++)
+        {
+            var offset = new Double3((c - halfC) * spacing, 0, (r - halfR) * spacing);
+            var cell = (r * cols) + c;
+            var orderBase = (uint)(cell * specs.Length);
+            foreach (var s in specs)
+            {
+                world.SpawnImported(new ImportedEntitySpec(
+                    s.Mesh, s.Material, s.Position + offset, s.RotationScale,
+                    s.BoundsCenter, s.BoundsRadius, orderBase + s.Order));
+            }
+        }
+    }
 }
 
 // The scene's centre (in double — it may be 10 000 km out) and the float diagonal the framing and the light

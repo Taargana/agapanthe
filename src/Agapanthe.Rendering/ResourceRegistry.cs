@@ -115,8 +115,8 @@ public sealed class ResourceRegistry : IDisposable
                     materialHandles[entry.LocalMaterialIndex],
                     entry.Position + worldOrigin,
                     entry.RotationScale,
-                    entry.BoundsMin + worldOrigin,
-                    entry.BoundsMax + worldOrigin,
+                    entry.BoundsCenter, // local sphere — independent of where the model is placed in the world
+                    entry.BoundsRadius,
                     (uint)i);
             }
 

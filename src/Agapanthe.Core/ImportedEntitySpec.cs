@@ -13,8 +13,10 @@ namespace Agapanthe.Core;
 /// must stay in double until the frame's camera origin is subtracted from it. Recombining the two at the origin
 /// reproduces the asset matrix bit-for-bit (spec §6 condition a).
 /// </para>
-/// <para><see cref="BoundsMin"/>/<see cref="BoundsMax"/> are the world-space vertex fold. <see cref="Order"/> is
-/// the source mesh index, i.e. the stable draw order (spec §6 condition b).</para>
+/// <para><see cref="BoundsCenter"/>/<see cref="BoundsRadius"/> are the mesh's LOCAL bounding sphere (spec §3.4,
+/// M4): local because the entity's placement lives in <see cref="Position"/>/<see cref="RotationScale"/>, and the
+/// world sphere is derived from them per frame. <see cref="Order"/> is the source mesh index, i.e. the stable
+/// draw order (spec §6 condition b).</para>
 /// </summary>
 public readonly struct ImportedEntitySpec
 {
@@ -27,8 +29,12 @@ public readonly struct ImportedEntitySpec
     /// <summary>The asset's baked matrix with a zero translation row: rotation, scale and shear only.</summary>
     public readonly Matrix4x4 RotationScale;
 
-    public readonly Double3 BoundsMin;
-    public readonly Double3 BoundsMax;
+    /// <summary>Local bounding-sphere centre (in the mesh's own space, before <see cref="RotationScale"/>).</summary>
+    public readonly Vector3 BoundsCenter;
+
+    /// <summary>Local bounding-sphere radius.</summary>
+    public readonly float BoundsRadius;
+
     public readonly uint Order;
 
     public ImportedEntitySpec(
@@ -36,16 +42,16 @@ public readonly struct ImportedEntitySpec
         MaterialHandle material,
         Double3 position,
         in Matrix4x4 rotationScale,
-        Double3 boundsMin,
-        Double3 boundsMax,
+        Vector3 boundsCenter,
+        float boundsRadius,
         uint order)
     {
         Mesh = mesh;
         Material = material;
         Position = position;
         RotationScale = rotationScale;
-        BoundsMin = boundsMin;
-        BoundsMax = boundsMax;
+        BoundsCenter = boundsCenter;
+        BoundsRadius = boundsRadius;
         Order = order;
     }
 }

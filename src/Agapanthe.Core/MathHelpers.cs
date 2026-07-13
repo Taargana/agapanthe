@@ -43,6 +43,19 @@ public static class MathHelpers
     public static Matrix4x4 LookAt(Vector3 eye, Vector3 target, Vector3 up)
         => Matrix4x4.CreateLookAt(eye, target, up);
 
+    /// <summary>
+    /// The largest per-axis scale factor of a row-vector transform: the longest of its three basis rows. Used to
+    /// grow a local bounding sphere's radius into world space (a sphere scaled non-uniformly is bounded by the
+    /// largest axis scale), so the world sphere stays conservative — it may over-cover, never under-cover.
+    /// </summary>
+    public static float MaxAxisScale(in Matrix4x4 m)
+    {
+        var x = new Vector3(m.M11, m.M12, m.M13).LengthSquared();
+        var y = new Vector3(m.M21, m.M22, m.M23).LengthSquared();
+        var z = new Vector3(m.M31, m.M32, m.M33).LengthSquared();
+        return MathF.Sqrt(MathF.Max(x, MathF.Max(y, z)));
+    }
+
     /// <summary>Projects a point through a row-vector matrix with perspective divide.</summary>
     public static Vector3 ProjectPoint(Vector3 point, in Matrix4x4 matrix)
     {

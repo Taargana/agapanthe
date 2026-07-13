@@ -88,7 +88,7 @@ public sealed class WorldSystemsTests
         var rotationScale = baked with { M41 = 0f, M42 = 0f, M43 = 0f };
         world.SpawnImported(new ImportedEntitySpec(
             new MeshHandle(0, 1), new MaterialHandle(0, 1), new Double3(7, 8, 9), rotationScale,
-            new Double3(0, 0, 0), new Double3(1, 1, 1), 0));
+            Vector3.Zero, 1f, 0));
 
         world.PropagateTransforms();
 
@@ -109,12 +109,12 @@ public sealed class WorldSystemsTests
         using var near = new GameWorld();
         near.SpawnImported(new ImportedEntitySpec(
             new MeshHandle(0, 1), new MaterialHandle(0, 1), new Double3(1.5, -2.25, 0.125), Matrix4x4.Identity,
-            Double3.Zero, Double3.Zero, 0));
+            Vector3.Zero, 0f, 0));
 
         using var farAway = new GameWorld();
         farAway.SpawnImported(new ImportedEntitySpec(
             new MeshHandle(0, 1), new MaterialHandle(0, 1), far + new Double3(1.5, -2.25, 0.125),
-            Matrix4x4.Identity, Double3.Zero, Double3.Zero, 0));
+            Matrix4x4.Identity, Vector3.Zero, 0f, 0));
 
         var atOrigin = new RenderList();
         near.CollectRenderLists(atOrigin, new RenderList(), Double3.Zero);
@@ -146,20 +146,38 @@ public sealed class WorldSystemsTests
     }
 
     [Fact]
-    public void AggregateBounds_UnionsEveryEntity()
+    public void AggregateBounds_UnionsTheWorldSpheres()
     {
+        // Each entity's LOCAL sphere is transformed to world (centre = local centre + WorldPosition, since the
+        // rotation/scale here is identity) and its enclosing box is unioned into the extent.
         using var world = new GameWorld();
-        world.SpawnImported(new ImportedEntitySpec(
+        world.SpawnImported(new ImportedEntitySpec(       // world sphere (0,0,0) r1 -> [-1,1]^3
             new MeshHandle(0, 1), new MaterialHandle(0, 1), Double3.Zero, Matrix4x4.Identity,
-            new Double3(-1, -1, -1), new Double3(1, 1, 1), 0));
-        world.SpawnImported(new ImportedEntitySpec(
-            new MeshHandle(1, 1), new MaterialHandle(0, 1), Double3.Zero, Matrix4x4.Identity,
-            new Double3(0, 0, 0), new Double3(5, 2, 0), 1));
+            Vector3.Zero, 1f, 0));
+        world.SpawnImported(new ImportedEntitySpec(       // world sphere (10,0,0) r2 -> [8,12]x[-2,2]x[-2,2]
+            new MeshHandle(1, 1), new MaterialHandle(0, 1), new Double3(10, 0, 0), Matrix4x4.Identity,
+            Vector3.Zero, 2f, 1));
 
         var bounds = world.AggregateBounds();
 
-        Assert.Equal(new Double3(-1, -1, -1), bounds.Min);
-        Assert.Equal(new Double3(5, 2, 1), bounds.Max);
+        Assert.Equal(new Double3(-1, -2, -2), bounds.Min);
+        Assert.Equal(new Double3(12, 2, 2), bounds.Max);
+    }
+
+    [Fact]
+    public void AggregateBounds_GrowsTheRadiusByTheTransformScale()
+    {
+        // A local sphere of radius 1, on an entity scaled x3, must aggregate to a world sphere of radius 3 — the
+        // conservative max-axis-scale growth, so a scaled object is never under-covered.
+        using var world = new GameWorld();
+        world.SpawnImported(new ImportedEntitySpec(
+            new MeshHandle(0, 1), new MaterialHandle(0, 1), Double3.Zero, Matrix4x4.CreateScale(3f),
+            Vector3.Zero, 1f, 0));
+
+        var bounds = world.AggregateBounds();
+
+        Assert.Equal(new Double3(-3, -3, -3), bounds.Min);
+        Assert.Equal(new Double3(3, 3, 3), bounds.Max);
     }
 
     [Fact]
@@ -183,7 +201,7 @@ public sealed class WorldSystemsTests
         {
             world.SpawnImported(new ImportedEntitySpec(
                 new MeshHandle(i, 1), new MaterialHandle(0, 1), new Double3(i, 0, 0), Matrix4x4.Identity,
-                new Double3(i, 0, 0), new Double3(i + 1, 1, 1), (uint)i));
+                Vector3.Zero, 1f, (uint)i));
         }
 
         var render = new RenderList();

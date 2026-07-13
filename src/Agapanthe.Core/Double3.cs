@@ -58,6 +58,14 @@ public readonly struct Double3 : IEquatable<Double3>
 
     public static double Distance(Double3 a, Double3 b) => (a - b).Length;
 
+    /// <summary>Component-wise minimum.</summary>
+    public static Double3 Min(Double3 a, Double3 b)
+        => new(Math.Min(a.X, b.X), Math.Min(a.Y, b.Y), Math.Min(a.Z, b.Z));
+
+    /// <summary>Component-wise maximum.</summary>
+    public static Double3 Max(Double3 a, Double3 b)
+        => new(Math.Max(a.X, b.X), Math.Max(a.Y, b.Y), Math.Max(a.Z, b.Z));
+
     /// <summary>
     /// Narrows to a float <see cref="Vector3"/> expressed RELATIVE to <paramref name="origin"/> — the
     /// camera-relative operation that materialises large-coordinate rendering (spec §3.3). Subtracting in

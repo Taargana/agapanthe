@@ -32,5 +32,5 @@ internal readonly record struct MeshEntry(
     int LocalMaterialIndex,
     Double3 Position,
     Matrix4x4 RotationScale,
-    Double3 BoundsMin,
-    Double3 BoundsMax);
+    Vector3 BoundsCenter,
+    float BoundsRadius);

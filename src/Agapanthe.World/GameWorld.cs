@@ -43,7 +43,8 @@ public sealed class GameWorld : IDisposable
     // Built once: constructing a QueryDescription per frame would defeat the zero-alloc goal.
     private static readonly QueryDescription PropagateDesc =
         new QueryDescription().WithAll<LocalTransform, WorldTransform, WorldPosition>();
-    private static readonly QueryDescription BoundsDesc = new QueryDescription().WithAll<Bounds>();
+    private static readonly QueryDescription BoundsDesc =
+        new QueryDescription().WithAll<WorldTransform, WorldPosition, Bounds>();
     private static readonly QueryDescription DrawableDesc =
         new QueryDescription().WithAll<WorldTransform, WorldPosition, MeshRef, RenderOrder>();
 
@@ -93,7 +94,7 @@ public sealed class GameWorld : IDisposable
             new WorldTransform { Value = spec.RotationScale },
             new WorldPosition { Value = spec.Position },
             new MeshRef { Mesh = spec.Mesh, Material = spec.Material },
-            new Bounds { Min = spec.BoundsMin, Max = spec.BoundsMax },
+            new Bounds { Center = spec.BoundsCenter, Radius = spec.BoundsRadius },
             new RenderOrder { Value = spec.Order });
     }
 
@@ -114,7 +115,7 @@ public sealed class GameWorld : IDisposable
         {
             SpawnImported(new ImportedEntitySpec(
                 new MeshHandle(i, 1), new MaterialHandle(0, 1), new Double3(i, 0, 0), Matrix4x4.Identity,
-                new Double3(i, 0, 0), new Double3(i + 1, 1, 1), (uint)i));
+                Vector3.Zero, 1f, (uint)i));
         }
 
         // Hierarchical-shape entities (LocalTransform, Parent) — the two components SpawnImported does not touch.
@@ -191,9 +192,11 @@ public sealed class GameWorld : IDisposable
     }
 
     /// <summary>
-    /// System 2: unions every entity's world-space <see cref="Bounds"/> into the scene extent (spec §3.5). This
-    /// replaces <c>Scene.BoundsMin/Max/Center/Diagonal</c>. Zero-alloc (chunk iteration). Returns
-    /// <see cref="Double3Bounds.Empty"/> if there are no bounded entities (the caller guards degenerate extents).
+    /// System 2: transforms every entity's LOCAL bounding sphere to world space and unions the enclosing boxes
+    /// into the scene extent (spec §3.5). Zero-alloc (chunk iteration). Returns <see cref="Double3Bounds.Empty"/>
+    /// if there are no bounded entities (the caller guards degenerate extents). The extent is derived from the
+    /// spheres, so it is a touch looser than a raw vertex AABB — that is the price of a rotation-invariant bound,
+    /// and it only over-covers.
     /// </summary>
     public Double3Bounds AggregateBounds()
     {
@@ -202,16 +205,32 @@ public sealed class GameWorld : IDisposable
         var acc = Double3Bounds.Empty;
         foreach (ref var chunk in _world.Query(in BoundsDesc))
         {
+            var worlds = chunk.GetSpan<WorldTransform>();
+            var positions = chunk.GetSpan<WorldPosition>();
             var bounds = chunk.GetSpan<Bounds>();
             var count = chunk.Count;
             for (var i = 0; i < count; i++)
             {
-                ref var b = ref bounds[i];
-                acc = Double3Bounds.Union(acc, new Double3Bounds(b.Min, b.Max));
+                WorldSphere(worlds[i].Value, positions[i].Value, bounds[i], out var center, out var radius);
+                var r = new Double3(radius, radius, radius);
+                acc = Double3Bounds.Union(acc, new Double3Bounds(center - r, center + r));
             }
         }
 
         return acc;
+    }
+
+    /// <summary>
+    /// Transforms a local bounding sphere to world space (spec §3.4): the centre through the entity's rotation/
+    /// scale then offset by its double-precision world position, and the radius grown by the transform's largest
+    /// axis scale so it stays conservative. Kept in <see cref="Double3"/> for the centre — the scene may be
+    /// 10 000 km out — and shared by <see cref="AggregateBounds"/> and (M4) the culling loop.
+    /// </summary>
+    private static void WorldSphere(
+        in Matrix4x4 rotationScale, Double3 position, in Bounds local, out Double3 center, out float radius)
+    {
+        center = position + new Double3(Vector3.Transform(local.Center, rotationScale));
+        radius = local.Radius * MathHelpers.MaxAxisScale(rotationScale);
     }
 
     /// <summary>
