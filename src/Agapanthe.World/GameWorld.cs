@@ -76,7 +76,7 @@ public sealed class GameWorld : IDisposable
         }
 
         // Deferred structural change through a CommandBuffer (the path P2-M0 flagged as most AOT-fragile).
-        var cb = new CommandBuffer();
+        using var cb = new CommandBuffer();
         var deferred = cb.Create([Component<WorldTransform>.ComponentType]);
         cb.Set(deferred, new WorldTransform { Value = Matrix4x4.Identity });
         cb.Add(deferred, new RenderOrder { Value = 99 });

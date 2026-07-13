@@ -6,44 +6,66 @@ namespace Agapanthe.World;
 /// Under NativeAOT the ILC only emits generic code it can see instantiated. Arch stores each component in a
 /// <c>T[]</c> chunk array reached through generic paths the ILC does not pre-generate, so the first
 /// <c>World.Create&lt;…&gt;</c> throws <c>'T[]' is missing native code</c> — with NO publish warning, and it can
-/// corrupt state mid-operation. P2-M0 proved empirically that a single <c>new T[1]</c> per component type roots
-/// that array for every downstream path (Create, Add/Remove structural moves, queries, CommandBuffer). <see
-/// cref="RootAll"/> does exactly that and is called from the <see cref="GameWorld"/> constructor before any
-/// entity exists.
+/// corrupt state mid-operation. P2-M0 proved empirically that a single <c>new T[]</c> per component type roots
+/// that array for every downstream path (Create, Add/Remove structural moves, queries, CommandBuffer).
 /// </para>
 /// <para>
-/// This registry is hand-written rather than source-generated: the rooting is a trivial, proven one-liner per
-/// type, and a reflection test (<c>ComponentRegistryTests</c>) asserts every <c>[Component]</c> struct in this
-/// assembly is listed here — so forgetting one fails the test gate, not AOT at runtime. A source generator that
-/// also drives serialization is deferred to Phase 3 (spec: "un seul générateur").
+/// Rooting and registration are ONE operation (<see cref="Root{T}"/>): a type is added to <see cref="All"/>
+/// only by the same call that roots its array, so the list of components and the set of rooted arrays can never
+/// desync (audit W1 M1). A reflection test additionally asserts every <c>[Component]</c> struct is present here,
+/// so forgetting a component fails the test gate rather than AOT at runtime. This is hand-written rather than
+/// source-generated on purpose; a source generator that also drives serialization is deferred to Phase 3
+/// (spec: "un seul générateur").
 /// </para>
 /// </summary>
 public static class ComponentRegistry
 {
-    /// <summary>Every registered component type. Kept in sync with the <c>[Component]</c> structs by a reflection test.</summary>
-    public static IReadOnlyList<Type> All { get; } =
-    [
-        typeof(GlobalId),
-        typeof(LocalTransform),
-        typeof(Parent),
-        typeof(WorldTransform),
-        typeof(MeshRef),
-        typeof(Bounds),
-        typeof(RenderOrder),
-    ];
+    private static readonly List<Type> Components = new(8);
+    private static bool _initialized;
+
+    /// <summary>Every registered component type. Accessing it guarantees <see cref="RootAll"/> has run.</summary>
+    public static IReadOnlyList<Type> All
+    {
+        get
+        {
+            EnsureInitialized();
+            return Components;
+        }
+    }
 
     /// <summary>
-    /// Roots each component's <c>T[]</c> chunk-array type for the ILC (spec §6.1). One <c>new T[1]</c> per type,
-    /// kept alive so the allocation is not elided. Must run before any entity is created — see <see cref="GameWorld"/>.
+    /// Roots every component's <c>T[]</c> chunk-array type for the ILC (spec §6.1). Idempotent. Called from the
+    /// <see cref="GameWorld"/> constructor before any entity exists. Adding a component here (via one
+    /// <see cref="Root{T}"/> line) is the only way to register it — so it cannot be listed without being rooted.
     /// </summary>
-    public static void RootAll()
+    public static void RootAll() => EnsureInitialized();
+
+    private static void EnsureInitialized()
     {
-        GC.KeepAlive(new GlobalId[1]);
-        GC.KeepAlive(new LocalTransform[1]);
-        GC.KeepAlive(new Parent[1]);
-        GC.KeepAlive(new WorldTransform[1]);
-        GC.KeepAlive(new MeshRef[1]);
-        GC.KeepAlive(new Bounds[1]);
-        GC.KeepAlive(new RenderOrder[1]);
+        if (_initialized)
+        {
+            return;
+        }
+
+        // The one and only place the component set is enumerated. Each Root<T> both roots T[] and registers T.
+        Root<GlobalId>();
+        Root<LocalTransform>();
+        Root<Parent>();
+        Root<WorldTransform>();
+        Root<MeshRef>();
+        Root<Bounds>();
+        Root<RenderOrder>();
+
+        _initialized = true;
+    }
+
+    private static void Root<T>()
+        where T : struct
+    {
+        // `new T[]` emits a `newarr T[]` opcode with a concrete (struct = exact, non-shared) instantiation, which
+        // is what makes the ILC keep the T[] type — it is the reachability of the opcode, not the survival of the
+        // instance, that roots the array. GC.KeepAlive only stops the (harmless) allocation being collected early.
+        GC.KeepAlive(new T[1]);
+        Components.Add(typeof(T));
     }
 }

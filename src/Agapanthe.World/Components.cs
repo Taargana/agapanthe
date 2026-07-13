@@ -1,16 +1,20 @@
 using System.Numerics;
+using System.Runtime.InteropServices;
 using Agapanthe.Core;
 using Arch.Core;
 
 namespace Agapanthe.World;
 
-// The Phase 2 M2 component set (spec §3.4). All are blittable structs. Only POSITION needs double precision
-// (spec §3.6); rotation/scale/matrices stay float. GPU is referenced only by handle (MeshRef), never by a GPU
-// type — the seam invariant (§3.2).
+// The Phase 2 M2 component set (spec §3.4). All are blittable structs with explicit Sequential layout (prereq of
+// the future source-generated serialization). Only POSITION/bounds use Double3 (spec §3.6); rotation/scale/
+// matrices stay float. GPU is referenced only by handle (MeshRef), never by a GPU type — the seam invariant
+// (§3.2). Components are INTERNAL: nothing outside World needs them, and keeping them internal keeps Arch's
+// Entity (carried by Parent) out of any public surface (audit W1 M3).
 
 /// <summary>Stable identity, unique across processes (future streaming/serialization). Assigned at spawn.</summary>
 [Component]
-public struct GlobalId
+[StructLayout(LayoutKind.Sequential)]
+internal struct GlobalId
 {
     public ulong Value;
 }
@@ -22,7 +26,8 @@ public struct GlobalId
 /// <see cref="WorldTransform"/> directly (spec §6 condition a, byte-identical).
 /// </summary>
 [Component]
-public struct LocalTransform
+[StructLayout(LayoutKind.Sequential)]
+internal struct LocalTransform
 {
     public Double3 Position;
     public Quaternion Rotation;
@@ -30,9 +35,10 @@ public struct LocalTransform
 }
 
 /// <summary>Parent link for hierarchy propagation. Holds an Arch <see cref="Entity"/> — an implementation detail
-/// that never leaves this project (the field and this component are only touched by the world's own systems).</summary>
+/// kept internal so the ECS type never reaches a public surface (audit W1 M3).</summary>
 [Component]
-public struct Parent
+[StructLayout(LayoutKind.Sequential)]
+internal struct Parent
 {
     public Entity Value;
 }
@@ -40,7 +46,8 @@ public struct Parent
 /// <summary>World-space transform: the output of the propagation system, or the bit-exact baked matrix of an
 /// imported drawable. This is what the render-list builder reads.</summary>
 [Component]
-public struct WorldTransform
+[StructLayout(LayoutKind.Sequential)]
+internal struct WorldTransform
 {
     public Matrix4x4 Value;
 }
@@ -48,7 +55,8 @@ public struct WorldTransform
 /// <summary>The drawable payload: which mesh + material to draw, by handle (resolved to GPU resources on the
 /// render side). No GPU type crosses into the world (spec §3.2).</summary>
 [Component]
-public struct MeshRef
+[StructLayout(LayoutKind.Sequential)]
+internal struct MeshRef
 {
     public MeshHandle Mesh;
     public MaterialHandle Material;
@@ -61,7 +69,8 @@ public struct MeshRef
 /// board D5).
 /// </summary>
 [Component]
-public struct Bounds
+[StructLayout(LayoutKind.Sequential)]
+internal struct Bounds
 {
     public Double3 Min;
     public Double3 Max;
@@ -73,7 +82,8 @@ public struct Bounds
 /// In M2 it is the source mesh index.
 /// </summary>
 [Component]
-public struct RenderOrder
+[StructLayout(LayoutKind.Sequential)]
+internal struct RenderOrder
 {
     public uint Value;
 }

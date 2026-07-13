@@ -8,7 +8,10 @@
   </ItemGroup>
 
   <ItemGroup>
-    <PackageReference Include="Arch" Version="2.1.0" />
+    <!-- PrivateAssets="compile": Arch is a runtime dependency of this assembly, but its compile-time reference
+         must NOT flow to consumers (Rendering/Sandbox in W4) — they must never compile against Arch types, only
+         against GameWorld + Core value types (audit W1 M3). Runtime assets still flow, so Arch.dll ships. -->
+    <PackageReference Include="Arch" Version="2.1.0" PrivateAssets="compile" />
   </ItemGroup>
 
   <PropertyGroup>
