@@ -46,7 +46,7 @@ public sealed class GameWorld : IDisposable
     private static readonly QueryDescription BoundsDesc =
         new QueryDescription().WithAll<WorldTransform, WorldPosition, Bounds>();
     private static readonly QueryDescription DrawableDesc =
-        new QueryDescription().WithAll<WorldTransform, WorldPosition, MeshRef, RenderOrder>();
+        new QueryDescription().WithAll<WorldTransform, WorldPosition, Bounds, MeshRef, RenderOrder>();
 
     // The thread that built this world. Arch's world creation and entity storage are not thread-safe, so a world
     // is owned by one thread; the guard below turns that contract from a comment into a checked invariant
@@ -144,11 +144,17 @@ public sealed class GameWorld : IDisposable
         _ = AggregateBounds();
 
         // ALL THREE systems, so the probe covers exactly what the game runs per frame (audit M2, minor 1):
-        // CollectRenderLists is the only user of GetSpan<MeshRef>() / GetSpan<RenderOrder>(), which the smoke
-        // would otherwise leave untested under AOT. It sees the 8 imported drawables — not the CommandBuffer
-        // entity above, which has no MeshRef.
+        // CollectRenderLists is the only user of GetSpan<MeshRef/RenderOrder/Bounds>() and Frustum.Intersects,
+        // which the smoke would otherwise leave untested under AOT. A wide frustum containing the 8 imported
+        // drawables (at x 0..7) makes the count deterministic while still exercising the cull path + the
+        // camera-relative narrow. The CommandBuffer entity above has no MeshRef, so it is not a drawable.
+        var wide = Frustum.FromViewProjection(
+            MathHelpers.LookAt(Vector3.Zero, -Vector3.UnitZ, Vector3.UnitY)
+            * MathHelpers.OrthographicVulkan(200f, 200f, -100f, 100f));
+        var smokeView = new RenderView(
+            Double3.Zero, Vector3.Zero, Matrix4x4.Identity, Matrix4x4.Identity, 1f, 1f, 0.1f, 1f);
         var render = new RenderList();
-        CollectRenderLists(render, new RenderList(), new Double3(1e7, 0, 0)); // camera-relative narrow under AOT
+        CollectRenderLists(render, new RenderList(), in smokeView, in wide, in wide);
         if (render.Count != 8)
         {
             throw new InvalidOperationException(
@@ -234,15 +240,20 @@ public sealed class GameWorld : IDisposable
     }
 
     /// <summary>
-    /// Builds the two render lists (spec §3.5, systems 3-4 in PASSTHROUGH form for M2): every drawable entity
-    /// goes into both lists — no culling yet (that is M4). Both lists are sorted by <see cref="RenderOrder"/>, so
-    /// the draw order is deterministic even though Arch iterates by archetype/chunk (spec §6 condition b).
-    /// Zero-alloc: the lists are reused (Clear keeps capacity), iteration is chunk-based, the sort uses a struct
-    /// comparer.
-    /// <para>The shadow-caster list is a separate list on purpose: in M4 it is culled against the LIGHT volume,
-    /// never the camera frustum, or off-screen casters would pop their shadows in and out (spec §3.5).</para>
+    /// Builds the two render lists (spec §3.5, systems 3-4). Each drawable's world bounding sphere is tested
+    /// against two frusta: the CAMERA frustum decides the render list, the LIGHT volume decides the shadow-caster
+    /// list. They are separate on purpose — a caster off-screen still throws its shadow on-screen, so the caster
+    /// list is culled against the light, never the camera, or shadows would pop in and out at the screen edge.
+    /// Both lists are sorted by <see cref="RenderOrder"/> so the draw order is deterministic even though Arch
+    /// iterates by archetype/chunk (spec §6 condition b).
+    /// <para>
+    /// Zero-alloc: the lists are reused (Clear keeps capacity), iteration is chunk-based, no lambda. The culling
+    /// is a linear scan (six dot products per entity per frustum) — a spatial structure would have to refit every
+    /// frame in a moving world and cost more than the scan below this milestone's entity counts (board D4).
+    /// </para>
     /// </summary>
-    public void CollectRenderLists(RenderList render, RenderList shadowCasters, Double3 origin)
+    public void CollectRenderLists(
+        RenderList render, RenderList shadowCasters, in RenderView view, in Frustum cameraFrustum, in Frustum lightFrustum)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
         AssertOwnerThread();
@@ -251,23 +262,42 @@ public sealed class GameWorld : IDisposable
 
         render.Clear();
         shadowCasters.Clear();
+        var origin = view.Origin;
 
         foreach (ref var chunk in _world.Query(in DrawableDesc))
         {
             var worlds = chunk.GetSpan<WorldTransform>();
             var positions = chunk.GetSpan<WorldPosition>();
+            var bounds = chunk.GetSpan<Bounds>();
             var meshes = chunk.GetSpan<MeshRef>();
             var orders = chunk.GetSpan<RenderOrder>();
             var count = chunk.Count;
             for (var i = 0; i < count; i++)
             {
-                // THE camera-relative narrow (spec §3.3): the subtraction happens in double, and only its
-                // (small) result is cast to float. This is the single point where a world coordinate becomes a
-                // GPU coordinate — everything the GPU sees is already relative to the eye.
+                // The world bounding sphere, narrowed to camera-relative (in double, then cast) — the same space
+                // the frusta live in. Testing the sphere is what culling needs; the (heavier) model matrix is
+                // built only for entities that survive.
+                WorldSphere(worlds[i].Value, positions[i].Value, bounds[i], out var worldCenter, out var radius);
+                var center = worldCenter.ToVector3(origin);
+
+                var inCamera = cameraFrustum.Intersects(center, radius);
+                var inLight = lightFrustum.Intersects(center, radius);
+                if (!inCamera && !inLight)
+                {
+                    continue;
+                }
+
                 var model = ComposeModel(worlds[i].Value, positions[i].Value, origin);
                 var item = new RenderItem(model, meshes[i].Mesh, meshes[i].Material, orders[i].Value);
-                render.Add(item);
-                shadowCasters.Add(item); // passthrough in M2: every drawable casts
+                if (inCamera)
+                {
+                    render.Add(item);
+                }
+
+                if (inLight)
+                {
+                    shadowCasters.Add(item);
+                }
             }
         }
 

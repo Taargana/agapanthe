@@ -187,11 +187,12 @@ window.Loaded += () =>
         var view = camera.CreateView();
         world!.PropagateTransforms();
 
-        // Frame order (M4): the light matrix is computed HERE, before the render lists — so the shadow-caster
-        // list can be culled against the light volume derived from it (that culling arrives in W2; for now the
-        // lists are still passthrough). Hoisting it out of DrawScene is what makes that ordering possible.
+        // Frame order (M4): the light matrix is computed HERE, before the render lists, so the caster list can be
+        // culled against the light VOLUME (not the camera frustum). The camera frustum culls the render list.
         var lightViewProj = renderer!.ComputeLightViewProj(in view, in sceneBounds);
-        world.CollectRenderLists(renderList, shadowCasters, view.Origin);
+        var cameraFrustum = Frustum.FromViewProjection(view.View * view.Projection);
+        var lightFrustum = Frustum.FromViewProjection(lightViewProj);
+        world.CollectRenderLists(renderList, shadowCasters, in view, in cameraFrustum, in lightFrustum);
 
         renderer.DrawScene(
             renderList, shadowCasters, registry!, in view, in lightViewProj, cmd, frame, target);
