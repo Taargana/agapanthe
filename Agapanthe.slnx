@@ -8,11 +8,13 @@
     <Project Path="src/Agapanthe.Graphics/Agapanthe.Graphics.csproj" />
     <Project Path="src/Agapanthe.Platform/Agapanthe.Platform.csproj" />
     <Project Path="src/Agapanthe.Rendering/Agapanthe.Rendering.csproj" />
+    <Project Path="src/Agapanthe.World/Agapanthe.World.csproj" />
   </Folder>
   <Folder Name="/tests/">
     <Project Path="tests/Agapanthe.Tests/Agapanthe.Tests.csproj" />
   </Folder>
   <Folder Name="/tools/">
+    <Project Path="tools/AotComponentProbe/AotComponentProbe.csproj" />
     <Project Path="tools/ShaderPrecompiler/ShaderPrecompiler.csproj" />
   </Folder>
 </Solution>

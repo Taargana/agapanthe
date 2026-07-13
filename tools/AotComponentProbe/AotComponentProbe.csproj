@@ -1,0 +1,20 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- Build-time / CI gate for the AOT component rooting (spec §6.1, board P2-M2 D2). Published as NativeAOT and
+       run: if any component's T[] chunk array is not rooted, Arch throws 'T[] is missing native code' and the
+       probe exits non-zero. This is the automated proof that GameWorld/ComponentRegistry survive AOT — the same
+       role tools/ShaderPrecompiler played for the offline-SPIR-V milestone. Not referenced by any shipping app. -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <PublishAot>true</PublishAot>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\Agapanthe.World\Agapanthe.World.csproj" />
+    <ProjectReference Include="..\..\src\Agapanthe.Core\Agapanthe.Core.csproj" />
+  </ItemGroup>
+
+</Project>

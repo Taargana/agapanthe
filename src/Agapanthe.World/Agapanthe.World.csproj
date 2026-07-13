@@ -1,0 +1,23 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- The ECS world model (spec §3.4). THE ONLY project that references Arch — the Arch types (Entity, World,
+       CommandBuffer) never appear in this project's public API, so the ECS never leaks into Rendering or the
+       Sandbox (they see GameWorld + Core value types only). -->
+  <ItemGroup>
+    <ProjectReference Include="..\Agapanthe.Core\Agapanthe.Core.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Arch" Version="2.1.0" />
+  </ItemGroup>
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <!-- Phase 2 rule 1: AOT analyzers on. Arch is exercised only through blittable component structs and
+         non-reflection generic calls (validated AOT-viable in P2-M0). -->
+    <IsAotCompatible>true</IsAotCompatible>
+  </PropertyGroup>
+
+</Project>

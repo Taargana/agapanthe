@@ -23,6 +23,7 @@
     <ProjectReference Include="..\..\src\Agapanthe.Graphics\Agapanthe.Graphics.csproj" />
     <ProjectReference Include="..\..\src\Agapanthe.Assets\Agapanthe.Assets.csproj" />
     <ProjectReference Include="..\..\src\Agapanthe.Rendering\Agapanthe.Rendering.csproj" />
+    <ProjectReference Include="..\..\src\Agapanthe.World\Agapanthe.World.csproj" />
   </ItemGroup>
 
   <!-- Khronos glTF sample fixtures (Box, BoxInterleaved, BoxTextured, DamagedHelmet),
