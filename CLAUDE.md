@@ -60,10 +60,10 @@ Sessions pilotées via **absolute-human** (décomposition en tâches, vagues par
 
 ## État courant
 
-**PHASE 1 CLOSE — 8/8 jalons.** M0–M8 livrés (M8 = hot reload shaders < 1 s, labels RenderDoc, confort souris, double audit PASS). Métriques : 205 tests, 0 warning, 0 message de validation, 0 leak.
+**PHASE 1 CLOSE (8/8). PHASE 2 EN COURS — P2-M0 → P2-M3 clos** (gate AOT + Arch · SPIR-V hors-ligne · couture ECS · **camera-relative rendering**). Métriques : 257 tests, 0 warning, 0 message de validation, 0 leak, probe NativeAOT PASS.
 
-⚠️ **L'arbre M8 n'est pas committé** (l'humain pilote les commits) — 14 fichiers modifiés + 6 nouveaux. Premier geste d'une reprise : décider du/des commit(s) M8.
+**P2-M3 (session 12)** : le monde stocke les positions en `double` (`Double3`) et le GPU ne voit jamais que `objet − caméra`. Preuve : la capture du casque **à 10 000 km est identique bit-pour-bit** à celle prise à l'origine. Env vars : `AGAPANTHE_WORLD_ORIGIN="x,y,z"` (place le modèle en double) · `AGAPANTHE_UNLOAD_TEST=N` (cycles Load/Unload sous le gate de leak).
 
-**Dette d'ouverture Phase 2** (détail : `docs/AVANCEMENT.md`) — 🔴 **Linux jamais validé** (rattrapage M4 toujours dû ; pas de machine le 2026-07-12, trou assumé) · labels RenderDoc non observés · feel souris non jugé · invariant du reload garanti par convention seulement · crash rare non reproductible au shutdown (GLFW/Silk.NET).
+**Prochain : P2-M4** (frustum culling + montée en charge = **critère de sortie de la phase**). ⚠️ Trois décisions à prendre **avant** d'écrire la boucle de culling (scène large de test · `Bounds` → sphère locale · `ShadowFit` hissé *avant* `CollectRenderLists`), plus un arbitrage qui engage la Phase 3 (origine continue vs quantifiée). Détail + point de reprise dans `docs/AVANCEMENT.md`.
 
-**Prochain** : ouvrir la Phase 2 (ECS/scene graph, audio, physique, gameplay) — commencer par un passage `engine-architect`. Détail + point de reprise dans `docs/AVANCEMENT.md`.
+**Dette persistante** : 🔴 **Linux jamais validé** (AOT et chemin SPIR-V hors-ligne **prouvés Windows uniquement**) · tri `RenderList` O(n²) (radix dû en M4) · crash au shutdown (GLFW/Silk.NET) désormais **reproductible** via `AGAPANTHE_UNLOAD_TEST=20` (~2 runs/10, après le rapport de leak propre).

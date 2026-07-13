@@ -1,6 +1,6 @@
 # Agapanthe — Plan complet & état d'avancement
 
-**Mis à jour** : 2026-07-13 (session 11 — **PHASE 2 EN COURS**, **P2-M2 CLOS** — couture ECS livrée, capture byte-identique, double audit PASS) · **Machines de dev** : macOS (Apple M3, MoltenVK) + Windows 11 (RTX 5070 Ti, Vulkan 1.3 core) · **Cibles** : Windows / Linux / macOS
+**Mis à jour** : 2026-07-13 (session 12 — **PHASE 2 EN COURS**, **P2-M3 CLOS** — camera-relative rendering, capture à 10 000 km bit-identique à celle prise à l'origine, double audit PASS conditionnel) · **Machines de dev** : macOS (Apple M3, MoltenVK) + Windows 11 (RTX 5070 Ti, Vulkan 1.3 core) · **Cibles** : Windows / Linux / macOS
 
 ## Vision
 
@@ -20,8 +20,8 @@ Spec Phase 1 : [docs/plans/2026-07-02-graphics-engine-design.md](plans/2026-07-0
 | P2-M0 | Gate AOT + verdict Arch | ✅ **PASSÉ** (S9) — double audit PASS, Arch validé |
 | P2-M1 | Chemin SPIR-V hors-ligne | ✅ **PASSÉ** (S10) — double audit PASS, prod sans shaderc (prouvé Windows AOT) |
 | P2-M2 | Couture ECS : Arch + `ResourceRegistry` + 2 listes (passthrough, sans culling) — refactor **byte-identique** | ✅ **PASSÉ** (S11) — double audit PASS, capture byte-identique Debug + AOT |
-| P2-M3 | `Double3` + camera-relative rendering (précision grande distance) | **prochain** |
-| P2-M4 | Frustum culling + montée en charge (= critère de sortie) | à venir |
+| P2-M3 | `Double3` + camera-relative rendering (précision grande distance) | ✅ **PASSÉ** (S12) — double audit PASS conditionnel, **10 000 km == origine, bit-pour-bit** |
+| P2-M4 | Frustum culling + montée en charge (= critère de sortie) | **prochain** |
 | P2-M5 | Audits + clôture | à venir |
 
 **P2-M0 (gate AOT) — acquis clés** :
@@ -50,6 +50,18 @@ Spec Phase 1 : [docs/plans/2026-07-02-graphics-engine-design.md](plans/2026-07-0
 - **Leçon de guerre (le gate était vert par chance)** : le repli `(0,0,0)` des bounds était appliqué **par mesh** — or **zéro n'est pas l'élément neutre d'une union**. Un mesh **vide** tirait donc les bounds à l'origine : un modèle à (1000,1000,1000) aurait vu son extent **doublé** (cadrage + ombre faux). Invisible sur le casque (aucun mesh vide) → **trouvé par l'audit, pas par le gate**. Le fold vide (∞ inversés) est neutre ; le repli est désormais **global**.
 - **Piège byte-identique évité** : `Scene.BoundsCenter/Diagonal` calculaient **en float** ; calculer en `double` puis narrower donne **jusqu'à 1 ULP d'écart** → caméra et matrice d'ombre décalées. Partout où les bounds sont consommées : **narrow d'abord, arithmétique float ensuite**.
 - **`Span.Sort(structComparer)` alloue** (~88 B/appel : il boxe le comparateur) → tri maison `RenderList.SortByKey`. Trouvé par le test zéro-alloc.
+
+**P2-M3 (camera-relative rendering) — LIVRÉ (S12)** · Détail : [.absolute-human/archive/board-session12-P2M3.md](../.absolute-human/archive/board-session12-P2M3.md)
+
+- **Le résultat** : la capture headless du casque **à 10 000 km de l'origine** est **identique bit-pour-bit** à celle prise à l'origine (0 canal sur 2 764 800). Le critère prévu (≤ 1 LSB/canal) est donc **dépassé**. Anti-faux-positif : le log imprime `eye at 9999999.99751842` — une valeur qu'un `float` **ne peut pas représenter** (son ULP vaut 1 m à 1e7), ce qui prouve que l'origine est réellement appliquée et qu'on ne compare pas deux runs identiques.
+- **Le mécanisme** : le transform du monde est **coupé en deux** — la position vit en `Double3` (composant `WorldPosition`), la rotation/échelle reste une `Matrix4x4` float. Elles ne se recombinent que dans `CollectRenderLists`, **seul point du code** où une coordonnée monde devient une coordonnée GPU, et où la soustraction `objet − caméra` se fait **en double avant le cast**. `RenderView` (Core) porte l'**origine unique de la frame** : monde, lumières et fit d'ombre soustraient tous la même valeur, par construction.
+- **Les lumières ponctuelles sont en `Double3`**, reconverties camera-relative **à chaque frame** (les différer était impossible : le shader compare les positions des lumières à des positions de surface déjà relatives). **Aucun shader n'a changé** : l'œil packé à zéro fait que `V = normalize(eyePos − worldPos)` devient `normalize(−worldPos)` tout seul.
+- **Fit d'ombre sur le frustum caméra** (`ShadowFit`, GPU-free et testable), plafonné par `Renderer.ShadowDistance`, **mais jamais plus large que la scène** (min des deux sphères) : fitter le frustum sur une petite scène gaspillerait la shadow map. Sphère (et non 8 coins) pour l'invariance en rotation ; snap sur la grille de texels **ancrée au monde** pour l'invariance en translation.
+- **Dettes rouges de M2 soldées en ouverture** : handles avec **génération** (un handle périmé → `GraphicsException`, jamais un draw silencieusement faux) et `ResourceRegistry` **globale** en slot-map (avant, `MeshHandle(0)` de deux modèles se collisionnaient — bloquant pour M4).
+- **Ce que les audits ont attrapé** (corrigé) : le **snap texel était un no-op** (il quantifiait un centre qui, exprimé relativement à la caméra, ne bouge jamais en translation → la shadow map glissait en continu) · les **casters en amont étaient clippés** (0,5·r de marge) → ombres disparaissant sans erreur · **`Unload` fuyait un descriptor set par matériau, définitivement**, et **le gate « 0 leak » passait en mentant** (il compte les pools, pas les sets) → allocateur **par modèle**, et le chemin, qui n'avait **aucun appelant**, tourne désormais sous le gate réel (`AGAPANTHE_UNLOAD_TEST=N` : 20 cycles, 842 ressources créées **et** détruites).
+- **Écarts au plan, assumés** : W2 (lumières) **absorbé par W1** · byte-identique vs M8 **perdu comme prévu** (la translation sort de la matrice de vue → l'ordre des opérations flottantes change ; 14 pixels sur 921 600 dépassent 1 LSB, tous sur le bord d'ombre) · le chemin « fit frustum » **n'est pas exercé par une capture** (la scène du casque emprunte toujours le chemin « scène ») — couvert par 9 tests unitaires, **c'est la condition posée par l'architecte** : scène large = **tâche 1 de M4**.
+- **Métriques** : 257 tests · 0 warning · 0 message de validation · 0 leak · probe NativeAOT PASS (8 composants rootés).
+- **Env vars nouvelles** : `AGAPANTHE_WORLD_ORIGIN="x,y,z"` (place le modèle en `double` — l'image doit être identique où qu'il soit) · `AGAPANTHE_UNLOAD_TEST=N` (N cycles Load/Unload sous le gate de leak).
 
 ## Décisions structurantes (verrouillées)
 
@@ -174,14 +186,18 @@ Détail complet : [.absolute-human/archive/board-session8-M8.md](../.absolute-hu
 
 ## Reprise — où repartir
 
-**Point de reprise (2026-07-13, session 11)** : Phase 2 en cours. **P2-M0, P2-M1 et P2-M2 clos et committés.** Board session 11 archivé ([board-session11-P2M2.md](../.absolute-human/archive/board-session11-P2M2.md)) ; prochaine tâche = **ouvrir P2-M3**.
+**Point de reprise (2026-07-13, session 12)** : Phase 2 en cours. **P2-M0 → P2-M3 clos et committés.** Board session 12 archivé ([board-session12-P2M3.md](../.absolute-human/archive/board-session12-P2M3.md)) ; prochaine tâche = **ouvrir P2-M4** (frustum culling + montée en charge = **critère de sortie de la phase**).
 
-**Branche** : `phase2-foundations` (partie de `main` à `264772e`). Commits P2-M2 : `f579074` (W0 fondations Core) · `899312e` (W1 World + rooting AOT) · `3640bc3` (durcissements audit W1) · `e383713` (W2 systèmes + listes) · `c9a7c21` (W3+W4 ResourceRegistry + Sandbox ECS, **gate byte-identique**) · `01c7e49` (durcissements audit de clôture).
+**Branche** : `phase2-foundations`. Commits P2-M3 : `0d3d0ae` (W0 — dettes rouges : handles générationnels + registry globale) · `8ef912c` (W1+W2 — camera-relative, `Double3`, lumières) · `0d3670a` (W3 — fit d'ombre sur frustum) · `62df5ea` (W4 — caméra, wrap du yaw) · `fc1d876` (durcissements des 2 audits).
 
-**Prochaine tâche : P2-M3** (spec §3.3, §3.6, §6) — **camera-relative rendering** : `Camera.Position` → `Double3`, lumières stockées en `Double3` et converties en relatif-caméra **par frame** (sinon elles dérivent dès que la caméra bouge), `CameraUniforms.Position` = 0 / view rotation-seule, `V = normalize(-worldPos)` dans `mesh.frag`, arithmétique `FreeCameraController` en `Double3`. **Critère** : rendu **à 10 000 km == à l'origine** (transforms relatifs **exactement** égaux en unitaire ; capture **≤ 1 LSB/canal** — le byte-identique strict n'est plus le critère, la reconstruction `double→float` ne retombe pas sur les mêmes bits).
-> ⚠️ **À traiter en ouverture de M3** (dette P2-M2, voir plus bas) : **handles sans génération** + **`ResourceRegistry` mono-modèle** (même changement : slot-map global) — types **publics**, le coût ne fera que monter. Et **`RenderView`** (agrégat portant l'**origine camera-relative** : lumières, caméra et monde doivent soustraire *exactement* la même origine).
+**Prochaine tâche : P2-M4.** ⚠️ **Trois décisions à prendre AVANT d'écrire la boucle de culling** (les deux audits convergent — détail dans le board S12) :
+1. **Scène large de test** (`AGAPANTHE_SCENE=grid:NxN`, le même mesh instancié — gratuit maintenant que les handles sont globaux). **Tâche 1** : sans elle, le chemin « fit frustum » reste du code non exercé, et il n'y a pas de banc de montée en charge.
+2. **`Bounds` → sphère locale** (`Center` + `Radius`, 16 o au lieu de 48). L'AABB **monde statique** actuelle est fausse dès qu'une entité tourne ou bouge ; transformer une AABB par frame donne une boîte gonflée. Une sphère est invariante en rotation et se teste en 6 dots.
+3. **Ordre de la frame à inverser** : `ShadowFit` tourne aujourd'hui *dans* `DrawScene`, donc **après** `CollectRenderLists` — or les casters doivent être cullés contre le **volume de lumière**, qui n'existe pas encore à ce moment. Hisser `ShadowFit` avant la collecte ; type `Frustum` (6 plans) **dans Core**.
 
-**Vérif humaine encore due (non bloquante, P2-M1)** : hot reload Debug **live** à la fenêtre (edit shader → recompile < 1 s) — non re-testé depuis M8 ; le headless ne le couvre pas.
+**Et un arbitrage qui engage la Phase 3** : **origine continue (actuelle) vs origine quantifiée** (snap sur une grille de 256 m / 1 km). Le continu interdit de fait tout buffer d'instances persistant / culling GPU-driven, et **la physique de Phase 3 exigera une origine par palier** (caches de contact, warm starting, sleeping). Coût aujourd'hui : ~5 lignes. Si on garde le continu, l'inscrire comme dette **assumée**, pas implicite.
+
+**Vérifs humaines encore dues (non bloquantes)** : (a) **P2-M3** — feel de la caméra en fenêtre après le wrap du yaw, et l'ombre (jugée en headless seulement). Le test à faire soi-même : lancer avec `AGAPANTHE_WORLD_ORIGIN="10000000,10000000,10000000"` → l'image et le pilotage doivent être **indiscernables** de l'origine (et à `1e15`, tout se met à claquer : c'est la même panne que le `float` à 10 000 km, repoussée de 8 ordres de grandeur). (b) **P2-M1** — hot reload Debug **live** à la fenêtre (edit shader → recompile < 1 s), non re-testé depuis M8 ; le headless ne le couvre pas.
 
 **Run de sanity Debug** (0 validation / 0 leak) :
 ```powershell
