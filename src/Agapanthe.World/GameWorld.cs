@@ -18,6 +18,13 @@ namespace Agapanthe.World;
 /// leaks into Rendering or the Sandbox. The constructor roots every component's chunk array for NativeAOT
 /// (spec §6.1) before any entity exists.
 /// </summary>
+/// <remarks>
+/// <b>Threading contract: construct and drive a GameWorld from ONE thread.</b> Arch assigns component-type ids in
+/// process-global state on first touch, and that registration is not thread-safe: two worlds built concurrently
+/// can end up with mismatched chunk arrays (observed — a component read back as all-zero). The engine creates a
+/// single world on the main thread, and the tests serialize their world-touching classes for the same reason.
+/// Parallel iteration inside a world (a future job system) is a separate question, unaffected by this.
+/// </remarks>
 public sealed class GameWorld : IDisposable
 {
     private readonly ArchWorld _world;

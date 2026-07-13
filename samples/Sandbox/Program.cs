@@ -4,6 +4,7 @@ using Agapanthe.Core;
 using Agapanthe.Graphics;
 using Agapanthe.Platform;
 using Agapanthe.Rendering;
+using Agapanthe.World;
 using Silk.NET.Input;
 
 // M5 validation app: loads a real glTF 2.0 model and renders it with full Cook-Torrance PBR
@@ -46,8 +47,14 @@ using var window = new EngineWindow("Agapanthe — M7 IBL", 1280, 720);
 GraphicsDevice? device = null;
 Swapchain? swapchain = null;
 Renderer? renderer = null;
-Scene? scene = null;
+ResourceRegistry? registry = null;   // owns the GPU resources (the old Scene's possession half)
+GameWorld? world = null;             // owns the entities (the old Scene's draw-list half, now ECS)
 FrameRenderer? frameRenderer = null;
+
+// Render lists, owned by the app and reused every frame (Clear keeps capacity → zero alloc per frame).
+var renderList = new RenderList();
+var shadowCasters = new RenderList();
+var sceneBounds = Double3Bounds.Empty;
 
 var camera = new Camera();
 var controller = new FreeCameraController();
@@ -84,16 +91,28 @@ window.Loaded += () =>
     // Load the model to CPU DTOs (no GPU dependency), then upload it into a GPU-resident Scene.
     var model = GltfLoader.Load(modelPath);
     LogModelStats(model, modelPath);
-    scene = SceneBuilder.Build(device, model, renderer.MaterialAllocator, renderer.MaterialSetLayout);
+    // The seam (spec §3.2): the builder hands back the GPU resources (registry) and a GPU-free description of
+    // each drawable (specs). The world spawns an entity per spec — from here on, the model IS entities.
+    (registry, var specs) = SceneBuilder.Build(device, model, renderer.MaterialAllocator, renderer.MaterialSetLayout);
 
-    // Frame the model: read the scene's world-space AABB (computed by SceneBuilder), sit the camera back
-    // by 1.5x the diagonal along a slightly-raised front direction, orient yaw/pitch to look at the centre.
-    FrameCamera(camera, controller, scene);
+    world = new GameWorld();
+    foreach (var spec in specs)
+    {
+        world.SpawnImported(in spec);
+    }
+
+    // System 2: the scene extent now comes from the world (union of per-entity world bounds), replacing
+    // Scene.Bounds*. Static in M2 (nothing moves), so it is folded once here rather than every frame.
+    sceneBounds = world.AggregateBounds();
+
+    // Frame the model: sit the camera back by 1.5x the diagonal along a slightly-raised front direction,
+    // orient yaw/pitch to look at the centre.
+    FrameCamera(camera, controller, in sceneBounds);
 
     // Default M5 lighting: a warm directional key (sun) plus a cool rim and a soft fill point
     // light placed from the scene bounds — a classic 3-point setup that reads PBR materials
     // well. HDR intensities (> 1) are expected; the ACES tonemap compresses them.
-    SetupLights(renderer.Lights, scene);
+    SetupLights(renderer.Lights, in sceneBounds);
 
     // Load the HDRI environment and generate IBL (M7). The renderer needs an environment before it can draw
     // (the ambient and skybox both sample it). Default is the fixture copied into models/ next to the
@@ -115,11 +134,19 @@ window.Loaded += () =>
     // drives sync/acquire/present and no longer carries a clear color.
     frameRenderer = new FrameRenderer(device, swapchain, () => window.FramebufferSize);
 
-    // Capturing 'scene'/'camera'/'renderer' (all assigned by now) exactly once — the delegate is built a
-    // single time here, never per frame.
-    drawScene = (cmd, frame, target) => renderer!.DrawScene(scene!, camera, cmd, frame, target);
+    // Capturing the world/registry/lists/camera/renderer (all assigned by now) exactly once — the delegate is
+    // built a single time here, never per frame. The per-frame chain is the contract of spec §3.5: propagate
+    // transforms (system 1), then build the two render lists (passthrough in M2, culled in M4), then draw.
+    // AggregateBounds is NOT re-run per frame: nothing moves in M2, so the extent is folded once above.
+    drawScene = (cmd, frame, target) =>
+    {
+        world!.PropagateTransforms();
+        world.CollectRenderLists(renderList, shadowCasters);
+        renderer!.DrawScene(
+            renderList, shadowCasters, registry!, camera, cmd, frame, target, in sceneBounds);
+    };
 
-    Log.Info($"Sandbox: initialized on '{device.AdapterName}'. Rendering '{scene.Name}' — " +
+    Log.Info($"Sandbox: initialized on '{device.AdapterName}'. Rendering '{registry.Name}' — " +
              "clic pour capturer la souris, WASD + souris, Échap libère puis quitte. " +
              $"Hot reload actif sur '{shaderDir}'.");
 
@@ -277,14 +304,17 @@ finally
 {
     // Tear down in strict order, GPU-idle first — runs even if init threw inside the Loaded handler, so
     // the leak report is always produced. Order (M4-11):
-    //   WaitIdle -> frameRenderer.Dispose -> scene.Dispose (meshes/materials/textures/samplers, deferred)
+    //   WaitIdle -> frameRenderer.Dispose -> registry.Dispose (meshes/materials/textures/samplers, deferred —
+    //      same resources and same reverse order the old Scene used, so the leak gate is unchanged)
     //   -> renderer.Dispose (pipeline/layouts/allocator/UBOs; the allocator destroys its pools synchronously,
-    //      which is why scene — whose material sets came from that allocator — is disposed first)
+    //      which is why the registry — whose material sets came from that allocator — is disposed first)
     //   -> device.DeletionQueue.FlushAll() (drain every deferred destroy while the device is alive and idle)
     //   -> swapchain -> device -> [REPORT] -> window.
+    // The world owns no GPU resource (managed entities only), so it plays no part in this ordering.
     frameRenderer?.WaitIdle();
     frameRenderer?.Dispose();
-    scene?.Dispose();
+    world?.Dispose();
+    registry?.Dispose();
     renderer?.Dispose();
     device?.DeletionQueue.FlushAll();
     swapchain?.Dispose();
@@ -448,10 +478,22 @@ static void LogModelStats(Agapanthe.Assets.Model.ModelAsset model, string path)
 
 // 3-point lighting from the scene's world bounds: warm key (directional), cool rim point light
 // behind/above, soft warm fill point light front/below. Ranges scale with the scene diagonal.
-static void SetupLights(SceneLights lights, Scene scene)
+// Narrows the world bounds to the float centre/diagonal the framing and light setup consume.
+// Byte-identical (spec §6): narrow FIRST, then do the SAME float arithmetic the old Scene.BoundsCenter /
+// BoundsDiagonal did. Computing the centre in double and narrowing afterwards rounds differently (once in
+// double, once on the cast) and can land 1 ULP away — enough to move the camera and break the capture gate.
+// An empty world (no entities) collapses to the degenerate zero box the old Scene produced.
+static (Vector3 Center, float Diagonal) NarrowBounds(in Double3Bounds bounds)
 {
-    var center = scene.BoundsCenter;
-    var reach = MathF.Max(scene.BoundsDiagonal, 0.001f);
+    var min = bounds.IsEmpty ? Vector3.Zero : bounds.Min.ToVector3(Double3.Zero);
+    var max = bounds.IsEmpty ? Vector3.Zero : bounds.Max.ToVector3(Double3.Zero);
+    return ((min + max) * 0.5f, Vector3.Distance(min, max));
+}
+
+static void SetupLights(SceneLights lights, in Double3Bounds bounds)
+{
+    var (center, diagonal) = NarrowBounds(in bounds);
+    var reach = MathF.Max(diagonal, 0.001f);
 
     lights.Directional = new DirectionalLight
     {
@@ -479,10 +521,9 @@ static void SetupLights(SceneLights lights, Scene scene)
     lights.Ambient = new Vector3(0.08f, 0.08f, 0.09f);
 }
 
-static void FrameCamera(Camera camera, FreeCameraController controller, Scene scene)
+static void FrameCamera(Camera camera, FreeCameraController controller, in Double3Bounds bounds)
 {
-    var center = scene.BoundsCenter;
-    var diagonal = scene.BoundsDiagonal;
+    var (center, diagonal) = NarrowBounds(in bounds);
 
     if (diagonal <= 0f)
     {

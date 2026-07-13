@@ -614,9 +614,19 @@ public sealed class Renderer : IDisposable
         }
     }
 
-    public void DrawScene(Scene scene, Camera camera, CommandList cmd, FrameContext frame, SwapchainTarget target)
+    public void DrawScene(
+        RenderList renderList,
+        RenderList shadowCasters,
+        ResourceRegistry registry,
+        Camera camera,
+        CommandList cmd,
+        FrameContext frame,
+        SwapchainTarget target,
+        in Double3Bounds sceneBounds)
     {
-        ArgumentNullException.ThrowIfNull(scene);
+        ArgumentNullException.ThrowIfNull(renderList);
+        ArgumentNullException.ThrowIfNull(shadowCasters);
+        ArgumentNullException.ThrowIfNull(registry);
         ArgumentNullException.ThrowIfNull(camera);
         ArgumentNullException.ThrowIfNull(frame);
         ObjectDisposedException.ThrowIf(_disposed, this);
@@ -633,10 +643,10 @@ public sealed class Renderer : IDisposable
 
         // One light-space transform per frame, shared by the shadow pass (render depth) and the scene pass
         // (pack into the lights UBO for the PCF lookup).
-        var lightViewProj = ComputeLightViewProj(scene);
+        var lightViewProj = ComputeLightViewProj(in sceneBounds);
 
-        RecordShadowPass(cmd, scene, in lightViewProj);
-        RecordScenePass(cmd, frame, scene, camera, target, in lightViewProj);
+        RecordShadowPass(cmd, shadowCasters, registry, in lightViewProj);
+        RecordScenePass(cmd, frame, renderList, registry, camera, target, in lightViewProj);
         RecordTonemapPass(cmd, frame, target);
     }
 
@@ -654,13 +664,22 @@ public sealed class Renderer : IDisposable
     /// degenerate/empty scene (zero diagonal) falls back to a unit radius so the matrix stays finite.
     /// </para>
     /// </summary>
-    private Matrix4x4 ComputeLightViewProj(Scene scene)
+    private Matrix4x4 ComputeLightViewProj(in Double3Bounds sceneBounds)
     {
         var dir = Lights.Directional.Direction;
         dir = dir.LengthSquared() > 1e-12f ? Vector3.Normalize(dir) : new Vector3(0f, -1f, 0f);
 
-        var center = scene.BoundsCenter;
-        var radius = scene.BoundsDiagonal * 0.5f;
+        // Byte-identical subtlety (spec §6): narrow the bounds to float FIRST, then do the SAME float arithmetic
+        // the old Scene.BoundsCenter/BoundsDiagonal did. Using Double3Bounds.Center/Diagonal instead would round
+        // once in double and once on the narrow, which can land 1 ULP away from the float-only computation and
+        // shift the shadow matrix — enough to break the capture gate. Camera-relative (a non-zero origin) is M3;
+        // here the origin is Zero, so ToVector3 returns the original floats bit-for-bit.
+        // An empty world folds to inverted infinities; collapse it to the degenerate zero box the old Scene
+        // produced for a geometry-less model, or ±∞ would poison the matrix to NaN.
+        var min = sceneBounds.IsEmpty ? Vector3.Zero : sceneBounds.Min.ToVector3(Double3.Zero);
+        var max = sceneBounds.IsEmpty ? Vector3.Zero : sceneBounds.Max.ToVector3(Double3.Zero);
+        var center = (min + max) * 0.5f;
+        var radius = Vector3.Distance(min, max) * 0.5f;
         radius = radius > 1e-4f ? radius * 1.1f : 1f; // 10% margin; unit fallback for an empty scene
 
         var eye = center - (dir * (radius * 2f));
@@ -678,7 +697,8 @@ public sealed class Renderer : IDisposable
     /// sample), so this depth write serializes after that read. loadOp=Clear(1.0), storeOp=Store because the
     /// scene pass samples the result; a closing DepthAttachment→ShaderReadOnly barrier hands it over.
     /// </summary>
-    private void RecordShadowPass(CommandList cmd, Scene scene, in Matrix4x4 lightViewProj)
+    private void RecordShadowPass(
+        CommandList cmd, RenderList shadowCasters, ResourceRegistry registry, in Matrix4x4 lightViewProj)
     {
         // RenderDoc/Nsight capture region for the whole pass (barriers + draws). No-op when debug utils is
         // off, so it stays on the per-frame path at zero cost; the name is a literal (no per-frame alloc).
@@ -712,14 +732,16 @@ public sealed class Renderer : IDisposable
         // lightViewProj is constant across the pass: push it once (offset 0), then per-instance model (offset 64).
         cmd.PushConstants(pipeline, ShaderStages.Vertex, in lightViewProj, offsetBytes: 0);
 
-        var instances = scene.Instances;
-        for (var i = 0; i < instances.Count; i++)
+        // The caster list, in its stable sorted order (spec §6 condition b). In M2 it is a passthrough of every
+        // drawable; M4 culls it against the LIGHT volume (never the camera frustum — see spec §3.5).
+        var items = shadowCasters.Items;
+        for (var i = 0; i < items.Length; i++)
         {
-            var mesh = instances[i].Mesh;
+            var mesh = registry.Resolve(items[i].Mesh);
             cmd.BindVertexBuffer(mesh.VertexBuffer);
             cmd.BindIndexBuffer(mesh.IndexBuffer, mesh.IndexFormat);
 
-            var model = mesh.WorldTransform;
+            var model = items[i].WorldTransform;
             cmd.PushConstants(pipeline, ShaderStages.Vertex, in model, offsetBytes: 64);
             cmd.DrawIndexed(mesh.IndexCount);
         }
@@ -740,8 +762,8 @@ public sealed class Renderer : IDisposable
     /// issues the indexed draw.
     /// </summary>
     private void RecordScenePass(
-        CommandList cmd, FrameContext frame, Scene scene, Camera camera, SwapchainTarget target,
-        in Matrix4x4 lightViewProj)
+        CommandList cmd, FrameContext frame, RenderList renderList, ResourceRegistry registry, Camera camera,
+        SwapchainTarget target, in Matrix4x4 lightViewProj)
     {
         // Capture region for the forward PBR pass; the skybox draw below nests its own "Skybox" sub-label.
         using var _ = cmd.PushDebugLabel(ScenePassLabel);
@@ -813,19 +835,19 @@ public sealed class Renderer : IDisposable
         var debugView = DebugView;
         cmd.PushConstants(pipeline, ShaderStages.Fragment, in debugView, offsetBytes: 64);
 
-        // Index loop over IReadOnlyList<MeshInstance>: the indexer returns the struct by value with no
-        // enumerator/boxing allocation (foreach on the interface would box the enumerator).
-        var instances = scene.Instances;
-        for (var i = 0; i < instances.Count; i++)
+        // The camera list, in its stable sorted order. Span indexing: no enumerator, no allocation. Handles are
+        // resolved to GPU resources here — the only place the two halves of the seam meet (spec §3.2).
+        var items = renderList.Items;
+        for (var i = 0; i < items.Length; i++)
         {
-            var instance = instances[i];
-            var mesh = instance.Mesh;
+            ref readonly var item = ref items[i];
+            var mesh = registry.Resolve(item.Mesh);
 
-            cmd.BindDescriptorSet(pipeline, 1, instance.Material.DescriptorSet); // set 1: per-material
+            cmd.BindDescriptorSet(pipeline, 1, registry.Resolve(item.Material).DescriptorSet); // set 1: per-material
             cmd.BindVertexBuffer(mesh.VertexBuffer);
             cmd.BindIndexBuffer(mesh.IndexBuffer, mesh.IndexFormat);
 
-            var model = mesh.WorldTransform;
+            var model = item.WorldTransform;
             cmd.PushConstants(pipeline, ShaderStages.Vertex, in model);
             cmd.DrawIndexed(mesh.IndexCount);
         }

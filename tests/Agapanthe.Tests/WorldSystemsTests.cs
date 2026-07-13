@@ -8,6 +8,7 @@ namespace Agapanthe.Tests;
 /// GPU-free tests for the M2 systems (spec §3.5): transform propagation (system 1, incl. cycle detection) and
 /// world-bounds aggregation (system 2).
 /// </summary>
+[Collection("World")]
 public sealed class WorldSystemsTests
 {
     private static Vector3 Translation(Matrix4x4 m) => new(m.M41, m.M42, m.M43);

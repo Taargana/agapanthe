@@ -3,6 +3,7 @@ using Agapanthe.World;
 
 namespace Agapanthe.Tests;
 
+[Collection("World")]
 public sealed class ComponentRegistryTests
 {
     [Fact]

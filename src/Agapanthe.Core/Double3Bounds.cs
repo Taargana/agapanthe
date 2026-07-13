@@ -23,6 +23,12 @@ public readonly struct Double3Bounds
         new Double3(double.PositiveInfinity, double.PositiveInfinity, double.PositiveInfinity),
         new Double3(double.NegativeInfinity, double.NegativeInfinity, double.NegativeInfinity));
 
+    /// <summary>
+    /// True when the fold never ran (no bounded entities): <see cref="Empty"/>'s inverted infinities. Callers
+    /// must substitute a degenerate zero box rather than propagate ±∞ into a matrix (it would poison it to NaN).
+    /// </summary>
+    public bool IsEmpty => Min.X > Max.X;
+
     public Double3 Center => (Min + Max) * 0.5;
 
     public Double3 Size => Max - Min;

@@ -20,8 +20,9 @@ namespace Agapanthe.World;
 /// </summary>
 public static class ComponentRegistry
 {
+    private static readonly Lock InitLock = new();
     private static readonly List<Type> Components = new(8);
-    private static bool _initialized;
+    private static volatile bool _initialized;
 
     /// <summary>Every registered component type. Accessing it guarantees <see cref="RootAll"/> has run.</summary>
     public static IReadOnlyList<Type> All
@@ -47,16 +48,27 @@ public static class ComponentRegistry
             return;
         }
 
-        // The one and only place the component set is enumerated. Each Root<T> both roots T[] and registers T.
-        Root<GlobalId>();
-        Root<LocalTransform>();
-        Root<Parent>();
-        Root<WorldTransform>();
-        Root<MeshRef>();
-        Root<Bounds>();
-        Root<RenderOrder>();
+        // Double-checked under a lock: two threads constructing a GameWorld concurrently would otherwise both
+        // run the body and Add to the same List (duplicated/torn entries). _initialized is volatile so the fully
+        // populated list is published before the flag is observed.
+        lock (InitLock)
+        {
+            if (_initialized)
+            {
+                return;
+            }
 
-        _initialized = true;
+            // The one and only place the component set is enumerated. Each Root<T> both roots T[] and registers T.
+            Root<GlobalId>();
+            Root<LocalTransform>();
+            Root<Parent>();
+            Root<WorldTransform>();
+            Root<MeshRef>();
+            Root<Bounds>();
+            Root<RenderOrder>();
+
+            _initialized = true;
+        }
     }
 
     private static void Root<T>()
