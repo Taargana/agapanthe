@@ -21,12 +21,15 @@ internal sealed record ModelResources(
 
 /// <summary>
 /// One drawable of a model, in terms LOCAL to that model: the index into its own material array (already
-/// resolved — an absent/out-of-range glTF material index points at the engine default), its baked world matrix
-/// (copied bit-for-bit from the asset, no TRS round-trip) and its world-space bounds (float vertex fold, widened).
-/// The registry turns the local material index into a global <see cref="MaterialHandle"/>.
+/// resolved — an absent/out-of-range glTF material index points at the engine default), its baked transform split
+/// into a <see cref="Double3"/> position and the rotation/scale matrix (spec §3.3 — the position must stay in
+/// double so the model can be placed far from the world origin), and its bounds (float vertex fold, widened).
+/// Positions and bounds are relative to the model's own origin; the registry offsets them by the world origin the
+/// model is loaded at, and turns the local material index into a global <see cref="MaterialHandle"/>.
 /// </summary>
 internal readonly record struct MeshEntry(
     int LocalMaterialIndex,
-    Matrix4x4 World,
+    Double3 Position,
+    Matrix4x4 RotationScale,
     Double3 BoundsMin,
     Double3 BoundsMax);

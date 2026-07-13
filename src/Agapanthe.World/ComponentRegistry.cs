@@ -68,6 +68,7 @@ public static class ComponentRegistry
             Root<LocalTransform>();
             Root<Parent>();
             Root<WorldTransform>();
+            Root<WorldPosition>();
             Root<MeshRef>();
             Root<Bounds>();
             Root<RenderOrder>();

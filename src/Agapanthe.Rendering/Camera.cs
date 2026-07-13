@@ -27,8 +27,11 @@ namespace Agapanthe.Rendering;
 /// </remarks>
 public sealed class Camera
 {
-    /// <summary>Eye position in world space.</summary>
-    public Vector3 Position { get; set; }
+    /// <summary>
+    /// Eye position in world space, in <see cref="Double3"/> (spec §3.3). It is never handed to the GPU as-is:
+    /// it IS the camera-relative origin, so the GPU sees the eye at zero and every object relative to it.
+    /// </summary>
+    public Double3 Position { get; set; }
 
     /// <summary>Heading around world up, in radians. See remarks for sign convention.</summary>
     public float Yaw { get; set; }
@@ -67,9 +70,22 @@ public sealed class Camera
     /// <summary>Unit up vector of the camera basis, <c>cross(right, forward)</c>.</summary>
     public Vector3 Up => Vector3.Cross(Right, Forward);
 
-    /// <summary>Right-handed view matrix looking along <see cref="Forward"/>.</summary>
-    public Matrix4x4 ViewMatrix => MathHelpers.LookAt(Position, Position + Forward, Vector3.UnitY);
+    /// <summary>
+    /// Right-handed view matrix looking along <see cref="Forward"/>, <b>rotation only</b>: the eye sits at the
+    /// origin of the frame being rendered (spec §3.3), so the view carries no translation. The eye's world
+    /// position is instead subtracted from every object, in double, when the render lists are built — which is
+    /// what keeps precision far from the world origin.
+    /// </summary>
+    public Matrix4x4 ViewMatrix => MathHelpers.LookAt(Vector3.Zero, Forward, Vector3.UnitY);
 
     /// <summary>Vulkan perspective projection (Y flipped, depth [0,1]).</summary>
     public Matrix4x4 ProjectionMatrix => MathHelpers.PerspectiveVulkan(FovY, AspectRatio, Near, Far);
+
+    /// <summary>
+    /// The frame's <see cref="RenderView"/>: this camera's position as the camera-relative origin, plus the
+    /// rotation-only view and the projection. Build it ONCE per frame and pass it to both the world (which
+    /// narrows every object against <see cref="RenderView.Origin"/>) and the renderer (which narrows the lights
+    /// and the shadow fit against the same origin) — one origin per frame, by construction.
+    /// </summary>
+    public RenderView CreateView() => new(Position, ViewMatrix, ProjectionMatrix);
 }

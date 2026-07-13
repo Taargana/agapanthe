@@ -618,7 +618,7 @@ public sealed class Renderer : IDisposable
         RenderList renderList,
         RenderList shadowCasters,
         ResourceRegistry registry,
-        Camera camera,
+        in RenderView view,
         CommandList cmd,
         FrameContext frame,
         SwapchainTarget target,
@@ -627,7 +627,6 @@ public sealed class Renderer : IDisposable
         ArgumentNullException.ThrowIfNull(renderList);
         ArgumentNullException.ThrowIfNull(shadowCasters);
         ArgumentNullException.ThrowIfNull(registry);
-        ArgumentNullException.ThrowIfNull(camera);
         ArgumentNullException.ThrowIfNull(frame);
         ObjectDisposedException.ThrowIf(_disposed, this);
         if (!_iblResources!.HasEnvironment)
@@ -642,11 +641,12 @@ public sealed class Renderer : IDisposable
         EnsureTargets(target.Width, target.Height);
 
         // One light-space transform per frame, shared by the shadow pass (render depth) and the scene pass
-        // (pack into the lights UBO for the PCF lookup).
-        var lightViewProj = ComputeLightViewProj(in sceneBounds);
+        // (pack into the lights UBO for the PCF lookup). Fitted in the SAME camera-relative frame as the render
+        // lists (view.Origin), because that is the space the vertex/fragment stages hand it world positions in.
+        var lightViewProj = ComputeLightViewProj(in sceneBounds, view.Origin);
 
         RecordShadowPass(cmd, shadowCasters, registry, in lightViewProj);
-        RecordScenePass(cmd, frame, renderList, registry, camera, target, in lightViewProj);
+        RecordScenePass(cmd, frame, renderList, registry, in view, target, in lightViewProj);
         RecordTonemapPass(cmd, frame, target);
     }
 
@@ -664,20 +664,18 @@ public sealed class Renderer : IDisposable
     /// degenerate/empty scene (zero diagonal) falls back to a unit radius so the matrix stays finite.
     /// </para>
     /// </summary>
-    private Matrix4x4 ComputeLightViewProj(in Double3Bounds sceneBounds)
+    private Matrix4x4 ComputeLightViewProj(in Double3Bounds sceneBounds, Double3 origin)
     {
         var dir = Lights.Directional.Direction;
         dir = dir.LengthSquared() > 1e-12f ? Vector3.Normalize(dir) : new Vector3(0f, -1f, 0f);
 
-        // Byte-identical subtlety (spec §6): narrow the bounds to float FIRST, then do the SAME float arithmetic
-        // the old Scene.BoundsCenter/BoundsDiagonal did. Using Double3Bounds.Center/Diagonal instead would round
-        // once in double and once on the narrow, which can land 1 ULP away from the float-only computation and
-        // shift the shadow matrix — enough to break the capture gate. Camera-relative (a non-zero origin) is M3;
-        // here the origin is Zero, so ToVector3 returns the original floats bit-for-bit.
-        // An empty world folds to inverted infinities; collapse it to the degenerate zero box the old Scene
-        // produced for a geometry-less model, or ±∞ would poison the matrix to NaN.
-        var min = sceneBounds.IsEmpty ? Vector3.Zero : sceneBounds.Min.ToVector3(Double3.Zero);
-        var max = sceneBounds.IsEmpty ? Vector3.Zero : sceneBounds.Max.ToVector3(Double3.Zero);
+        // Camera-relative (spec §3.3): the bounds are narrowed against the frame's origin, the same one the render
+        // lists used, so the matrix maps the camera-relative world positions the shaders actually carry. The
+        // subtraction happens in double, so a scene 10 000 km out still yields an exact, small extent.
+        // An empty world folds to inverted infinities; collapse it to a degenerate zero box, or ±∞ would poison
+        // the matrix to NaN.
+        var min = sceneBounds.IsEmpty ? Vector3.Zero : sceneBounds.Min.ToVector3(origin);
+        var max = sceneBounds.IsEmpty ? Vector3.Zero : sceneBounds.Max.ToVector3(origin);
         var center = (min + max) * 0.5f;
         var radius = Vector3.Distance(min, max) * 0.5f;
         radius = radius > 1e-4f ? radius * 1.1f : 1f; // 10% margin; unit fallback for an empty scene
@@ -762,7 +760,7 @@ public sealed class Renderer : IDisposable
     /// issues the indexed draw.
     /// </summary>
     private void RecordScenePass(
-        CommandList cmd, FrameContext frame, RenderList renderList, ResourceRegistry registry, Camera camera,
+        CommandList cmd, FrameContext frame, RenderList renderList, ResourceRegistry registry, in RenderView view,
         SwapchainTarget target, in Matrix4x4 lightViewProj)
     {
         // Capture region for the forward PBR pass; the skybox draw below nests its own "Skybox" sub-label.
@@ -806,12 +804,15 @@ public sealed class Renderer : IDisposable
         cmd.SetViewportScissor(target.Width, target.Height);
 
         // Write this frame slot's camera UBO in place (host-visible), then point a fresh per-frame set 0 at it.
+        // The eye is at the origin of the frame being rendered (spec §3.3), so the packed eye position is exactly
+        // zero and the view carries no translation. mesh.frag's V = normalize(eyePos - worldPos) therefore becomes
+        // normalize(-worldPos) with no shader change: both sides are already camera-relative.
         var ubo = _cameraUbos[frame.Slot]!;
-        var uniforms = new CameraUniforms(camera.ViewMatrix, camera.ProjectionMatrix, camera.Position);
+        var uniforms = new CameraUniforms(view.View, view.Projection, Vector3.Zero);
         ubo.Write(new ReadOnlySpan<CameraUniforms>(in uniforms));
 
         var lightsUbo = _lightsUbos[frame.Slot]!;
-        var lightsUniforms = new LightsUniforms(Lights, lightViewProj);
+        var lightsUniforms = new LightsUniforms(Lights, lightViewProj, view.Origin);
         lightsUbo.Write(new ReadOnlySpan<LightsUniforms>(in lightsUniforms));
 
         var frameSet = frame.AllocateSet(_frameSetLayout!);

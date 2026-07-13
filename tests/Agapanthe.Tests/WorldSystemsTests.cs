@@ -79,19 +79,70 @@ public sealed class WorldSystemsTests
     [Fact]
     public void Propagate_DoesNotTouchImportedEntities()
     {
-        // Imported drawables carry a BAKED WorldTransform and no LocalTransform, so system 1 must never
-        // recompute their matrix — that is what keeps the M2 capture byte-identical (spec §6 condition a).
+        // Imported drawables carry a BAKED transform and no LocalTransform, so system 1 must never recompute
+        // it (spec §6 condition a). Recombined at a zero origin, the split (Double3 position + rotation/scale
+        // matrix) reproduces the asset's matrix BIT-FOR-BIT — a float widened to double and narrowed back is
+        // the identical float.
         using var world = new GameWorld();
         var baked = Matrix4x4.CreateScale(3f) * Matrix4x4.CreateTranslation(7, 8, 9);
+        var rotationScale = baked with { M41 = 0f, M42 = 0f, M43 = 0f };
         world.SpawnImported(new ImportedEntitySpec(
-            new MeshHandle(0, 1), new MaterialHandle(0, 1), baked,
+            new MeshHandle(0, 1), new MaterialHandle(0, 1), new Double3(7, 8, 9), rotationScale,
             new Double3(0, 0, 0), new Double3(1, 1, 1), 0));
 
         world.PropagateTransforms();
 
         var list = new RenderList();
-        world.CollectRenderLists(list, new RenderList());
+        world.CollectRenderLists(list, new RenderList(), Double3.Zero);
         Assert.Equal(baked, list.Items[0].WorldTransform); // bit-for-bit unchanged
+    }
+
+    [Fact]
+    public void CollectRenderLists_SubtractsTheOrigin_SoFarOutIsIdenticalToTheOrigin()
+    {
+        // THE M3 invariant (spec §3.3): the same scene, rendered from the same relative viewpoint, must produce
+        // the SAME model matrices whether it sits at the world origin or 10 000 km away. Absolute float
+        // positions cannot do this — at 1e7 m consecutive floats are ~1 m apart, so the geometry would visibly
+        // snap to a metre grid. Because the subtraction happens in double, the two agree bit-for-bit.
+        var far = new Double3(1e7, 1e7, 1e7);
+
+        using var near = new GameWorld();
+        near.SpawnImported(new ImportedEntitySpec(
+            new MeshHandle(0, 1), new MaterialHandle(0, 1), new Double3(1.5, -2.25, 0.125), Matrix4x4.Identity,
+            Double3.Zero, Double3.Zero, 0));
+
+        using var farAway = new GameWorld();
+        farAway.SpawnImported(new ImportedEntitySpec(
+            new MeshHandle(0, 1), new MaterialHandle(0, 1), far + new Double3(1.5, -2.25, 0.125),
+            Matrix4x4.Identity, Double3.Zero, Double3.Zero, 0));
+
+        var atOrigin = new RenderList();
+        near.CollectRenderLists(atOrigin, new RenderList(), Double3.Zero);
+
+        var atFar = new RenderList();
+        farAway.CollectRenderLists(atFar, new RenderList(), far);
+
+        Assert.Equal(atOrigin.Items[0].WorldTransform, atFar.Items[0].WorldTransform);
+    }
+
+    [Fact]
+    public void Propagate_FarOutRoot_KeepsItsPositionExact()
+    {
+        // A root's position is accumulated in double against an identity matrix, so it passes through untouched.
+        // Narrowed to float first, 10 000 000.5 would have been rounded to 10 000 000 — half a metre of error
+        // before a single frame is drawn.
+        using var world = new GameWorld();
+        var root = world.SpawnLocalRoot(new Double3(10_000_000.5, 0, 0), Quaternion.Identity, 1f);
+        var child = world.SpawnLocalChild(root, new Double3(0, 2, 0), Quaternion.Identity, 1f);
+
+        world.PropagateTransforms();
+
+        Assert.Equal(10_000_000.5, world.GetWorldPosition(root).X);
+        Assert.Equal(new Double3(10_000_000.5, 2, 0), world.GetWorldPosition(child));
+
+        // And relative to an eye sitting next to it, the child is exactly 2 m up — no float grid in sight.
+        var eye = new Double3(10_000_000.5, 0, 0);
+        Assert.Equal(new Vector3(0f, 2f, 0f), Translation(world.GetWorld(child, eye)));
     }
 
     [Fact]
@@ -99,10 +150,10 @@ public sealed class WorldSystemsTests
     {
         using var world = new GameWorld();
         world.SpawnImported(new ImportedEntitySpec(
-            new MeshHandle(0, 1), new MaterialHandle(0, 1), Matrix4x4.Identity,
+            new MeshHandle(0, 1), new MaterialHandle(0, 1), Double3.Zero, Matrix4x4.Identity,
             new Double3(-1, -1, -1), new Double3(1, 1, 1), 0));
         world.SpawnImported(new ImportedEntitySpec(
-            new MeshHandle(1, 1), new MaterialHandle(0, 1), Matrix4x4.Identity,
+            new MeshHandle(1, 1), new MaterialHandle(0, 1), Double3.Zero, Matrix4x4.Identity,
             new Double3(0, 0, 0), new Double3(5, 2, 0), 1));
 
         var bounds = world.AggregateBounds();
@@ -131,7 +182,7 @@ public sealed class WorldSystemsTests
         for (var i = 0; i < 32; i++)
         {
             world.SpawnImported(new ImportedEntitySpec(
-                new MeshHandle(i, 1), new MaterialHandle(0, 1), Matrix4x4.Identity,
+                new MeshHandle(i, 1), new MaterialHandle(0, 1), new Double3(i, 0, 0), Matrix4x4.Identity,
                 new Double3(i, 0, 0), new Double3(i + 1, 1, 1), (uint)i));
         }
 
@@ -143,7 +194,7 @@ public sealed class WorldSystemsTests
         {
             world.PropagateTransforms();
             _ = world.AggregateBounds();
-            world.CollectRenderLists(render, shadow);
+            world.CollectRenderLists(render, shadow, Double3.Zero);
         }
 
         var before = GC.GetAllocatedBytesForCurrentThread();
@@ -151,7 +202,7 @@ public sealed class WorldSystemsTests
         {
             world.PropagateTransforms();
             _ = world.AggregateBounds();
-            world.CollectRenderLists(render, shadow);
+            world.CollectRenderLists(render, shadow, Double3.Zero);
         }
 
         var allocated = GC.GetAllocatedBytesForCurrentThread() - before;

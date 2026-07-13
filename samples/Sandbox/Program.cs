@@ -94,8 +94,13 @@ window.Loaded += () =>
     // The seam (spec §3.2): the registry owns the GPU resources and hands back a GPU-free description of each
     // drawable (specs). It is engine-wide, so several models can be loaded without their handles colliding.
     // The world spawns an entity per spec — from here on, the model IS entities.
+    // AGAPANTHE_WORLD_ORIGIN="x,y,z" places the model that far from the world origin, in double (spec §3.3).
+    // The whole point of camera-relative rendering is that the image must be IDENTICAL wherever this puts it —
+    // which is exactly what the M3 precision proof asserts (10 000 km == the origin, to within 1 LSB).
     registry = new ResourceRegistry();
-    var (modelId, specs) = registry.Load(device, model, renderer.MaterialAllocator, renderer.MaterialSetLayout);
+    var worldOrigin = ParseDouble3(Environment.GetEnvironmentVariable("AGAPANTHE_WORLD_ORIGIN"));
+    var (modelId, specs) = registry.Load(
+        device, model, renderer.MaterialAllocator, renderer.MaterialSetLayout, worldOrigin);
 
     world = new GameWorld();
     foreach (var spec in specs)
@@ -142,11 +147,19 @@ window.Loaded += () =>
     // AggregateBounds is NOT re-run per frame: nothing moves in M2, so the extent is folded once above.
     drawScene = (cmd, frame, target) =>
     {
+        // ONE view per frame (spec §3.3): the world narrows every object against view.Origin, and the renderer
+        // narrows the lights and the shadow fit against the same one. A single value = a single origin.
+        var view = camera.CreateView();
         world!.PropagateTransforms();
-        world.CollectRenderLists(renderList, shadowCasters);
+        world.CollectRenderLists(renderList, shadowCasters, view.Origin);
         renderer!.DrawScene(
-            renderList, shadowCasters, registry!, camera, cmd, frame, target, in sceneBounds);
+            renderList, shadowCasters, registry!, in view, cmd, frame, target, in sceneBounds);
     };
+
+    // Camera-relative proof (spec §3.3): both are world-space doubles, and the GPU sees neither — it only ever
+    // sees their difference. Logged so a far-out run is visibly far out, not silently at the origin.
+    Log.Info($"Sandbox: model at world origin {worldOrigin}, eye at {camera.Position} " +
+             $"(distance to model centre: {Double3.Distance(camera.Position, NarrowBounds(in sceneBounds).Center):F3}).");
 
     Log.Info($"Sandbox: initialized on '{device.AdapterName}'. Rendering '{registry.NameOf(modelId)}' — " +
              "clic pour capturer la souris, WASD + souris, Échap libère puis quitte. " +
@@ -478,18 +491,41 @@ static void LogModelStats(Agapanthe.Assets.Model.ModelAsset model, string path)
              $"{model.Images.Count} image(s), {triangles} triangle(s).");
 }
 
-// 3-point lighting from the scene's world bounds: warm key (directional), cool rim point light
-// behind/above, soft warm fill point light front/below. Ranges scale with the scene diagonal.
-// Narrows the world bounds to the float centre/diagonal the framing and light setup consume.
-// Byte-identical (spec §6): narrow FIRST, then do the SAME float arithmetic the old Scene.BoundsCenter /
-// BoundsDiagonal did. Computing the centre in double and narrowing afterwards rounds differently (once in
-// double, once on the cast) and can land 1 ULP away — enough to move the camera and break the capture gate.
-// An empty world (no entities) collapses to the degenerate zero box the old Scene produced.
-static (Vector3 Center, float Diagonal) NarrowBounds(in Double3Bounds bounds)
+// Parses AGAPANTHE_WORLD_ORIGIN / any "x,y,z" double triplet; anything unparseable means "at the origin".
+static Double3 ParseDouble3(string? spec)
 {
-    var min = bounds.IsEmpty ? Vector3.Zero : bounds.Min.ToVector3(Double3.Zero);
-    var max = bounds.IsEmpty ? Vector3.Zero : bounds.Max.ToVector3(Double3.Zero);
-    return ((min + max) * 0.5f, Vector3.Distance(min, max));
+    if (spec is not { Length: > 0 })
+    {
+        return Double3.Zero;
+    }
+
+    var parts = spec.Split(',');
+    var culture = System.Globalization.CultureInfo.InvariantCulture;
+    if (parts.Length == 3
+        && double.TryParse(parts[0], culture, out var x)
+        && double.TryParse(parts[1], culture, out var y)
+        && double.TryParse(parts[2], culture, out var z))
+    {
+        return new Double3(x, y, z);
+    }
+
+    Log.Warn($"Sandbox: could not parse '{spec}' as \"x,y,z\"; using the world origin.");
+    return Double3.Zero;
+}
+
+// The scene's centre (in double — it may be 10 000 km out) and the float diagonal the framing and the light
+// setup scale themselves by. The extent is measured RELATIVE to the bounds' own corner, so the diagonal of a
+// far-away model stays exact instead of being the difference of two enormous floats; only then is the (small)
+// half-extent added back onto the double centre. An empty world collapses to a degenerate zero box.
+static (Double3 Center, float Diagonal) NarrowBounds(in Double3Bounds bounds)
+{
+    if (bounds.IsEmpty)
+    {
+        return (Double3.Zero, 0f);
+    }
+
+    var extent = bounds.Max.ToVector3(bounds.Min);
+    return (bounds.Min + new Double3(extent * 0.5f), extent.Length());
 }
 
 static void SetupLights(SceneLights lights, in Double3Bounds bounds)
@@ -505,14 +541,14 @@ static void SetupLights(SceneLights lights, in Double3Bounds bounds)
     };
     lights.Points[0] = new PointLight
     {
-        Position = center + new Vector3(-0.8f, 0.9f, -1.1f) * reach, // rim: behind-left, above
+        Position = center + new Double3(new Vector3(-0.8f, 0.9f, -1.1f) * reach), // rim: behind-left, above
         Color = new Vector3(0.55f, 0.65f, 1f),                       // cool blue
         Intensity = 4f * reach * reach,                              // inverse-square: scale by distance²
         Range = 6f * reach,
     };
     lights.Points[1] = new PointLight
     {
-        Position = center + new Vector3(0.9f, -0.2f, 1.2f) * reach,  // fill: front-right, slightly low
+        Position = center + new Double3(new Vector3(0.9f, -0.2f, 1.2f) * reach), // fill: front-right, slightly low
         Color = new Vector3(1f, 0.85f, 0.7f),                        // warm
         Intensity = 1.5f * reach * reach,
         Range = 6f * reach,
@@ -530,7 +566,7 @@ static void FrameCamera(Camera camera, FreeCameraController controller, in Doubl
     if (diagonal <= 0f)
     {
         // Degenerate scene (no geometry → collapsed AABB): keep a sane default so the app still runs.
-        camera.Position = new Vector3(0f, 0f, 3f);
+        camera.Position = new Double3(0, 0, 3);
         camera.Yaw = 0f;
         camera.Pitch = 0f;
         return;
@@ -553,7 +589,8 @@ static void FrameCamera(Camera camera, FreeCameraController controller, in Doubl
             dir = Vector3.Normalize(new Vector3(vx, vy, vz));
         }
     }
-    camera.Position = center + (dir * distance);
+    // The eye stays in double: at 10 000 km, a float eye position would already be quantized to the metre.
+    camera.Position = center + new Double3(dir * distance);
 
     // Orient yaw/pitch so Forward = (sy·cp, sp, -cy·cp) points from the eye to the centre (= -dir).
     var forward = -dir;

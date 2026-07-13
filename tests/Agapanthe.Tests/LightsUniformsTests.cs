@@ -1,5 +1,6 @@
 using System.Numerics;
 using System.Runtime.InteropServices;
+using Agapanthe.Core;
 using Agapanthe.Rendering;
 
 namespace Agapanthe.Tests;
@@ -32,7 +33,7 @@ public sealed class LightsUniformsTests
             9f, 10f, 11f, 12f,
             13f, 14f, 15f, 16f);
 
-        var packed = new LightsUniforms(lights, lvp);
+        var packed = new LightsUniforms(lights, lvp, Double3.Zero);
 
         Assert.Equal(lvp, packed.LightViewProj);
     }
@@ -59,14 +60,14 @@ public sealed class LightsUniformsTests
         };
         lights.Points[0] = new PointLight
         {
-            Position = new Vector3(1f, 2f, 3f),
+            Position = new Double3(1, 2, 3),
             Color = Vector3.One,
             Intensity = 10f,
             Range = 25f,
         };
         lights.PointCount = 1;
 
-        var packed = new LightsUniforms(lights, Matrix4x4.Identity);
+        var packed = new LightsUniforms(lights, Matrix4x4.Identity, Double3.Zero);
 
         Assert.Equal(new Vector4(0f, -1f, 0f, 0f), packed.DirectionalDirection); // normalized
         Assert.Equal(3f, packed.DirectionalColorIntensity.W);
@@ -92,7 +93,31 @@ public sealed class LightsUniformsTests
             Directional = new DirectionalLight { Direction = Vector3.Zero, Color = Vector3.One, Intensity = 1f },
         };
 
-        var packed = new LightsUniforms(lights, Matrix4x4.Identity);
+        var packed = new LightsUniforms(lights, Matrix4x4.Identity, Double3.Zero);
         Assert.Equal(new Vector4(0f, -1f, 0f, 0f), packed.DirectionalDirection);
+    }
+
+    [Fact]
+    public void LightsUniforms_PacksPointLightsRelativeToTheOrigin()
+    {
+        // Point lights are stored in double and narrowed against THIS frame's origin (spec §3.3). Packed in
+        // absolute float they would light the wrong place as soon as the camera is far from the world origin —
+        // and the error would grow as the camera moves, i.e. the light would drift.
+        var lights = new SceneLights();
+        lights.Points[0] = new PointLight
+        {
+            Position = new Double3(10_000_002, 5, -3),
+            Color = Vector3.One,
+            Intensity = 1f,
+            Range = 25f,
+        };
+        lights.PointCount = 1;
+
+        var origin = new Double3(10_000_000, 0, 0);
+        var packed = new LightsUniforms(lights, Matrix4x4.Identity, origin);
+
+        // Exactly the offset from the eye — a float can represent (2, 5, -3) precisely, while 10_000_002 alone
+        // is already quantized to the metre.
+        Assert.Equal(new Vector4(2f, 5f, -3f, 25f), packed.Point0PositionRange);
     }
 }

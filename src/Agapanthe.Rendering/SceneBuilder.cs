@@ -258,8 +258,18 @@ public static class SceneBuilder
                 ? materialIndex
                 : defaultMaterialIndex;
 
+            // Split the asset's baked matrix (spec §3.3): the translation row becomes a Double3 position, the rest
+            // stays a float matrix. Recombining them at a zero origin reproduces the asset matrix bit-for-bit —
+            // a float widened to double and narrowed back is the identical float.
+            var world = meshAsset.WorldTransform;
+            var position = new Double3(world.M41, world.M42, world.M43);
+            var rotationScale = world;
+            rotationScale.M41 = 0f;
+            rotationScale.M42 = 0f;
+            rotationScale.M43 = 0f;
+
             var (min, max) = ComputeMeshWorldBounds(meshAsset);
-            entries[i] = new MeshEntry(resolved, meshAsset.WorldTransform, new Double3(min), new Double3(max));
+            entries[i] = new MeshEntry(resolved, position, rotationScale, new Double3(min), new Double3(max));
         }
 
         return entries;

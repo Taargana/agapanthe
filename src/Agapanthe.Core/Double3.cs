@@ -42,6 +42,18 @@ public readonly struct Double3 : IEquatable<Double3>
 
     public static Double3 operator *(Double3 v, double scalar) => new(v.X * scalar, v.Y * scalar, v.Z * scalar);
 
+    /// <summary>
+    /// Applies the rotation/scale (upper 3×3) of <paramref name="m"/> to this vector, in double, row-vector
+    /// convention (<c>v · M</c>). The matrix stays float — only the accumulation is double, which is what keeps a
+    /// far-out root position exact: at the root the matrix is the identity, so the position passes through
+    /// bit-for-bit instead of being rounded to float.
+    /// </summary>
+    public Double3 TransformBy(in Matrix4x4 m)
+        => new(
+            (X * m.M11) + (Y * m.M21) + (Z * m.M31),
+            (X * m.M12) + (Y * m.M22) + (Z * m.M32),
+            (X * m.M13) + (Y * m.M23) + (Z * m.M33));
+
     public double Length => Math.Sqrt((X * X) + (Y * Y) + (Z * Z));
 
     public static double Distance(Double3 a, Double3 b) => (a - b).Length;

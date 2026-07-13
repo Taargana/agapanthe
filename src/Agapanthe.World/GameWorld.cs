@@ -41,9 +41,11 @@ public sealed class GameWorld : IDisposable
     private readonly List<Entity> _walkStack = new(16);
 
     // Built once: constructing a QueryDescription per frame would defeat the zero-alloc goal.
-    private static readonly QueryDescription PropagateDesc = new QueryDescription().WithAll<LocalTransform, WorldTransform>();
+    private static readonly QueryDescription PropagateDesc =
+        new QueryDescription().WithAll<LocalTransform, WorldTransform, WorldPosition>();
     private static readonly QueryDescription BoundsDesc = new QueryDescription().WithAll<Bounds>();
-    private static readonly QueryDescription DrawableDesc = new QueryDescription().WithAll<WorldTransform, MeshRef, RenderOrder>();
+    private static readonly QueryDescription DrawableDesc =
+        new QueryDescription().WithAll<WorldTransform, WorldPosition, MeshRef, RenderOrder>();
 
     // The thread that built this world. Arch's world creation and entity storage are not thread-safe, so a world
     // is owned by one thread; the guard below turns that contract from a comment into a checked invariant
@@ -76,10 +78,10 @@ public sealed class GameWorld : IDisposable
     }
 
     /// <summary>
-    /// Spawns an imported drawable (spec §3.2 seam). It carries a baked <see cref="WorldTransform"/> (copied
-    /// bit-for-bit from the spec — no TRS round-trip, spec §6 condition a), the mesh/material handles, its world
-    /// bounds and its stable render order. It deliberately has NO <see cref="LocalTransform"/>, so the
-    /// propagation system never recomputes its matrix (byte-identical guarantee).
+    /// Spawns an imported drawable (spec §3.2 seam). It carries the baked rotation/scale matrix and the
+    /// <see cref="Double3"/> world position of the spec (copied verbatim — no TRS round-trip, spec §6 condition
+    /// a), the mesh/material handles, its world bounds and its stable render order. It deliberately has NO
+    /// <see cref="LocalTransform"/>, so the propagation system never recomputes its transform.
     /// </summary>
     public void SpawnImported(in ImportedEntitySpec spec)
     {
@@ -87,7 +89,8 @@ public sealed class GameWorld : IDisposable
         AssertOwnerThread();
         _world.Create(
             new GlobalId { Value = spec.Order },
-            new WorldTransform { Value = spec.World },
+            new WorldTransform { Value = spec.RotationScale },
+            new WorldPosition { Value = spec.Position },
             new MeshRef { Mesh = spec.Mesh, Material = spec.Material },
             new Bounds { Min = spec.BoundsMin, Max = spec.BoundsMax },
             new RenderOrder { Value = spec.Order });
@@ -109,7 +112,7 @@ public sealed class GameWorld : IDisposable
         for (var i = 0; i < 8; i++)
         {
             SpawnImported(new ImportedEntitySpec(
-                new MeshHandle(i, 1), new MaterialHandle(0, 1), Matrix4x4.Identity,
+                new MeshHandle(i, 1), new MaterialHandle(0, 1), new Double3(i, 0, 0), Matrix4x4.Identity,
                 new Double3(i, 0, 0), new Double3(i + 1, 1, 1), (uint)i));
         }
 
@@ -127,6 +130,7 @@ public sealed class GameWorld : IDisposable
         using var cb = new CommandBuffer();
         var deferred = cb.Create([Component<WorldTransform>.ComponentType]);
         cb.Set(deferred, new WorldTransform { Value = Matrix4x4.Identity });
+        cb.Add(deferred, new WorldPosition { Value = new Double3(1, 2, 3) });
         cb.Add(deferred, new RenderOrder { Value = 99 });
         cb.Playback(_world);
 
@@ -142,7 +146,7 @@ public sealed class GameWorld : IDisposable
         // would otherwise leave untested under AOT. It sees the 8 imported drawables — not the CommandBuffer
         // entity above, which has no MeshRef.
         var render = new RenderList();
-        CollectRenderLists(render, new RenderList());
+        CollectRenderLists(render, new RenderList(), new Double3(1e7, 0, 0)); // camera-relative narrow under AOT
         if (render.Count != 8)
         {
             throw new InvalidOperationException(
@@ -176,10 +180,11 @@ public sealed class GameWorld : IDisposable
         {
             var entities = chunk.Entities;
             var worlds = chunk.GetSpan<WorldTransform>();
+            var positions = chunk.GetSpan<WorldPosition>();
             var count = chunk.Count;
             for (var i = 0; i < count; i++)
             {
-                worlds[i].Value = ComputeWorldMatrix(entities[i]);
+                ComputeWorld(entities[i], out worlds[i].Value, out positions[i].Value);
             }
         }
     }
@@ -217,7 +222,7 @@ public sealed class GameWorld : IDisposable
     /// <para>The shadow-caster list is a separate list on purpose: in M4 it is culled against the LIGHT volume,
     /// never the camera frustum, or off-screen casters would pop their shadows in and out (spec §3.5).</para>
     /// </summary>
-    public void CollectRenderLists(RenderList render, RenderList shadowCasters)
+    public void CollectRenderLists(RenderList render, RenderList shadowCasters, Double3 origin)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
         AssertOwnerThread();
@@ -230,12 +235,17 @@ public sealed class GameWorld : IDisposable
         foreach (ref var chunk in _world.Query(in DrawableDesc))
         {
             var worlds = chunk.GetSpan<WorldTransform>();
+            var positions = chunk.GetSpan<WorldPosition>();
             var meshes = chunk.GetSpan<MeshRef>();
             var orders = chunk.GetSpan<RenderOrder>();
             var count = chunk.Count;
             for (var i = 0; i < count; i++)
             {
-                var item = new RenderItem(worlds[i].Value, meshes[i].Mesh, meshes[i].Material, orders[i].Value);
+                // THE camera-relative narrow (spec §3.3): the subtraction happens in double, and only its
+                // (small) result is cast to float. This is the single point where a world coordinate becomes a
+                // GPU coordinate — everything the GPU sees is already relative to the eye.
+                var model = ComposeModel(worlds[i].Value, positions[i].Value, origin);
+                var item = new RenderItem(model, meshes[i].Mesh, meshes[i].Material, orders[i].Value);
                 render.Add(item);
                 shadowCasters.Add(item); // passthrough in M2: every drawable casts
             }
@@ -245,13 +255,30 @@ public sealed class GameWorld : IDisposable
         shadowCasters.SortByKey();
     }
 
-    // world(e) = local(e) · local(parent) · … · local(root) (row-vector convention). Walks the Parent chain,
-    // detecting cycles on the reused stack. A chain node without a LocalTransform ends the walk (it is a world
-    // anchor). In M2 position is narrowed to absolute float (camera-relative subtraction is M3).
-    private Matrix4x4 ComputeWorldMatrix(Entity entity)
+    // Recombines the two halves of a world transform into the float model matrix the GPU consumes: the baked
+    // rotation/scale, with the camera-relative position dropped into its translation row (row-vector layout).
+    private static Matrix4x4 ComposeModel(in Matrix4x4 rotationScale, Double3 position, Double3 origin)
+    {
+        var relative = position.ToVector3(origin);
+        var m = rotationScale;
+        m.M41 = relative.X;
+        m.M42 = relative.Y;
+        m.M43 = relative.Z;
+        return m;
+    }
+
+    // Composes an entity's world transform from its Parent chain (row-vector convention:
+    // rotationScale(e) = rs(e) · rs(parent) · … · rs(root)), keeping the POSITION in double throughout.
+    //
+    // The walk collects the chain child-first (detecting cycles on the reused stack), then composes it
+    // root-first, which is what makes the precision work: at the root the accumulated rotation/scale is the
+    // identity, so the root's Double3 position passes through untouched — a root 10 000 km out stays exact
+    // instead of being rounded to a float metre. Each child then adds its own offset rotated/scaled by its
+    // parents' (float) matrix: those offsets are local, hence small, so a float matrix is enough for them.
+    // A chain node without a LocalTransform ends the walk (it is a world anchor).
+    private void ComputeWorld(Entity entity, out Matrix4x4 rotationScale, out Double3 position)
     {
         _walkStack.Clear();
-        var m = Matrix4x4.Identity;
         var node = entity;
         while (node.Has<LocalTransform>())
         {
@@ -264,7 +291,6 @@ public sealed class GameWorld : IDisposable
             }
 
             _walkStack.Add(node);
-            m *= LocalMatrix(node.Get<LocalTransform>());
 
             if (!node.Has<Parent>())
             {
@@ -274,13 +300,21 @@ public sealed class GameWorld : IDisposable
             node = node.Get<Parent>().Value;
         }
 
-        return m;
+        rotationScale = Matrix4x4.Identity;
+        position = Double3.Zero;
+        for (var i = _walkStack.Count - 1; i >= 0; i--) // root -> entity
+        {
+            var lt = _walkStack[i].Get<LocalTransform>();
+
+            // Transform BEFORE accumulating: rotationScale currently holds the PARENT's accumulation, which is
+            // the frame this node's local offset is expressed in.
+            position += lt.Position.TransformBy(rotationScale);
+            rotationScale = LocalRotationScale(lt) * rotationScale;
+        }
     }
 
-    private static Matrix4x4 LocalMatrix(in LocalTransform lt)
-        => Matrix4x4.CreateScale(lt.Scale)
-         * Matrix4x4.CreateFromQuaternion(lt.Rotation)
-         * Matrix4x4.CreateTranslation(lt.Position.ToVector3(Double3.Zero));
+    private static Matrix4x4 LocalRotationScale(in LocalTransform lt)
+        => Matrix4x4.CreateScale(lt.Scale) * Matrix4x4.CreateFromQuaternion(lt.Rotation);
 
     private string BuildCyclePath(Entity repeated)
     {
@@ -294,11 +328,13 @@ public sealed class GameWorld : IDisposable
 
     internal EntityRef SpawnLocalRoot(Double3 position, Quaternion rotation, float scale)
         => new(_world.Create(new LocalTransform { Position = position, Rotation = rotation, Scale = scale },
-                             new WorldTransform { Value = Matrix4x4.Identity }));
+                             new WorldTransform { Value = Matrix4x4.Identity },
+                             new WorldPosition { Value = Double3.Zero }));
 
     internal EntityRef SpawnLocalChild(EntityRef parent, Double3 position, Quaternion rotation, float scale)
         => new(_world.Create(new LocalTransform { Position = position, Rotation = rotation, Scale = scale },
                              new WorldTransform { Value = Matrix4x4.Identity },
+                             new WorldPosition { Value = Double3.Zero },
                              new Parent { Value = parent.Value }));
 
     internal void SetParent(EntityRef child, EntityRef parent)
@@ -313,7 +349,14 @@ public sealed class GameWorld : IDisposable
         }
     }
 
-    internal Matrix4x4 GetWorld(EntityRef entity) => entity.Value.Get<WorldTransform>().Value;
+    /// <summary>The entity's full world matrix, relative to <paramref name="origin"/> (absolute by default).</summary>
+    internal Matrix4x4 GetWorld(EntityRef entity, Double3 origin = default)
+        => ComposeModel(
+            entity.Value.Get<WorldTransform>().Value,
+            entity.Value.Get<WorldPosition>().Value,
+            origin);
+
+    internal Double3 GetWorldPosition(EntityRef entity) => entity.Value.Get<WorldPosition>().Value;
 
     public void Dispose()
     {

@@ -43,13 +43,29 @@ internal struct Parent
     public Entity Value;
 }
 
-/// <summary>World-space transform: the output of the propagation system, or the bit-exact baked matrix of an
-/// imported drawable. This is what the render-list builder reads.</summary>
+/// <summary>
+/// World-space rotation/scale: the output of the propagation system, or the baked matrix of an imported
+/// drawable — with a <b>zero translation row</b>. The translation lives in <see cref="WorldPosition"/>, in
+/// double (spec §3.3): a float matrix cannot carry a far-out position without losing metres. The render-list
+/// builder recombines the two against the frame's camera origin.
+/// </summary>
 [Component]
 [StructLayout(LayoutKind.Sequential)]
 internal struct WorldTransform
 {
     public Matrix4x4 Value;
+}
+
+/// <summary>
+/// World-space position, in double — the half of the world transform that must not be narrowed until the
+/// camera origin has been subtracted from it (spec §3.3). Every drawable and every propagated entity carries
+/// one, alongside its <see cref="WorldTransform"/>.
+/// </summary>
+[Component]
+[StructLayout(LayoutKind.Sequential)]
+internal struct WorldPosition
+{
+    public Double3 Value;
 }
 
 /// <summary>The drawable payload: which mesh + material to draw, by handle (resolved to GPU resources on the

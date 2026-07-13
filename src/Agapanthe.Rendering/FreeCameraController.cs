@@ -1,4 +1,5 @@
 using System.Numerics;
+using Agapanthe.Core;
 
 namespace Agapanthe.Rendering;
 
@@ -194,7 +195,10 @@ public sealed class FreeCameraController
             return; // Opposing keys cancelled out.
         }
 
+        // The step is computed in float (it is a small, local displacement) but ACCUMULATED in double: adding a
+        // metre-sized step to a float position 10 000 km out would round straight back to where it started —
+        // the camera would simply refuse to move (spec §3.3).
         var speed = MoveSpeed * (input.Sprint ? SprintMultiplier : 1f);
-        camera.Position += Vector3.Normalize(direction) * (speed * deltaSeconds);
+        camera.Position += new Double3(Vector3.Normalize(direction) * (speed * deltaSeconds));
     }
 }

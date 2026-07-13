@@ -48,12 +48,18 @@ public sealed class ResourceRegistry : IDisposable
     /// Uploads <paramref name="model"/> to the GPU, registers its resources in the global slot tables, and
     /// returns the model's id (for <see cref="Unload"/>) plus one <see cref="ImportedEntitySpec"/> per drawable —
     /// the GPU-free description the world spawns entities from.
+    /// <para>
+    /// <paramref name="worldOrigin"/> places the model in the world, in double (spec §3.3): every drawable's
+    /// position and bounds are offset by it. A model at 10 000 km is exact, because that offset is never narrowed
+    /// to float — the camera origin is subtracted from it first, at draw time.
+    /// </para>
     /// </summary>
     public (int ModelId, ImportedEntitySpec[] Specs) Load(
         GraphicsDevice device,
         ModelAsset model,
         DescriptorAllocator materialAllocator,
-        DescriptorSetLayout materialSetLayout)
+        DescriptorSetLayout materialSetLayout,
+        Double3 worldOrigin = default)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
 
@@ -82,9 +88,10 @@ public sealed class ResourceRegistry : IDisposable
             specs[i] = new ImportedEntitySpec(
                 meshHandles[i],
                 materialHandles[entry.LocalMaterialIndex],
-                entry.World,
-                entry.BoundsMin,
-                entry.BoundsMax,
+                entry.Position + worldOrigin,
+                entry.RotationScale,
+                entry.BoundsMin + worldOrigin,
+                entry.BoundsMax + worldOrigin,
                 (uint)i);
         }
 

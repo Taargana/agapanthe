@@ -1,5 +1,6 @@
 using System.Numerics;
 using System.Runtime.InteropServices;
+using Agapanthe.Core;
 
 namespace Agapanthe.Rendering;
 
@@ -29,8 +30,12 @@ public struct DirectionalLight
 /// </summary>
 public struct PointLight
 {
-    /// <summary>World-space position of the emitter.</summary>
-    public Vector3 Position;
+    /// <summary>
+    /// World-space position of the emitter, in <see cref="Double3"/> (spec §3.3). It is converted to
+    /// camera-relative float EVERY frame when the UBO is packed: a light stored in absolute float would light
+    /// the wrong place the moment the camera origin is non-zero, and would drift as the camera moves.
+    /// </summary>
+    public Double3 Position;
 
     /// <summary>Linear RGB radiance color (unclamped; the pipeline is HDR).</summary>
     public Vector3 Color;
@@ -171,7 +176,7 @@ public readonly struct LightsUniforms
     /// at or beyond <see cref="SceneLights.PointCount"/>. No heap allocation: the result is a value type
     /// built on the stack.
     /// </summary>
-    public LightsUniforms(SceneLights lights, Matrix4x4 lightViewProj)
+    public LightsUniforms(SceneLights lights, Matrix4x4 lightViewProj, Double3 origin)
     {
         ArgumentNullException.ThrowIfNull(lights);
 
@@ -182,14 +187,16 @@ public readonly struct LightsUniforms
         DirectionalColorIntensity = new Vector4(dir.Color, dir.Intensity);
         AmbientPointCount = new Vector4(lights.Ambient, lights.PointCount);
 
+        // Camera-relative narrow, redone every frame against THIS frame's origin (spec §3.3). The shader compares
+        // these against camera-relative surface positions, so both sides must have had the same origin removed.
         var p = lights.Points;
-        Point0PositionRange = new Vector4(p[0].Position, p[0].Range);
+        Point0PositionRange = new Vector4(p[0].Position.ToVector3(origin), p[0].Range);
         Point0ColorIntensity = new Vector4(p[0].Color, p[0].Intensity);
-        Point1PositionRange = new Vector4(p[1].Position, p[1].Range);
+        Point1PositionRange = new Vector4(p[1].Position.ToVector3(origin), p[1].Range);
         Point1ColorIntensity = new Vector4(p[1].Color, p[1].Intensity);
-        Point2PositionRange = new Vector4(p[2].Position, p[2].Range);
+        Point2PositionRange = new Vector4(p[2].Position.ToVector3(origin), p[2].Range);
         Point2ColorIntensity = new Vector4(p[2].Color, p[2].Intensity);
-        Point3PositionRange = new Vector4(p[3].Position, p[3].Range);
+        Point3PositionRange = new Vector4(p[3].Position.ToVector3(origin), p[3].Range);
         Point3ColorIntensity = new Vector4(p[3].Color, p[3].Intensity);
 
         LightViewProj = lightViewProj;
