@@ -288,7 +288,10 @@ public sealed class GameWorld : IDisposable
                 }
 
                 var model = ComposeModel(worlds[i].Value, positions[i].Value, origin);
-                var item = new RenderItem(model, meshes[i].Mesh, meshes[i].Material, orders[i].Value);
+                // Sort key: material in the high bits (batch draws by material), the stable RenderOrder in the low
+                // bits as the deterministic tie-break (spec §6 condition b — Arch's chunk order is not stable).
+                var key = RenderItem.ComposeSortKey(meshes[i].Material.Index, orders[i].Value);
+                var item = new RenderItem(model, meshes[i].Mesh, meshes[i].Material, key);
                 if (inCamera)
                 {
                     render.Add(item);

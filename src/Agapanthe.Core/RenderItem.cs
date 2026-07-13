@@ -16,8 +16,9 @@ public readonly struct RenderItem
     public readonly MaterialHandle Material;
 
     /// <summary>
-    /// Draw-order key. In M2 it carries the source render order (the stable draw order, spec §6 condition b);
-    /// the high bits are reserved for material / pipeline / depth batching once real culling arrives (M4).
+    /// Draw-order key (see <see cref="ComposeSortKey"/>): the material in the high bits so the sorted list groups
+    /// draws by material (fewer set-1 rebinds), a stable tie-break in the low bits so the order is deterministic
+    /// even where materials collide (spec §6 condition b).
     /// </summary>
     public readonly ulong SortKey;
 
@@ -28,4 +29,18 @@ public readonly struct RenderItem
         Material = material;
         SortKey = sortKey;
     }
+
+    /// <summary>
+    /// Builds the 64-bit draw-sort key: <paramref name="materialIndex"/> in the high 32 bits (batches same-material
+    /// draws together, cutting descriptor-set rebinds), <paramref name="tieBreak"/> in the low 32 bits.
+    /// <para>
+    /// The tie-break is <b>load-bearing, not decorative</b> (both M4 audits): once the key leads with the material,
+    /// entities sharing a material have equal high bits, and an equal-key run would otherwise be ordered by Arch's
+    /// archetype/chunk iteration — which is not deterministic. Baking a stable per-entity value (its
+    /// <c>GlobalId</c>/<c>RenderOrder</c>) into the low bits makes the total order deterministic; a "stable sort"
+    /// alone would not, because the pre-sort input order is itself non-deterministic.
+    /// </para>
+    /// </summary>
+    public static ulong ComposeSortKey(int materialIndex, uint tieBreak)
+        => ((ulong)(uint)materialIndex << 32) | tieBreak;
 }
