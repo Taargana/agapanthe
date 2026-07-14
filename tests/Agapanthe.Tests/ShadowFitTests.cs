@@ -35,6 +35,15 @@ public sealed class ShadowFitTests
             center - new Double3(halfSize, halfSize, halfSize),
             center + new Double3(halfSize, halfSize, halfSize));
 
+    // Since P3-M2 D3.b the fit takes scene bounds (footprint) and caster bounds (depth range) separately. These
+    // tests predate that split and reason about ONE set of bounds, so we hand the same bounds to both — reproducing
+    // the pre-D3 behaviour (footprint from the scene, depth range from the same geometry). The eyeDistance out is
+    // dropped; the depth-range tests assert against the projected clip depth, not the raw distance.
+    private static Matrix4x4 Fit(
+        in RenderView view, in Double3Bounds bounds, Vector3 sun, float shadowDistance, uint resolution)
+        => ShadowFit.ComputeLightViewProj(
+            in view, in bounds, in bounds, sun, shadowDistance, resolution, out _);
+
     [Fact]
     public void SceneFit_IsStable_WhenTheSceneBoundsBreathe()
     {
@@ -54,7 +63,7 @@ public sealed class ShadowFitTests
         {
             var drift = step * (texel / 8.0);
             var breathed = Box(new Double3(drift, 0, 0), 1.2 + (drift * 0.01));
-            var fit = ShadowFit.ComputeLightViewProj(in view, in breathed, Sun, shadowDistance: 0f, Resolution);
+            var fit = Fit(in view, in breathed, Sun, 0f, Resolution);
             widths.Add(FittedWidth(fit));
             // Round off the ~1e-7 float noise of the round trip; the x/y phase is what crawls (z is not snapped).
             phases.Add((Math.Round(fit.M41, 6), Math.Round(fit.M42, 6)));
@@ -72,8 +81,8 @@ public sealed class ShadowFitTests
         var view = View(Double3.Zero);
         var scene = Box(Double3.Zero, 1.2); // ~2.4 m across
 
-        var lightViewProj = ShadowFit.ComputeLightViewProj(
-            in view, in scene, Sun, shadowDistance: 0f, Resolution);
+        var lightViewProj = Fit(
+            in view, in scene, Sun, 0f, Resolution);
 
         var width = FittedWidth(lightViewProj);
         Assert.InRange(width, 2f, 6f); // the scene's sphere (diagonal + 10% margin), not the frustum's
@@ -87,8 +96,8 @@ public sealed class ShadowFitTests
         var view = View(Double3.Zero, far: 10_000f);
         var world = Box(Double3.Zero, 50_000); // 100 km across
 
-        var lightViewProj = ShadowFit.ComputeLightViewProj(
-            in view, in world, Sun, shadowDistance: 100f, Resolution);
+        var lightViewProj = Fit(
+            in view, in world, Sun, 100f, Resolution);
 
         var width = FittedWidth(lightViewProj);
         Assert.True(width < 1_000f, $"fitted width {width} should follow the 100 m shadow distance, not the 100 km world");
@@ -100,10 +109,10 @@ public sealed class ShadowFitTests
     {
         var world = Box(Double3.Zero, 50_000);
 
-        var near = ShadowFit.ComputeLightViewProj(
-            View(Double3.Zero, far: 10_000f), in world, Sun, shadowDistance: 50f, Resolution);
-        var far = ShadowFit.ComputeLightViewProj(
-            View(Double3.Zero, far: 10_000f), in world, Sun, shadowDistance: 200f, Resolution);
+        var near = Fit(
+            View(Double3.Zero, far: 10_000f), in world, Sun, 50f, Resolution);
+        var far = Fit(
+            View(Double3.Zero, far: 10_000f), in world, Sun, 200f, Resolution);
 
         Assert.True(
             FittedWidth(near) < FittedWidth(far),
@@ -117,9 +126,9 @@ public sealed class ShadowFitTests
         // If it did, every shadow texel would resize each frame and the edges would crawl.
         var world = Box(Double3.Zero, 50_000);
 
-        var facingForward = ShadowFit.ComputeLightViewProj(
+        var facingForward = Fit(
             View(Double3.Zero, yaw: 0f, far: 10_000f), in world, Sun, 100f, Resolution);
-        var turned = ShadowFit.ComputeLightViewProj(
+        var turned = Fit(
             View(Double3.Zero, yaw: 1.1f, far: 10_000f), in world, Sun, 100f, Resolution);
 
         Assert.Equal(FittedWidth(facingForward), FittedWidth(turned), 3);
@@ -143,7 +152,7 @@ public sealed class ShadowFitTests
         {
             var eye = new Double3(0, 0, -step * frame); // creeping forward, sub-texel each frame
             var view = View(eye, far: 10_000f);
-            var lightViewProj = ShadowFit.ComputeLightViewProj(view, in world, Sun, 100f, Resolution);
+            var lightViewProj = Fit(view, in world, Sun, 100f, Resolution);
 
             // The shadow pass receives camera-relative positions, so that is what we project.
             var relative = worldPoint.ToVector3(eye);
@@ -174,7 +183,7 @@ public sealed class ShadowFitTests
         // A world 2 km tall: the top is far above anything the frustum sphere covers.
         var world = new Double3Bounds(new Double3(-50_000, 0, -50_000), new Double3(50_000, 2_000, 50_000));
 
-        var lightViewProj = ShadowFit.ComputeLightViewProj(view, in world, sun, 100f, Resolution);
+        var lightViewProj = Fit(view, in world, sun, 100f, Resolution);
 
         // A caster at the very top of that world, above the camera, must land inside the light's depth range.
         var caster = new Vector3(0f, 1_999f, 0f);
@@ -195,9 +204,9 @@ public sealed class ShadowFitTests
         // crawl. The render lists themselves remain exactly bit-identical; this is only the shadow map's phase.
         var far = new Double3(1e7, 1e7, 1e7);
 
-        var atOrigin = ShadowFit.ComputeLightViewProj(
+        var atOrigin = Fit(
             View(Double3.Zero, far: 10_000f), Box(Double3.Zero, 50_000), Sun, 100f, Resolution);
-        var atFar = ShadowFit.ComputeLightViewProj(
+        var atFar = Fit(
             View(far, far: 10_000f), Box(far, 50_000), Sun, 100f, Resolution);
 
         Assert.Equal(FittedWidth(atOrigin), FittedWidth(atFar), 3); // same extent = same shadow texel density
@@ -218,7 +227,7 @@ public sealed class ShadowFitTests
     {
         // An empty world folds to inverted infinities; unguarded, they would poison the matrix to NaN and every
         // shadowed pixel with it.
-        var lightViewProj = ShadowFit.ComputeLightViewProj(
+        var lightViewProj = Fit(
             View(Double3.Zero), Double3Bounds.Empty, Sun, 0f, Resolution);
 
         Assert.True(float.IsFinite(lightViewProj.M11));
@@ -228,7 +237,7 @@ public sealed class ShadowFitTests
     [Fact]
     public void ZeroLightDirection_FallsBackToStraightDown()
     {
-        var lightViewProj = ShadowFit.ComputeLightViewProj(
+        var lightViewProj = Fit(
             View(Double3.Zero), Box(Double3.Zero, 1.2), Vector3.Zero, 0f, Resolution);
 
         Assert.True(float.IsFinite(lightViewProj.M11));

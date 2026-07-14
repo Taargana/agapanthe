@@ -34,6 +34,22 @@ public sealed class RenderList
     /// <summary>The items added since the last <see cref="Clear"/>, in insertion order.</summary>
     public ReadOnlySpan<RenderItem> Items => _items.AsSpan(0, _count);
 
+    /// <summary>
+    /// The current items as a MUTABLE span, for in-place compaction only (P3-M2 D3.c, two-pass shadow cull): the
+    /// World keeps the surviving casters at the front, then calls <see cref="Truncate"/>. Do not <see cref="Add"/>
+    /// while holding this span — a grow would invalidate it.
+    /// </summary>
+    public Span<RenderItem> ItemsMutable => _items.AsSpan(0, _count);
+
+    /// <summary>Drops every item past <paramref name="newCount"/> (kept in [0, current count]) — the tail-drop step
+    /// of an in-place compaction. The backing array is untouched, so the next frame still refills alloc-free.</summary>
+    public void Truncate(int newCount)
+    {
+        ArgumentOutOfRangeException.ThrowIfNegative(newCount);
+        ArgumentOutOfRangeException.ThrowIfGreaterThan(newCount, _count);
+        _count = newCount;
+    }
+
     /// <summary>Resets to empty without releasing the backing array — the next frame refills it alloc-free.</summary>
     public void Clear() => _count = 0;
 

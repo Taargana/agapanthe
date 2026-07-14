@@ -1,0 +1,33 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- The thin layer that MARRIES simulation and rendering (P3-M2, decision D0). It is the ONLY project that
+       references both World and Rendering, and it exists precisely so that neither has to reference the other:
+       World stays GPU-free (a headless server can run it), Rendering stays ECS-free (it can draw something that is
+       not a GameWorld — a tool, a test). The frame order lived in the Sandbox's closure for want of a home; this
+       is that home.
+
+       It deliberately does NOT reference Platform: dragging GLFW in here would kill the "simulation runs headless"
+       argument that justifies the whole split. The Input stage is therefore empty on the engine side — the
+       application fills it. -->
+  <ItemGroup>
+    <ProjectReference Include="..\Agapanthe.Core\Agapanthe.Core.csproj" />
+    <ProjectReference Include="..\Agapanthe.World\Agapanthe.World.csproj" />
+    <ProjectReference Include="..\Agapanthe.Rendering\Agapanthe.Rendering.csproj" />
+    <!-- Explicit, not merely transitive: the render context NAMES Graphics types (CommandList, FrameContext,
+         SwapchainTarget) in its public surface, so the dependency is real and is declared as such. -->
+    <ProjectReference Include="..\Agapanthe.Graphics\Agapanthe.Graphics.csproj" />
+  </ItemGroup>
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <!-- Phase 2 rule 1: trim/AOT analyzers at build time (permanent gate). -->
+    <IsAotCompatible>true</IsAotCompatible>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="Agapanthe.Tests" />
+  </ItemGroup>
+
+</Project>

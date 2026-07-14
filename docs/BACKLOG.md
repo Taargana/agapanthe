@@ -112,7 +112,11 @@ quantifiée (P2-M3/M4). Tenir en orbite à 400 km sans que les pixels tremblent,
 
 ## 4. Gameplay (Phase 3, après P3-M2)
 
-- **Lifecycle d'entités** : `Despawn`, reparentage pendant la frame (command buffer différé), pooling.
+- **Pooling d'entités + prefabs** *(écarté du périmètre de P3-M2, décision humaine session 15)*. P3-M2 livre
+  `Spawn`/`Despawn` + changements structurels différés ; la **réutilisation** d'entités (pooling) et l'instanciation
+  d'**archetypes prédéfinis** (prefabs) attendent d'avoir un client réel. *Mord : haute fréquence de spawn/despawn —
+  projectiles, particules, débris — où le coût de création/destruction d'archetype devient visible. Concevoir avant
+  d'avoir ce client, c'est concevoir à l'aveugle.*
 - **Physique** : dépend de l'origine quantifiée (✓ payée), du recalcul des bounds par frame (✓ payé) et du scheduler.
   Attention : c'est elle qui fera mordre `ShadowFit.UpstreamExtent` (§0).
 - **Sérialisation** source-gen (partage le générateur du rooting AOT ; parallélisable).

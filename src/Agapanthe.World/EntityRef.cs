@@ -1,28 +1,39 @@
-using Arch.Core;
-
 namespace Agapanthe.World;
 
 /// <summary>
-/// An opaque wrapper around an Arch <see cref="Entity"/>. It exists so callers outside this project can hold on
-/// to an entity without ever naming an Arch type: Arch is referenced with <c>PrivateAssets="compile"</c>, so no
-/// consumer (Rendering, Sandbox, tests) can even compile against <see cref="Entity"/> (audit W1 M3). The wrapped
-/// value stays internal — only this project's own systems dereference it.
+/// An opaque, stable handle to an entity — its <see cref="GlobalId"/> (a <c>ulong</c>), NOT an Arch
+/// <see cref="Arch.Core.Entity"/>. Two things forced this (P3-M2, decision D2, corrected in V2 against the
+/// decompiled Arch 2.1.0):
+/// <list type="number">
+/// <item>A deferred <c>Spawn</c> must hand back a usable handle BEFORE the entity exists — the entity is only
+/// created at the end-of-stage barrier. An Arch <c>Entity</c> cannot be fabricated for a not-yet-created entity
+/// (its constructor is internal to Arch), and Arch's own buffered entity is invalidated by playback. A
+/// <c>GlobalId</c> is assigned at enqueue time and outlives the barrier — it is the identity that <b>precedes
+/// creation</b>.</item>
+/// <item>It keeps the Arch <c>Entity</c> out of even the internal handle surface: consumers (Rendering, Sandbox,
+/// tests) already cannot compile against Arch (<c>PrivateAssets="compile"</c>), and now they hold a plain
+/// <c>ulong</c> identity that <see cref="GameWorld"/> resolves to the real entity through its <c>_live</c> map.</item>
+/// </list>
 /// </summary>
 /// <remarks>
-/// Process-local, like the Arch entity it wraps: it must not be persisted. Cross-process identity is
-/// <see cref="GlobalId"/>'s job (future serialization/streaming).
+/// Process-local: the <c>ulong</c> is a per-run monotonic counter, not a persisted key. Cross-process identity
+/// (serialization/streaming) is a separate future concern. <c>default(EntityRef)</c> (id 0) is the sentinel
+/// "no entity" — the id counter starts at 1.
 /// </remarks>
 public readonly struct EntityRef : IEquatable<EntityRef>
 {
-    internal readonly Entity Value;
+    internal readonly ulong Id;
 
-    internal EntityRef(Entity value) => Value = value;
+    internal EntityRef(ulong id) => Id = id;
 
-    public bool Equals(EntityRef other) => Value == other.Value;
+    /// <summary>True if this is <c>default(EntityRef)</c> — the "no entity" sentinel (id 0).</summary>
+    public bool IsNone => Id == 0;
+
+    public bool Equals(EntityRef other) => Id == other.Id;
 
     public override bool Equals(object? obj) => obj is EntityRef other && Equals(other);
 
-    public override int GetHashCode() => Value.GetHashCode();
+    public override int GetHashCode() => Id.GetHashCode();
 
     public static bool operator ==(EntityRef a, EntityRef b) => a.Equals(b);
 

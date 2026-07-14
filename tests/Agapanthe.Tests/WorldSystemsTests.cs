@@ -37,6 +37,18 @@ public sealed class WorldSystemsTests
         => new(new MeshHandle(0, 1), new MaterialHandle(0, 1), position, Matrix4x4.Identity,
             Vector3.Zero, radius, order);
 
+    // Runs BOTH culling passes (P3-M2 D3.c): pass 1 fills the render list (camera cull) and the shadow list (wedge
+    // cull, a superset), then pass 2 compacts the shadow list against the light volume. Same argument order as the
+    // pre-D3 one-shot CollectRenderLists, so the shadow-list assertions still describe the FINAL caster set — the
+    // former "light volume ∧ extruded wedge" AND, now split across the two passes exactly as the engine does it.
+    private static void Cull(
+        GameWorld world, RenderList render, RenderList shadow, in RenderView view,
+        in Frustum cameraFrustum, in Frustum lightFrustum, in ExtrudedShadowFrustum wedge)
+    {
+        world.CollectRenderLists(render, shadow, in view, in cameraFrustum, in wedge, out _);
+        world.CompactShadowCasters(shadow, in lightFrustum);
+    }
+
     [Fact]
     public void Propagate_Root_UsesItsOwnLocalTransform()
     {
@@ -93,7 +105,8 @@ public sealed class WorldSystemsTests
         using var world = new GameWorld();
         var a = world.SpawnLocalRoot(Double3.Zero, Quaternion.Identity, 1f);
         var b = world.SpawnLocalChild(a, Double3.Zero, Quaternion.Identity, 1f);
-        world.SetParent(a, b); // a -> b -> a : cycle
+        world.SetParent(a, b); // a -> b -> a : cycle (deferred; the barrier applies it)
+        world.FlushStructuralChanges();
 
         var ex = Assert.Throws<WorldHierarchyException>(world.PropagateTransforms);
         Assert.Contains("Cycle in entity hierarchy", ex.Message);
@@ -117,7 +130,7 @@ public sealed class WorldSystemsTests
         world.PropagateTransforms();
 
         var list = new RenderList();
-        world.CollectRenderLists(list, new RenderList(), ViewAt(Double3.Zero), in Wide, in Wide, in AllCasters);
+        Cull(world, list, new RenderList(), ViewAt(Double3.Zero), in Wide, in Wide, in AllCasters);
         Assert.Equal(baked, list.Items[0].WorldTransform); // bit-for-bit unchanged
     }
 
@@ -141,10 +154,10 @@ public sealed class WorldSystemsTests
             Matrix4x4.Identity, Vector3.Zero, 0f, 0));
 
         var atOrigin = new RenderList();
-        near.CollectRenderLists(atOrigin, new RenderList(), ViewAt(Double3.Zero), in Wide, in Wide, in AllCasters);
+        Cull(near, atOrigin, new RenderList(), ViewAt(Double3.Zero), in Wide, in Wide, in AllCasters);
 
         var atFar = new RenderList();
-        farAway.CollectRenderLists(atFar, new RenderList(), ViewAt(far), in Wide, in Wide, in AllCasters);
+        Cull(farAway, atFar, new RenderList(), ViewAt(far), in Wide, in Wide, in AllCasters);
 
         Assert.Equal(atOrigin.Items[0].WorldTransform, atFar.Items[0].WorldTransform);
     }
@@ -234,7 +247,7 @@ public sealed class WorldSystemsTests
 
         var render = new RenderList();
         var shadow = new RenderList();
-        world.CollectRenderLists(render, shadow, ViewAt(Double3.Zero), in Camera, in Wide, in AllCasters);
+        Cull(world, render, shadow, ViewAt(Double3.Zero), in Camera, in Wide, in AllCasters);
 
         Assert.Equal(1, render.Count);                 // only the one in front
         Assert.Equal(0ul, render.Items[0].SortKey);    // and it is the front one (order 0)
@@ -255,7 +268,7 @@ public sealed class WorldSystemsTests
         var extruded = ExtrudedShadowFrustum.FromCameraFrustum(in Camera, new Vector3(0f, 0f, -1f));
         var render = new RenderList();
         var shadow = new RenderList();
-        world.CollectRenderLists(render, shadow, ViewAt(Double3.Zero), in Camera, in Wide, in extruded);
+        Cull(world, render, shadow, ViewAt(Double3.Zero), in Camera, in Wide, in extruded);
 
         Assert.Equal(0, render.Count);  // invisible to the camera
         Assert.Equal(1, shadow.Count);  // but still a shadow caster (its shadow enters the view)
@@ -274,7 +287,7 @@ public sealed class WorldSystemsTests
         var extruded = ExtrudedShadowFrustum.FromCameraFrustum(in Camera, new Vector3(0f, -1f, 0f));
         var render = new RenderList();
         var shadow = new RenderList();
-        world.CollectRenderLists(render, shadow, ViewAt(Double3.Zero), in Camera, in Wide, in extruded);
+        Cull(world, render, shadow, ViewAt(Double3.Zero), in Camera, in Wide, in extruded);
 
         Assert.Equal(0, render.Count);
         Assert.Equal(0, shadow.Count); // dropped: its shadow never reaches the view
@@ -289,7 +302,7 @@ public sealed class WorldSystemsTests
         world.SpawnImported(Drawable(new Double3(0, 0, 0.5), 2f, 0)); // centre behind the eye, radius reaches ahead
 
         var render = new RenderList();
-        world.CollectRenderLists(render, new RenderList(), ViewAt(Double3.Zero), in Camera, in Wide, in AllCasters);
+        Cull(world, render, new RenderList(), ViewAt(Double3.Zero), in Camera, in Wide, in AllCasters);
 
         Assert.Equal(1, render.Count);
     }
@@ -328,7 +341,7 @@ public sealed class WorldSystemsTests
             world.AnimateDrawables(ref spin);
             world.PropagateTransforms();
             _ = world.AggregateBounds();
-            world.CollectRenderLists(render, shadow, ViewAt(Double3.Zero), in Wide, in Wide, in AllCasters);
+            Cull(world, render, shadow, ViewAt(Double3.Zero), in Wide, in Wide, in AllCasters);
         }
 
         var before = GC.GetAllocatedBytesForCurrentThread();
@@ -337,7 +350,7 @@ public sealed class WorldSystemsTests
             world.AnimateDrawables(ref spin); // the W4 path — its zero-alloc must be covered too (audit Med1)
             world.PropagateTransforms();
             _ = world.AggregateBounds();
-            world.CollectRenderLists(render, shadow, ViewAt(Double3.Zero), in Wide, in Wide, in AllCasters);
+            Cull(world, render, shadow, ViewAt(Double3.Zero), in Wide, in Wide, in AllCasters);
         }
 
         var allocated = GC.GetAllocatedBytesForCurrentThread() - before;

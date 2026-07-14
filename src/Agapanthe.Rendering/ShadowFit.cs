@@ -42,9 +42,11 @@ internal static class ShadowFit
     public static Matrix4x4 ComputeLightViewProj(
         in RenderView view,
         in Double3Bounds sceneBounds,
+        in Double3Bounds casterBounds,
         Vector3 lightDirection,
         float shadowDistance,
-        uint shadowResolution)
+        uint shadowResolution,
+        out float eyeDistance)
     {
         var dir = lightDirection.LengthSquared() > 1e-12f
             ? Vector3.Normalize(lightDirection)
@@ -54,6 +56,9 @@ internal static class ShadowFit
         var (sceneCenter, sceneRadius) = FitSceneSphere(in sceneBounds, view.Origin);
 
         // The scene is smaller than what the camera can see → shadow the scene, tightly; otherwise fit the frustum.
+        // This decides the ortho FOOTPRINT (the sphere), and it stays on the SCENE bounds on purpose (D3.b): fitting
+        // it to the casters would inflate the footprint whenever a caster sits off-screen, throwing away shadow-map
+        // resolution on a small scene. Only the depth range (UpstreamExtent below) uses the caster bounds.
         var (rawCenter, rawRadius) = sceneRadius <= frustumRadius
             ? (sceneCenter, sceneRadius)
             : (frustumCenter, frustumRadius);
@@ -73,8 +78,12 @@ internal static class ShadowFit
         // a tall building behind the frustum would drop its shadow silently. Measure the real upstream extent of
         // the world along the light instead.
         var up = MathF.Abs(dir.Y) > 0.99f ? Vector3.UnitZ : Vector3.UnitY;
-        var upstream = UpstreamExtent(in sceneBounds, view.Origin, center, dir);
-        var eyeDistance = MathF.Max(radius * 2f, upstream + radius);
+        // The upstream extent is measured over the CASTER bounds (D3.b/D3.c), not the whole scene: those are exactly
+        // the entities whose shadows can reach the view, already bounded a finite distance upstream by the wedge's
+        // cut plane. Deriving the depth range from them (instead of the global bounds) is what keeps a far-away
+        // entity from silently wrecking the shadow map's depth precision (P3-M2 §1 latent bug).
+        var upstream = UpstreamExtent(in casterBounds, view.Origin, center, dir);
+        eyeDistance = MathF.Max(radius * 2f, upstream + radius);
         var eye = center - (dir * eyeDistance);
 
         var lightView = MathHelpers.LookAt(eye, center, up);
@@ -115,7 +124,9 @@ internal static class ShadowFit
     /// camera-relative space. Built from the eight corners, so it is exact for any FOV/aspect; the centre lies on
     /// the view axis and the radius is rotation-invariant (the corners rotate rigidly with the camera).
     /// </summary>
-    private static (Vector3 Center, float Radius) FitFrustumSphere(in RenderView view, float shadowDistance)
+    // Internal, not private: the shadow-caster wedge (P3-M2 D3.a) anchors its upstream cut plane on this exact
+    // sphere, and the wedge is built OUTSIDE ShadowFit (in the engine's per-frame seam). Same computation, one owner.
+    internal static (Vector3 Center, float Radius) FitFrustumSphere(in RenderView view, float shadowDistance)
     {
         var near = MathF.Max(view.Near, 1e-4f);
         var far = shadowDistance > 0f ? MathF.Min(view.Far, shadowDistance) : view.Far;

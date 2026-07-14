@@ -5,6 +5,7 @@
   <Folder Name="/src/">
     <Project Path="src/Agapanthe.Assets/Agapanthe.Assets.csproj" />
     <Project Path="src/Agapanthe.Core/Agapanthe.Core.csproj" />
+    <Project Path="src/Agapanthe.Engine/Agapanthe.Engine.csproj" />
     <Project Path="src/Agapanthe.Graphics/Agapanthe.Graphics.csproj" />
     <Project Path="src/Agapanthe.Platform/Agapanthe.Platform.csproj" />
     <Project Path="src/Agapanthe.Rendering/Agapanthe.Rendering.csproj" />

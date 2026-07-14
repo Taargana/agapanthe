@@ -2,6 +2,7 @@ using System.Numerics;
 using Agapanthe.Assets;
 using Agapanthe.Assets.Model;
 using Agapanthe.Core;
+using Agapanthe.Engine;
 using Agapanthe.Graphics;
 using Agapanthe.Platform;
 using Agapanthe.Rendering;
@@ -66,15 +67,20 @@ var resizePending = false;
 // the per-frame cull cost + visible/total counts + allocation delta are logged every BenchLogEvery frames. Pair
 // it with AGAPANTHE_SCENE=grid:100x100 for the 10 000-entity exit-criterion run.
 var benchMode = Environment.GetEnvironmentVariable("AGAPANTHE_CULL_STATS") is { Length: > 0 };
+// Churn bench (P3-M2 F2): AGAPANTHE_CHURN=N spawns a small HIERARCHY and despawns a whole subtree every frame, so
+// the lifecycle path (deferred spawn/despawn, cascade, archetype moves) is exercised at scale — the flat grid bench
+// never touches it. Default 0 = off, so the render baseline (V3's bit-identical gate) is untouched.
+var churnPerFrame = int.TryParse(Environment.GetEnvironmentVariable("AGAPANTHE_CHURN"), out var cpf) && cpf > 0 ? cpf : 0;
 var inputDebug = Environment.GetEnvironmentVariable("AGAPANTHE_INPUT_DEBUG") is { Length: > 0 };
 const int BenchLogEvery = 60;
 var benchFrame = 0;
 long benchTicks = 0;
 long benchAllocBefore = 0;
+long benchCpuStart = 0;
 
-// Hoisted out of the render handler so the delegate is allocated once, not per frame
-// (spec §3.2.5, zero managed allocation on the hot path).
-Action<CommandList, FrameContext, SwapchainTarget>? drawScene = null;
+// P3-M2: the frame order now lives in the engine's FrameOrchestrator, not in a Sandbox closure. The orchestrator
+// caches its own render delegate (allocated once), so the zero-alloc hot path is preserved.
+FrameOrchestrator? orchestrator = null;
 
 window.Loaded += () =>
 {
@@ -276,68 +282,25 @@ window.Loaded += () =>
     // drives sync/acquire/present and no longer carries a clear color.
     frameRenderer = new FrameRenderer(device, swapchain, () => window.FramebufferSize);
 
-    // Capturing the world/registry/lists/camera/renderer (all assigned by now) exactly once — the delegate is
-    // built a single time here, never per frame. The per-frame chain is the contract of spec §3.5: propagate
-    // transforms (system 1), aggregate bounds (system 2, per-frame since P3-M1), then build the two render lists
-    // (culled: camera frustum → render, light volume ∧ extruded frustum → shadow casters), then draw.
-    drawScene = (cmd, frame, target) =>
+    // The frame order lives in the ENGINE now (P3-M2 D1), not in this closure: the orchestrator registers the
+    // default systems (PostSimulation: propagate transforms, aggregate bounds; Render: fit light, cull, draw) in the
+    // one correct order and caches its own render delegate. The Sandbox adds only what is ITS business — the bench
+    // spinner and the churn — as Stage.Simulation systems. That both keeps the invariant out of the sample AND
+    // proves the scheduler is extensible.
+    orchestrator = FrameOrchestrator.CreateDefault(world!, renderer!, registry!, camera, renderList, shadowCasters);
+    if (benchMode)
     {
-        // Bench: spin every drawable in place (direct WorldTransform write, zero-alloc, no archetype move) and
-        // drift the camera yaw, both by a fixed step per frame so captures stay deterministic. sceneBounds is now
-        // re-aggregated every frame below (debt #1), so it would track the entities even if they translated.
-        if (benchMode)
-        {
-            // Capture BEFORE animating so the alloc measurement below covers AnimateDrawables too (it is the only
-            // new per-frame path in W4, and must be zero-alloc like the rest).
-            benchAllocBefore = GC.GetAllocatedBytesForCurrentThread();
-            var spin = new SpinAnimator(0.02f);
-            world!.AnimateDrawables(ref spin);
-            camera.Yaw += 0.01f;
-        }
+        // The spin (animate every drawable + drift the yaw, deterministic by frame count) was the first thing the
+        // old closure did; as a Simulation system it runs at the same point — before propagate/aggregate/draw.
+        orchestrator.Add(Stage.Simulation, new BenchSpinSystem(world!, camera));
+    }
 
-        var cpuStart = benchMode ? System.Diagnostics.Stopwatch.GetTimestamp() : 0;
-
-        // ONE view per frame (spec §3.3): the world narrows every object against view.Origin, and the light fit
-        // uses the same one. A single value = a single origin.
-        var view = camera.CreateView();
-        world!.PropagateTransforms();
-
-        // Bounds per-frame (P3-M1, debt #1): re-aggregate the world extent every frame so it tracks entities that
-        // move — the M4 fold-once path went stale the instant anything translated. Zero-alloc (chunk iteration,
-        // struct return); it must run before ComputeLightViewProj, which fits the shadow to this extent.
-        sceneBounds = world.AggregateBounds();
-
-        // Frame order (M4): the light matrix is computed HERE, before the render lists, so the caster list can be
-        // culled against the light VOLUME (not the camera frustum). The camera frustum culls the render list.
-        var lightViewProj = renderer!.ComputeLightViewProj(in view, in sceneBounds);
-        var cameraFrustum = Frustum.FromViewProjection(view.View * view.Projection);
-        var lightFrustum = Frustum.FromViewProjection(lightViewProj);
-        // Shadow-caster cull (P3-M1, debt #2): AND the light volume with the camera frustum extruded toward the
-        // light, so off-screen casters whose shadows never reach the view are dropped (no false negatives).
-        var lightExtruded = ExtrudedShadowFrustum.FromCameraFrustum(in cameraFrustum, renderer.Lights.Directional.Direction);
-        world.CollectRenderLists(renderList, shadowCasters, in view, in cameraFrustum, in lightFrustum, in lightExtruded);
-
-        renderer.DrawScene(
-            renderList, shadowCasters, registry!, in view, in lightViewProj, cmd, frame, target);
-
-        // Bench stats: the per-frame CPU cull cost, the visible/total counts, and the managed allocation of the
-        // whole per-frame chain (animate + view + cull + collect + record). Averaged and logged every
-        // BenchLogEvery frames. The alloc delta MUST be zero in steady state (spec §6, zero-alloc hot path).
-        if (benchMode)
-        {
-            var alloc = GC.GetAllocatedBytesForCurrentThread() - benchAllocBefore;
-            benchTicks += System.Diagnostics.Stopwatch.GetTimestamp() - cpuStart;
-            if (++benchFrame % BenchLogEvery == 0)
-            {
-                var avgMs = System.Diagnostics.Stopwatch.GetElapsedTime(0, benchTicks).TotalMilliseconds / BenchLogEvery;
-                Log.Info(
-                    $"Sandbox: [cull-stats] frame {benchFrame} — visible {renderList.Count} + shadow {shadowCasters.Count}, " +
-                    $"draws {renderer.LastSceneDrawCalls}+{renderer.LastShadowDrawCalls} (instanced), " +
-                    $"cull+collect avg {avgMs:F3} ms/frame, per-frame alloc {alloc} B.");
-                benchTicks = 0;
-            }
-        }
-    };
+    if (churnPerFrame > 0)
+    {
+        // Churn as a Simulation system: it enqueues spawns/despawns; the scheduler's end-of-Simulation barrier
+        // (= world.FlushStructuralChanges) applies them before PostSimulation propagates. No manual flush.
+        orchestrator.Add(Stage.Simulation, new ChurnSystem(world!, churnPerFrame));
+    }
 
     // Camera-relative proof (spec §3.3): both are world-space doubles, and the GPU sees neither — it only ever
     // sees their difference. Logged so a far-out run is visibly far out, not silently at the origin.
@@ -483,9 +446,9 @@ window.Updated += dt =>
     controller.Update(camera, (float)dt, in input);
 };
 
-window.Rendered += _ =>
+window.Rendered += dt =>
 {
-    if (frameRenderer is null || swapchain is null)
+    if (frameRenderer is null || swapchain is null || orchestrator is null)
     {
         return;
     }
@@ -500,7 +463,33 @@ window.Rendered += _ =>
     // Zero-allocation early-out inside when no shader changed (a single volatile read).
     renderer?.PollShaderReload();
 
-    frameRenderer.DrawFrame(drawScene!);
+    // Bench measures the WHOLE per-frame cost now: tick (spin/churn/propagate/aggregate) + draw. The alloc delta
+    // must stay zero in steady state (spec §6). Timing spans both, since the frame order moved into the engine.
+    if (benchMode)
+    {
+        benchAllocBefore = GC.GetAllocatedBytesForCurrentThread();
+        benchCpuStart = System.Diagnostics.Stopwatch.GetTimestamp();
+    }
+
+    // Tick OUTSIDE DrawFrame (P3-M2 D1.a): Input -> Simulation -> PostSimulation, always. DrawFrame runs only the
+    // Render stage, and skips it when the swapchain is out of date — the simulation must not skip with it.
+    orchestrator.Tick((float)dt);
+    frameRenderer.DrawFrame(orchestrator.RenderDelegate);
+
+    if (benchMode)
+    {
+        var alloc = GC.GetAllocatedBytesForCurrentThread() - benchAllocBefore;
+        benchTicks += System.Diagnostics.Stopwatch.GetTimestamp() - benchCpuStart;
+        if (++benchFrame % BenchLogEvery == 0)
+        {
+            var avgMs = System.Diagnostics.Stopwatch.GetElapsedTime(0, benchTicks).TotalMilliseconds / BenchLogEvery;
+            Log.Info(
+                $"Sandbox: [cull-stats] frame {benchFrame} — visible {renderList.Count} + shadow {shadowCasters.Count}, " +
+                $"draws {renderer!.LastSceneDrawCalls}+{renderer.LastShadowDrawCalls} (instanced), " +
+                $"tick+draw avg {avgMs:F3} ms/frame, per-frame alloc {alloc} B.");
+            benchTicks = 0;
+        }
+    }
 
     if (maxFrames > 0 && ++renderedFrames >= maxFrames)
     {
@@ -510,6 +499,9 @@ window.Rendered += _ =>
         {
             frameRenderer.WaitIdle();
             renderer.SaveHdrCapture(capturePath);
+            // P3-M2 F4: the shadow depth-range span this frame. Logged so the D3 capture drift (depth range now fit
+            // to caster bounds, not scene bounds) can be justified against the baseline rather than eyeballed.
+            Log.Info($"Sandbox: [shadow] eyeDistance {renderer.LastEyeDistance:F3} m (shadow-caster distance {renderer.ShadowCasterDistance:F1} m).");
         }
 
         window.Close();
@@ -1186,4 +1178,43 @@ file readonly struct SpinAnimator(float deltaRadians) : IDrawableAnimator
 
     public void Animate(ulong globalId, ref Double3 position, ref Matrix4x4 rotationScale)
         => rotationScale = _delta * rotationScale; // rotation only — translation row stays zero (position carries it)
+}
+
+// The load bench, as a Simulation system (P3-M2 V3): spin every drawable and drift the camera yaw, both by a fixed
+// step per frame so headless captures stay deterministic. This is APP business — it belongs in the sample, not the
+// engine — and registering it proves the scheduler takes application systems. It replaces the head of the old
+// closure verbatim, so it runs at the same point in the frame.
+file sealed class BenchSpinSystem(GameWorld world, Camera camera) : ISystem
+{
+    public void Execute(in TickContext ctx)
+    {
+        var spin = new SpinAnimator(0.02f);
+        world.AnimateDrawables(ref spin);
+        camera.Yaw += 0.01f;
+    }
+}
+
+// Churn stress (P3-M2 F2), as a Simulation system: each frame spawn a small hierarchy and, once the ring is full,
+// despawn the oldest root (cascading to its children). The scheduler's end-of-Simulation barrier applies the
+// structural changes; there is no manual flush. Nodes carry no MeshRef, so they never touch what is drawn — churn
+// stresses the lifecycle path without perturbing the render baseline.
+file sealed class ChurnSystem(GameWorld world, int perFrame) : ISystem
+{
+    private readonly Queue<EntityRef> _roots = new();
+
+    public void Execute(in TickContext ctx)
+    {
+        for (var i = 0; i < perFrame; i++)
+        {
+            var root = world.Spawn(Double3.Zero, Quaternion.Identity, 1f);
+            world.Spawn(new Double3(0, 1, 0), Quaternion.Identity, 1f, root);
+            world.Spawn(new Double3(1, 0, 0), Quaternion.Identity, 1f, root);
+            _roots.Enqueue(root);
+        }
+
+        while (_roots.Count > perFrame * 8)
+        {
+            world.Despawn(_roots.Dequeue()); // cascades to the subtree
+        }
+    }
 }

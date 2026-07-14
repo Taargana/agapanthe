@@ -648,22 +648,56 @@ public sealed class Renderer : IDisposable
     }
 
     /// <summary>
+    /// How far upstream of the camera frustum a shadow caster may sit and still be kept (P3-M2 D3.a). Beyond it a
+    /// caster is culled — a documented, hard limit (every engine has a "shadow caster distance"): a tower 1000 km
+    /// away will not throw its shadow into the view, and the cut is abrupt (a caster crossing it pops). Defaults to
+    /// <see cref="ShadowDistance"/> and tracks it unless set explicitly.
+    /// </summary>
+    public float ShadowCasterDistance
+    {
+        get => _shadowCasterDistance ?? ShadowDistance;
+        set => _shadowCasterDistance = value;
+    }
+
+    private float? _shadowCasterDistance;
+
+    /// <summary>The light-eye distance the last <see cref="ComputeLightViewProj"/> produced (P3-M2 F4 diagnostic):
+    /// the depth-range span the shadow ortho must cover. Watched across the D3 change to justify the capture drift.</summary>
+    public float LastEyeDistance { get; private set; }
+
+    /// <summary>
+    /// The camera frustum's bounding sphere (camera-relative), capped at <see cref="ShadowDistance"/> — the anchor
+    /// the shadow-caster wedge cuts its upstream plane against (P3-M2 D3.a). Same sphere the fit uses; exposed so the
+    /// per-frame seam can build the wedge before the fit runs.
+    /// </summary>
+    public (Vector3 Center, float Radius) ComputeFrustumSphere(in RenderView view)
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        return ShadowFit.FitFrustumSphere(in view, ShadowDistance);
+    }
+
+    /// <summary>
     /// The directional light's <c>view · proj</c> for this frame — see <see cref="ShadowFit"/> for the fit itself
     /// (camera frustum, capped by <see cref="ShadowDistance"/>, never wider than the scene, texel-snapped).
     /// Row-vector: a camera-relative point maps to light clip space as <c>p · result</c>, and std140 uploads it
     /// transposed so the shaders multiply <c>result * vec4(worldPos, 1)</c>. One cascade (CSM is out of scope).
     /// <para>
-    /// Public and computed by the CALLER before <see cref="DrawScene"/> (M4): the caller derives the light
-    /// volume's <see cref="Frustum"/> from this matrix and culls the shadow-caster list against it — which must
-    /// happen before the list is built, hence before the draw. Fitted in the frame's camera-relative space
-    /// (<see cref="RenderView.Origin"/>), the space the shaders receive world positions in.
+    /// Public and computed by the CALLER before <see cref="DrawScene"/> (M4). The footprint is fitted to
+    /// <paramref name="sceneBounds"/> (never wider than the scene); the DEPTH RANGE is fitted to
+    /// <paramref name="casterBounds"/> — the wedge-culled casters of the frame's first pass (P3-M2 D3.b/D3.c) — so a
+    /// far-away entity cannot blow out the depth precision. Both are in the frame's camera-relative space
+    /// (<see cref="RenderView.Origin"/>).
     /// </para>
     /// </summary>
-    public Matrix4x4 ComputeLightViewProj(in RenderView view, in Double3Bounds sceneBounds)
+    public Matrix4x4 ComputeLightViewProj(
+        in RenderView view, in Double3Bounds sceneBounds, in Double3Bounds casterBounds)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
-        return ShadowFit.ComputeLightViewProj(
-            in view, in sceneBounds, Lights.Directional.Direction, ShadowDistance, ShadowMapResolution);
+        var result = ShadowFit.ComputeLightViewProj(
+            in view, in sceneBounds, in casterBounds, Lights.Directional.Direction,
+            ShadowDistance, ShadowMapResolution, out var eyeDistance);
+        LastEyeDistance = eyeDistance;
+        return result;
     }
 
     public void DrawScene(

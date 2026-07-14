@@ -1,13 +1,71 @@
-# Absolute-Human Board — Agapanthe
+# Absolute-Human Board — Agapanthe Session 15 (P3-M2 : Scheduler + lifecycle, `Agapanthe.Engine`)
 
-**Status**: IDLE — aucune session ouverte.
+**Status**: OPEN (2026-07-14) — INTAKE fait (3 décisions humaines verrouillées), SPEC v2 écrite après relecture
+indépendante (v1 : 2,9/5 NEEDS WORK — le relecteur avait raison sur 2 points bloquants). En attente du verdict v2, puis
+feu vert humain avant EXECUTE.
+**But** : l'**ordre de frame quitte le Sandbox** et devient un invariant du moteur, exécutable et testable ; les
+entités gagnent un **cycle de vie** (`Despawn`, structurel différé, reparentage) ; la plage de profondeur de l'ombre
+cesse de dépendre des bounds globales. C'est le socle que la physique attend.
+**Spec** : [docs/plans/2026-07-14-p3m2-scheduler-lifecycle-design.md](../docs/plans/2026-07-14-p3m2-scheduler-lifecycle-design.md)
+**Baseline de rendu** : `d1671f3` · **Sessions passées** : S1–S14 → `archive/` (S14 = P3-M1, clos).
 
-Dernière session close : **S14 (P3-M1 — instancing SSBO + solde des 2 dettes de culling)** →
-[archive/board-session14-P3M1.md](archive/board-session14-P3M1.md).
+## Décisions verrouillées (détail : spec § Journal des décisions)
 
-Point de reprise et dette courante : [docs/AVANCEMENT.md](../docs/AVANCEMENT.md) § « Reprise — où repartir ».
-Prochain jalon pressenti : **P3-M2 — rendu GPU-driven** (slots persistants dirty-trackés, cull compute, draw
-indirect) + **scheduler** (l'ordre de frame doit quitter le Sandbox) ; **P3-M0** (validation Linux/macOS) dès
-qu'une machine Linux est disponible.
+- **D0** — Nouveau projet **`Agapanthe.Engine`** : la seule couche qui marie World + Rendering. World reste GPU-free,
+  Rendering reste ECS-free. Engine **ne référence pas Platform** et **ne possède rien** (l'ordre de teardown du
+  Sandbox est le gate 0-leak). *(décision humaine)*
+- **D1** — Scheduler à **étages + systèmes enregistrés** (`Input → Simulation → PostSimulation → Render`) ; l'ordre
+  devient une **donnée**. **Deux** contextes/interfaces (`ISystem`/`TickContext`, `IRenderSystem`/`RenderContext`) —
+  sinon les systèmes de simulation verraient des types Graphics. `Input` = étage **vide** côté moteur. *(décision humaine)*
+- **D2** — Lifecycle : `Spawn`/`Despawn`/structurel différé/reparentage. **`Despawn` = CASCADE** sur les descendants
+  (le lien est enfant→parent, aucune liste d'enfants ; sans ça `ComputeWorld` marche dans un slot recyclé).
+  `IsAlive` faux **dès la mise en file**. Pooling/prefabs → backlog. *(décision humaine)*
+- **D3** — Ombre : **borne amont explicite** (`ShadowCasterDistance` + plan de coupe du wedge — il est **infini** vers
+  la lumière, c'est ce que la v1 ratait), `UpstreamExtent` depuis les **casters** (`FitSceneSphere` garde
+  `sceneBounds`), circularité cassée en **deux passes** (wedge → fit → compaction).
 
-**Sessions passées** : S1–S14 → `archive/`.
+## Critère de sortie
+
+Ordre des étages garanti et testé · `Despawn` cascade sans corruption de la propagation · un caster à 10 000 km en
+amont **ne fait pas exploser** `eyeDistance` (le test qui compte) · **0 B/frame au banc ET en mode churn** ·
+capture **bit-identique à `d1671f3`** en fin de V3 · 0 warning / 0 validation / 0 leak / **NativeAOT PASS** · double
+audit PASS.
+
+## Vagues
+
+| # | Contenu | Gate |
+|---|---|---|
+| V0 | Décision D3 écrite (borne amont, deux passes) — **papier** | Spec relue |
+| V1 | ✅ Projet `Agapanthe.Engine` + `.slnx` + scheduler + tests d'ordre. Aucun changement de rendu. | ✅ Build 0 warn, 295 tests verts |
+| V2 | ✅ Lifecycle World (cascade, sémantique intra-étage, **file de commandes propre au World** — pas le `CommandBuffer` d'Arch, cf. correction D2), mode churn, smoke AOT étendu | ✅ 308 tests + 0 B/frame en churn + run churn 0 leak / 0 validation |
+| V3 | ✅ `FrameOrchestrator` + `SceneViewSystem` ; l'ordre quitte le Sandbox ; spin + churn deviennent des `ISystem` ; `Tick` hors `DrawFrame` (D1.a) | ✅ **Capture bit-identique `d1671f3`** (SHA `9790D95D…`) + 308 tests + 0 alloc/frame + 0 leak |
+| V4 | ✅ D3 : plan de coupe amont (7ᵉ plan) + ancre, deux passes (`CollectRenderLists`/`CompactShadowCasters`), `UpstreamExtent` depuis `casterBounds`, `ShadowCasterDistance` | ✅ 311 tests (dont « 10 000 km amont ») + capture **bit-identique `9790D95D`** (D3 no-op sur la scène par défaut ; eyeDistance 72.7 m loggé) + grid 50² 0 alloc/frame 0 leak |
+| V5 | Banc, AOT, double audit, clôture, archive | Tous gates |
+
+**Dépendances** : V4 après V3 (la couture doit exister avant qu'on change ce qu'elle transporte). V2 et V4 touchent
+toutes deux `GameWorld.cs` → **séquentielles**.
+
+## Risques
+
+- **F1** — Alloc/frame cachée : le délégué `Action<CommandList, FrameContext, SwapchainTarget>` doit être **caché dans
+  un champ** (invisible aux tests unitaires, seul le banc le voit) ; `CommandBuffer` Arch **réutilisé**.
+- **F2** — Le gate 0-alloc actuel **n'exerce pas** le lifecycle → mode churn obligatoire, sinon le gate ment.
+- **F3** — AOT : la probe est un **projet séparé** ; le chemin structurel (despawn + flush + cascade) doit y passer.
+- **F4** — Fidélité : V3 bit-identique (non négociable) ; V4 autorisée à différer, **justifiée par un diff
+  d'`eyeDistance` loggé**.
+- **F5** — `Engine` god-object : il ne possède rien, ne dispose rien.
+
+## Dette restante à la clôture (prévision)
+
+Verdict visuel humain de **P3-M1** toujours dû (protocole `docs/visual-checks/2026-07-14-p3m1-instancing-shadows.md`) ·
+Linux/macOS jamais validés (P3-M0, bloqué : pas de machine) · rendu GPU-driven (backlog §1) · CSM + PCSS (backlog §2).
+
+## Log
+
+- 2026-07-14: **Session 15 ouverte — P3-M2.** INTAKE : 3 décisions humaines (projet `Engine` · scheduler à étages ·
+  lifecycle sans pooling). SPEC v1 écrite → relecture indépendante `engine-architect` : **2,9/5 NEEDS WORK**, 2 points
+  **bloquants** confirmés contre le code : (a) le wedge est **non borné vers l'amont** → D3 déplaçait le bug au lieu de
+  le corriger ; (b) `RenderItem` ne porte **pas de sphère** → le « rejet final au record » était infaisable et aurait
+  cassé les runs du draw instancié. Plus : `Despawn` d'un parent corrompt `ComputeWorld`, collision `FrameContext`,
+  étage `Input` infaisable sans arête `Engine → Platform`. **SPEC v2** écrite (11 corrections), en relecture.
+- 2026-07-14: Pooling + prefabs **écartés du périmètre** (décision humaine) → inscrits au [backlog §4](../docs/BACKLOG.md).

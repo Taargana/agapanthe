@@ -1,6 +1,7 @@
 ﻿<Project Sdk="Microsoft.NET.Sdk">
 
   <ItemGroup>
+    <ProjectReference Include="..\..\src\Agapanthe.Engine\Agapanthe.Engine.csproj" />
     <ProjectReference Include="..\..\src\Agapanthe.Rendering\Agapanthe.Rendering.csproj" />
     <ProjectReference Include="..\..\src\Agapanthe.World\Agapanthe.World.csproj" />
     <ProjectReference Include="..\..\src\Agapanthe.Platform\Agapanthe.Platform.csproj" />
