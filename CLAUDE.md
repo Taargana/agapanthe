@@ -6,6 +6,7 @@ Moteur de jeu **Vulkan en C# from scratch** (.NET 10), cross-platform (Windows /
 ## Où est la vérité (lis ces fichiers avant d'agir)
 
 - **`docs/AVANCEMENT.md`** — état d'avancement, jalons, métriques, plan du prochain jalon, **section « Reprise — où repartir »**. C'est le point d'entrée pour reprendre le travail.
+- **`docs/BACKLOG.md`** — ce qu'on sait devoir faire *plus tard*, avec le pourquoi et **quand ça mord** (CSM, rendu GPU-driven, nuages volumétriques, atmosphère, ombres analytiques planétaires, physique…). À lire avant de choisir un jalon ; à mettre à jour quand une décision technique est instruite.
 - **`docs/plans/2026-07-02-graphics-engine-design.md`** — spec de référence de la phase graphique (§ numérotés, cités partout).
 - **`.absolute-human/board.md`** — board de la session courante ; sessions passées dans `.absolute-human/archive/board-sessionN-*.md`.
 - **`docs/visual-checks/`** — protocoles de validation visuelle par jalon (verdicts humains).

@@ -214,6 +214,10 @@ Les transforms des entités visibles sont **compactées chaque frame dans un sto
 
 ## Reprise — où repartir
 
+> Trajectoire long terme (CSM, rendu GPU-driven, nuages volumétriques, atmosphère, ombres planétaires analytiques,
+> physique) : **[BACKLOG.md](BACKLOG.md)** — chaque item dit *ce qui casse sans lui* et *à quelle échelle il devient
+> obligatoire*.
+
 **Point de reprise (2026-07-14, session 14)** : **P3-M1 clos** (double audit PASS, findings appliqués). Prochaine tâche = **P3-M2 — rendu GPU-driven** (slots persistants + cull compute + draw indirect), ou **P3-M0 — validation Linux/macOS** dès qu'une machine Linux est disponible (aujourd'hui indisponible côté humain).
 
 **Branche** : `phase2-foundations`. Commits P2-M4 : `12a07e3` (W0 Frustum+sphère+banc) · `7d9428a` (W1 origine quantifiée + ordre de frame + skybox origin-exact) · `c5b7da7` (W2 culling) · `458e017` (W3 radix + SortKey) · `99076c1` (W4 banc + AnimateDrawables) · `2827777` (durcissements audits : σ_max exact).

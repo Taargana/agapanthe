@@ -1,6 +1,6 @@
 # Absolute-Human Board — Agapanthe Session 14 (P3-M1 : Instancing SSBO + solde des 2 dettes de culling)
 
-**Status**: OPEN (2026-07-14) — Phase 3 ouverte. INTAKE + SPEC faits (spec approuvée, relue 4,1/5). Board décomposé, en attente feu vert avant EXECUTE.
+**Status**: CLOSED (2026-07-14) — 7 vagues vertes, double audit PASS/PASS (findings appliqués dans le jalon, cf. Log V7), commits `ef1f713` · `0351cdd` · `bf4b392`. Gates : 284 tests, 0 warning, 0 validation, 0 leak, 0 alloc/frame, NativeAOT PASS. **Reste dû** : verdict visuel humain (protocole [2026-07-14-p3m1-instancing-shadows.md](../docs/visual-checks/2026-07-14-p3m1-instancing-shadows.md)) — la capture n'est plus bit-identique (snap texel du fit d'ombre).
 **But** : **rembourser la dette perf du banc** (grid:100x100, FPS bas constaté à la vérif humaine P2-M4) en posant la **première marche du rendu GPU-driven** (façon Unreal 5 GPU Scene / Unity 6 BRG), sans rien gaspiller : transforms via un **buffer GPU (SSBO)** indexé par instance, **batching par (matériau, mesh)** → un draw instancié par batch, + solde des **2 dettes de culling**. Le culling **reste CPU** (décision humaine) ; GPU compute cull + slots persistants = jalon suivant P3-M2.
 **Créé**: 2026-07-14
 **Spec**: [docs/plans/2026-07-14-p3m1-instancing-culling-design.md](../docs/plans/2026-07-14-p3m1-instancing-culling-design.md) (approuvée ; relecture indépendante 4,1/5 APPROVED). Plan approuvé : `C:\Users\yannl\.claude\plans\misty-doodling-minsky.md`.
