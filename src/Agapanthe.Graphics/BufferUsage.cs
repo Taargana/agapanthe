@@ -8,4 +8,5 @@ public enum BufferUsage
     Vertex = 1 << 0,
     Index = 1 << 1,
     Uniform = 1 << 2,
+    Storage = 1 << 3,
 }

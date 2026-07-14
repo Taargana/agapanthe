@@ -38,7 +38,8 @@ internal sealed class ScenePass : ReloadablePass
             SetLayouts = [_frameSetLayout, _materialSetLayout],
             PushConstants =
             [
-                new PushConstantRange(0, 64, ShaderStages.Vertex),   // model matrix
+                // Model matrices now come from the per-instance SSBO (set 0, binding 6); only the fragment
+                // debug-view selector remains a push constant, kept at offset 64 (P3-M1).
                 new PushConstantRange(64, 4, ShaderStages.Fragment), // debug view selector
             ],
             // Scene renders into the HDR target (decision 2); the tonemap pass owns the sRGB swapchain write.

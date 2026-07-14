@@ -94,4 +94,7 @@ Slots persistants dirty-trackés · culling GPU compute · draw indirect · visi
 
 ## Log
 
-- 2026-07-14: **Session 14 ouverte — P3-M1.** INTAKE via absolute-brainstorm (plan approuvé) → décision humaine : instancing prêt-pour-GPU, cull CPU ce jalon (D0). SPEC écrite + relue (4,1/5 APPROVED, une erreur d'évaluateur sur F8 rejetée après vérif code). Board décomposé (18 tâches, 7 vagues). En attente feu vert avant EXECUTE (Wave 1).
+- 2026-07-14: **Session 14 ouverte — P3-M1.** INTAKE via absolute-brainstorm (plan approuvé) → décision humaine : instancing prêt-pour-GPU, cull CPU ce jalon (D0). SPEC écrite + relue (4,1/5 APPROVED, une erreur d'évaluateur sur F8 rejetée après vérif code). Board décomposé (18 tâches, 7 vagues).
+- 2026-07-14: **Wave 1 verte** — AW-001/002 (plomberie SSBO : `BufferUsage.Storage`, `MappedSpan<T>`, `DescriptorKind.StorageBuffer`, `WriteStorageBuffer`, pool). Build 0 warn, 275 tests.
+- 2026-07-14: **Wave 2 (GPU-free) verte** — AW-010/011 (sort key `[material:16][mesh:16][tie:32]`), AW-050/051 (`ExtrudedShadowFrustum` + 4 tests), AW-040 (bounds sous translation). 280 tests.
+- 2026-07-14: **V2 verte** — AW-020 (scene pass instancié : `mesh.vert` lit SSBO b6, batching (material,mesh), `firstInstance`). AW-021 gate : casque **byte-identique** (SHA match, 0 canal), grille 3×3 = 9 casques distincts (firstInstance validé), 0 validation, 0 leak. Checkpoint V0-V2 committé.

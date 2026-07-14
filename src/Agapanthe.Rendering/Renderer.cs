@@ -76,6 +76,18 @@ public sealed class Renderer : IDisposable
     private readonly GpuBuffer?[] _cameraUbos = new GpuBuffer?[GraphicsDevice.FramesInFlight];
     private readonly GpuBuffer?[] _lightsUbos = new GpuBuffer?[GraphicsDevice.FramesInFlight];
 
+    // Per-frame-slot per-instance transform SSBOs (P3-M1): host-visible, the visible entities' model matrices
+    // compacted here in sorted order each frame, read by the vertex shader via gl_InstanceIndex. Grown on demand
+    // (never per-frame in steady state); the scene and shadow passes see different visible subsets, hence two.
+    private readonly GpuBuffer?[] _sceneTransforms = new GpuBuffer?[GraphicsDevice.FramesInFlight];
+    private readonly GpuBuffer?[] _shadowTransforms = new GpuBuffer?[GraphicsDevice.FramesInFlight];
+    private const int InitialInstanceCapacity = 1024;
+
+    /// <summary>Instanced draw calls issued by the last scene / shadow pass (P3-M1 bench diagnostic).</summary>
+    public int LastSceneDrawCalls { get; private set; }
+
+    public int LastShadowDrawCalls { get; private set; }
+
     private readonly GraphicsDevice _device;
 
     // Owned here and borrowed by the reloadable passes for their Reload path (M8-05). Kept so hot reload can
@@ -195,6 +207,8 @@ public sealed class Renderer : IDisposable
                     new DescriptorBinding(3, DescriptorKind.CombinedImageSampler, ShaderStages.Fragment),
                     new DescriptorBinding(4, DescriptorKind.CombinedImageSampler, ShaderStages.Fragment),
                     new DescriptorBinding(5, DescriptorKind.CombinedImageSampler, ShaderStages.Fragment),
+                    // P3-M1: per-instance model matrices, read-only in the vertex stage (instanced draws).
+                    new DescriptorBinding(6, DescriptorKind.StorageBuffer, ShaderStages.Vertex),
                 ]);
 
             // Set 1 = per-material, frozen 6-binding PBR shape. The allocator is public so SceneBuilder can
@@ -816,27 +830,47 @@ public sealed class Renderer : IDisposable
         frame.WriteCombinedImageSampler(frameSet, 4, ibl.Prefiltered, iblSampler);
         frame.WriteCombinedImageSampler(frameSet, 5, ibl.BrdfLut, iblSampler);
 
+        // Compact the visible entities' baked (camera-relative) matrices into this slot's per-instance SSBO, in
+        // sorted order, then point binding 6 at it (P3-M1). This is the one place the GPU-free RenderList meets the
+        // GPU: World stays graphics-free (it filled RenderItem.WorldTransform), the Renderer does the copy.
+        var items = renderList.Items;
+        var instanceBuffer = EnsureInstanceBuffer(_sceneTransforms, frame.Slot, items.Length);
+        var dst = instanceBuffer.MappedSpan<Matrix4x4>(items.Length);
+        for (var i = 0; i < items.Length; i++)
+        {
+            dst[i] = items[i].WorldTransform;
+        }
+
+        frame.WriteStorageBuffer(frameSet, 6, instanceBuffer);
+
         cmd.BindPipeline(pipeline);
         cmd.BindDescriptorSet(pipeline, 0, frameSet); // set 0: per-frame camera + lights + shadow map
 
         var debugView = DebugView;
         cmd.PushConstants(pipeline, ShaderStages.Fragment, in debugView, offsetBytes: 64);
 
-        // The camera list, in its stable sorted order. Span indexing: no enumerator, no allocation. Handles are
-        // resolved to GPU resources here — the only place the two halves of the seam meet (spec §3.2).
-        var items = renderList.Items;
-        for (var i = 0; i < items.Length; i++)
+        // Batch the sorted list into one instanced draw per run of identical (material, mesh): the SortKey groups
+        // them, so a run is contiguous. firstInstance offsets gl_InstanceIndex into the SSBO region above, so no
+        // per-batch rebind of the transform buffer. This collapses ~N draws to one per (material, mesh) pair.
+        LastSceneDrawCalls = 0;
+        var start = 0;
+        while (start < items.Length)
         {
-            ref readonly var item = ref items[i];
-            var mesh = registry.Resolve(item.Mesh);
+            var material = items[start].Material;
+            var meshHandle = items[start].Mesh;
+            var end = start + 1;
+            while (end < items.Length && items[end].Material == material && items[end].Mesh == meshHandle)
+            {
+                end++;
+            }
 
-            cmd.BindDescriptorSet(pipeline, 1, registry.Resolve(item.Material).DescriptorSet); // set 1: per-material
+            var mesh = registry.Resolve(meshHandle);
+            cmd.BindDescriptorSet(pipeline, 1, registry.Resolve(material).DescriptorSet); // set 1: per-material
             cmd.BindVertexBuffer(mesh.VertexBuffer);
             cmd.BindIndexBuffer(mesh.IndexBuffer, mesh.IndexFormat);
-
-            var model = item.WorldTransform;
-            cmd.PushConstants(pipeline, ShaderStages.Vertex, in model);
-            cmd.DrawIndexed(mesh.IndexCount);
+            cmd.DrawIndexed(mesh.IndexCount, (uint)(end - start), firstIndex: 0, vertexOffset: 0, firstInstance: (uint)start);
+            LastSceneDrawCalls++;
+            start = end;
         }
 
         // Skybox (M7): fill the background with the environment cubemap inside this same pass, AFTER the meshes
@@ -855,6 +889,33 @@ public sealed class Renderer : IDisposable
         }
 
         cmd.EndRendering();
+    }
+
+    // Returns this slot's per-instance transform SSBO, sized for at least <paramref name="count"/> matrices. Grows
+    // by doubling (never shrinks) and only when the count exceeds the current capacity, so steady state allocates
+    // nothing; the replaced buffer goes through the deferred deletion queue. Safe to recreate here: a slot's buffer
+    // is only read while that slot is in flight, and by the time we record it again its fence has been waited on.
+    private GpuBuffer EnsureInstanceBuffer(GpuBuffer?[] buffers, int slot, int count)
+    {
+        var stride = (ulong)Unsafe.SizeOf<Matrix4x4>();
+        var needed = Math.Max(count, 1);
+        var existing = buffers[slot];
+        var capacity = existing is null ? 0 : (int)(existing.SizeBytes / stride);
+        if (existing is not null && capacity >= needed)
+        {
+            return existing;
+        }
+
+        existing?.Dispose();
+        var newCapacity = capacity == 0 ? InitialInstanceCapacity : capacity * 2;
+        if (newCapacity < needed)
+        {
+            newCapacity = needed;
+        }
+
+        var buffer = new GpuBuffer(_device, (ulong)newCapacity * stride, BufferUsage.Storage);
+        buffers[slot] = buffer;
+        return buffer;
     }
 
     /// <summary>
@@ -1005,6 +1066,8 @@ public sealed class Renderer : IDisposable
         {
             _cameraUbos[i]?.Dispose();
             _lightsUbos[i]?.Dispose();
+            _sceneTransforms[i]?.Dispose();
+            _shadowTransforms[i]?.Dispose();
         }
 
         _shaderCompiler?.Dispose();

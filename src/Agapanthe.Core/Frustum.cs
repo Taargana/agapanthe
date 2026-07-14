@@ -81,6 +81,22 @@ public readonly struct Frustum
             && Distance(_far, center) >= negRadius;
     }
 
+    /// <summary>
+    /// Copies the six planes (each <c>(Normal.xyz, D)</c>, inward normals, normalized) into
+    /// <paramref name="dst"/> in order left, right, bottom, top, near, far. Lets
+    /// <see cref="ExtrudedShadowFrustum"/> derive the shadow-caster wedge from the camera frustum without
+    /// duplicating the Gribb-Hartmann extraction.
+    /// </summary>
+    internal void CopyPlanes(Span<Vector4> dst)
+    {
+        dst[0] = _left;
+        dst[1] = _right;
+        dst[2] = _bottom;
+        dst[3] = _top;
+        dst[4] = _near;
+        dst[5] = _far;
+    }
+
     private static float Distance(Vector4 plane, Vector3 p)
         => (plane.X * p.X) + (plane.Y * p.Y) + (plane.Z * p.Z) + plane.W;
 

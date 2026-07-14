@@ -130,6 +130,32 @@ public sealed unsafe class GpuBuffer : IDisposable
         System.Runtime.InteropServices.MemoryMarshal.AsBytes(data).CopyTo(dst);
     }
 
+    /// <summary>
+    /// A writable <see cref="Span{T}"/> over the first <paramref name="count"/> elements of the
+    /// persistently mapped host-visible memory. Lets a caller fill the buffer element-by-element with
+    /// zero intermediate copy (e.g. compacting per-instance transforms during command recording,
+    /// P3-M1). The span is valid only until the buffer is disposed; do not retain it across frames.
+    /// </summary>
+    /// <exception cref="GraphicsException">The buffer is device-local, or the requested range exceeds its size.</exception>
+    public Span<T> MappedSpan<T>(int count)
+        where T : unmanaged
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        if (Domain != MemoryDomain.HostVisible)
+        {
+            throw new GraphicsException(
+                "MappedSpan<T> is only valid on a host-visible buffer; device-local memory has no CPU pointer.");
+        }
+
+        var bytes = (ulong)((long)count * Unsafe.SizeOf<T>());
+        if (count < 0 || bytes > SizeBytes)
+        {
+            throw new GraphicsException($"MappedSpan of {bytes} bytes exceeds buffer size {SizeBytes}.");
+        }
+
+        return new Span<T>(_mapped, count);
+    }
+
     public void Dispose()
     {
         if (_disposed)
@@ -234,6 +260,11 @@ public sealed unsafe class GpuBuffer : IDisposable
         if ((usage & BufferUsage.Uniform) != 0)
         {
             flags |= BufferUsageFlags.UniformBufferBit;
+        }
+
+        if ((usage & BufferUsage.Storage) != 0)
+        {
+            flags |= BufferUsageFlags.StorageBufferBit;
         }
 
         if (flags == BufferUsageFlags.None)

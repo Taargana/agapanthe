@@ -27,12 +27,17 @@ layout(set = 0, binding = 0) uniform CameraUbo {
     vec4 position; // xyz = eye position (world space), w = padding
 } camera;
 
-layout(push_constant) uniform PushConstants {
-    mat4 model;
-} push;
+// Set 0, binding 6 = per-instance model matrices (P3-M1). The renderer compacts the visible entities' baked
+// (camera-relative) matrices into this storage buffer each frame, in sorted order; the draw offsets gl_InstanceIndex
+// via firstInstance so instances.model[gl_InstanceIndex] is this instance's matrix. Read-only in the vertex stage
+// (Vulkan-core, no feature). std430: a mat4[] is tightly packed at 64-byte stride, matching the CPU Matrix4x4[].
+layout(std430, set = 0, binding = 6) readonly buffer InstanceTransforms {
+    mat4 model[];
+} instances;
 
 void main() {
-    vec4 world = push.model * vec4(inPosition, 1.0);
+    mat4 model = instances.model[gl_InstanceIndex];
+    vec4 world = model * vec4(inPosition, 1.0);
     gl_Position = camera.proj * camera.view * world;
     worldPos = world.xyz;
 
@@ -44,7 +49,7 @@ void main() {
     // mat3(model) up to a scalar, which the fragment stage re-normalizes away). We transform the tangent with
     // the same matrix — strictly a tangent is a direction and would want mat3(model), but the difference is a
     // per-vertex scalar the fragment stage removes via normalize + Gram-Schmidt, so one matrix suffices.
-    mat3 normalMatrix = transpose(inverse(mat3(push.model)));
+    mat3 normalMatrix = transpose(inverse(mat3(model)));
     worldNormal = normalMatrix * inNormal;
     worldTangent = vec4(normalMatrix * inTangent.xyz, inTangent.w);
 }

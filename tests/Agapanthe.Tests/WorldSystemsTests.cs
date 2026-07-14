@@ -200,6 +200,27 @@ public sealed class WorldSystemsTests
     }
 
     [Fact]
+    public void AggregateBounds_TracksAnEntityThatTranslates()
+    {
+        // Debt #1 (P3-M1): the extent must follow a moving entity. AggregateBounds recomputes from the live
+        // WorldPosition every call, so translating the drawable and re-aggregating yields the moved box — this is
+        // what makes per-frame aggregation correct (the M4 fold-once path went stale the moment anything moved).
+        using var world = new GameWorld();
+        world.SpawnImported(new ImportedEntitySpec(
+            new MeshHandle(0, 1), new MaterialHandle(0, 1), Double3.Zero, Matrix4x4.Identity,
+            Vector3.Zero, 1f, 0));
+
+        Assert.Equal(new Double3(-1, -1, -1), world.AggregateBounds().Min); // world sphere (0,0,0) r1
+
+        var move = new TestTranslate(new Double3(10, 0, 0));
+        world.AnimateDrawables(ref move);
+        var bounds = world.AggregateBounds();
+
+        Assert.Equal(new Double3(9, -1, -1), bounds.Min);  // moved sphere (10,0,0) r1 -> [9,11]x[-1,1]x[-1,1]
+        Assert.Equal(new Double3(11, 1, 1), bounds.Max);
+    }
+
+    [Fact]
     public void CollectRenderLists_CullsTheRenderListAgainstTheCameraFrustum()
     {
         using var world = new GameWorld();
@@ -302,5 +323,13 @@ public sealed class WorldSystemsTests
     {
         public void Animate(ulong globalId, ref Double3 position, ref Matrix4x4 rotationScale)
             => rotationScale = Matrix4x4.CreateRotationY(0.01f) * rotationScale;
+    }
+
+    // Translation animator: shifts the double WorldPosition (leaving rotation/scale untouched, translation row
+    // zero). Used to prove AggregateBounds tracks a moving entity.
+    private struct TestTranslate(Double3 delta) : IDrawableAnimator
+    {
+        public void Animate(ulong globalId, ref Double3 position, ref Matrix4x4 rotationScale)
+            => position += delta;
     }
 }

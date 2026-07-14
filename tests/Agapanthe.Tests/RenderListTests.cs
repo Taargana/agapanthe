@@ -92,32 +92,36 @@ public sealed class RenderListTests
     }
 
     [Fact]
-    public void ComposeSortKey_LaysMaterialHigh_TieBreakLow()
+    public void ComposeSortKey_LaysMaterialHigh_MeshMid_TieBreakLow()
     {
-        var key = RenderItem.ComposeSortKey(materialIndex: 3, tieBreak: 7);
+        var key = RenderItem.ComposeSortKey(materialIndex: 3, meshIndex: 5, tieBreak: 7);
 
-        Assert.Equal((3UL << 32) | 7UL, key);
-        Assert.Equal(3u, (uint)(key >> 32)); // material recoverable from the high bits
-        Assert.Equal(7u, (uint)key);         // tie-break from the low bits
+        Assert.Equal((3UL << 48) | (5UL << 32) | 7UL, key);
+        Assert.Equal(3u, (uint)(key >> 48));          // material recoverable from bits 48-63
+        Assert.Equal(5u, (uint)((key >> 32) & 0xFFFF)); // mesh from bits 32-47
+        Assert.Equal(7u, (uint)key);                   // tie-break from the low 32 bits
     }
 
     [Fact]
-    public void SortByKey_BatchesByMaterial_ThenByTieBreak()
+    public void SortByKey_BatchesByMaterial_ThenMesh_ThenByTieBreak()
     {
-        // Composed keys: material in the high bits, a per-entity tie-break in the low bits. After sorting the list
-        // must be grouped by material, and within each material ordered by the tie-break.
+        // Composed keys: material then mesh in the high bits, a per-entity tie-break in the low bits. After sorting
+        // the list must be grouped by material, then by mesh within a material, then ordered by the tie-break —
+        // so a run of consecutive items shares one (material, mesh) pair (one instanced draw per run).
         var list = new RenderList();
-        list.Add(WithKey(RenderItem.ComposeSortKey(2, 50)));
-        list.Add(WithKey(RenderItem.ComposeSortKey(0, 99)));
-        list.Add(WithKey(RenderItem.ComposeSortKey(2, 10)));
-        list.Add(WithKey(RenderItem.ComposeSortKey(0, 1)));
+        list.Add(WithKey(RenderItem.ComposeSortKey(2, 1, 50)));
+        list.Add(WithKey(RenderItem.ComposeSortKey(0, 3, 99)));
+        list.Add(WithKey(RenderItem.ComposeSortKey(2, 1, 10)));
+        list.Add(WithKey(RenderItem.ComposeSortKey(0, 3, 1)));
+        list.Add(WithKey(RenderItem.ComposeSortKey(2, 0, 5)));
 
         list.SortByKey();
 
-        Assert.Equal(RenderItem.ComposeSortKey(0, 1), list.Items[0].SortKey);
-        Assert.Equal(RenderItem.ComposeSortKey(0, 99), list.Items[1].SortKey);
-        Assert.Equal(RenderItem.ComposeSortKey(2, 10), list.Items[2].SortKey);
-        Assert.Equal(RenderItem.ComposeSortKey(2, 50), list.Items[3].SortKey);
+        Assert.Equal(RenderItem.ComposeSortKey(0, 3, 1), list.Items[0].SortKey);
+        Assert.Equal(RenderItem.ComposeSortKey(0, 3, 99), list.Items[1].SortKey);
+        Assert.Equal(RenderItem.ComposeSortKey(2, 0, 5), list.Items[2].SortKey);  // material 2, mesh 0 before mesh 1
+        Assert.Equal(RenderItem.ComposeSortKey(2, 1, 10), list.Items[3].SortKey);
+        Assert.Equal(RenderItem.ComposeSortKey(2, 1, 50), list.Items[4].SortKey);
     }
 
     [Fact]
@@ -130,8 +134,8 @@ public sealed class RenderListTests
         var reverse = new RenderList();
         for (uint i = 0; i < 200; i++)
         {
-            forward.Add(WithKey(RenderItem.ComposeSortKey(1, i)));
-            reverse.Add(WithKey(RenderItem.ComposeSortKey(1, 199 - i)));
+            forward.Add(WithKey(RenderItem.ComposeSortKey(1, 1, i)));
+            reverse.Add(WithKey(RenderItem.ComposeSortKey(1, 1, 199 - i)));
         }
 
         forward.SortByKey();

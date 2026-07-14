@@ -229,6 +229,28 @@ internal static unsafe class DescriptorWrites
         device.Api.UpdateDescriptorSets(device.Device, 1, &write, 0, null);
     }
 
+    public static void StorageBuffer(GraphicsDevice device, DescriptorSet set, uint binding, GpuBuffer buffer)
+    {
+        // Read-only storage buffer (SSBO), whole range. Read from the vertex shader (per-instance
+        // transforms, P3-M1); no writes/atomics, so no vertexPipelineStoresAndAtomics feature needed.
+        var bufferInfo = new DescriptorBufferInfo
+        {
+            Buffer = buffer.Handle,
+            Offset = 0,
+            Range = buffer.SizeBytes,
+        };
+        var write = new WriteDescriptorSet
+        {
+            SType = StructureType.WriteDescriptorSet,
+            DstSet = set,
+            DstBinding = binding,
+            DescriptorCount = 1,
+            DescriptorType = DescriptorType.StorageBuffer,
+            PBufferInfo = &bufferInfo,
+        };
+        device.Api.UpdateDescriptorSets(device.Device, 1, &write, 0, null);
+    }
+
     public static void StorageImage(GraphicsDevice device, DescriptorSet set, uint binding, ImageView view)
     {
         // Storage image: no sampler, layout General (the compute write layout, matching the transition the

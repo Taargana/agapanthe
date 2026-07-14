@@ -30,6 +30,8 @@ public sealed unsafe class FrameContext : IDisposable
     private const uint MaxCombinedImageSamplers = 64;
     // Storage images (compute write targets, M7): a handful at most per frame.
     private const uint MaxStorageImages = 16;
+    // Storage buffers (per-instance transforms, P3-M1): scene + shadow SSBO per frame.
+    private const uint MaxStorageBuffers = 16;
 
     private readonly GraphicsDevice _device;
     private DescriptorPool _pool;
@@ -40,17 +42,18 @@ public sealed unsafe class FrameContext : IDisposable
         _device = device;
         Slot = slot;
 
-        var sizes = stackalloc DescriptorPoolSize[3]
+        var sizes = stackalloc DescriptorPoolSize[4]
         {
             new DescriptorPoolSize(DescriptorType.UniformBuffer, MaxUniformBuffers),
             new DescriptorPoolSize(DescriptorType.CombinedImageSampler, MaxCombinedImageSamplers),
             new DescriptorPoolSize(DescriptorType.StorageImage, MaxStorageImages),
+            new DescriptorPoolSize(DescriptorType.StorageBuffer, MaxStorageBuffers),
         };
         var poolInfo = new DescriptorPoolCreateInfo
         {
             SType = StructureType.DescriptorPoolCreateInfo,
             MaxSets = MaxSets,
-            PoolSizeCount = 3,
+            PoolSizeCount = 4,
             PPoolSizes = sizes,
         };
         DescriptorPool pool;
@@ -101,6 +104,17 @@ public sealed unsafe class FrameContext : IDisposable
         ArgumentNullException.ThrowIfNull(buffer);
         ObjectDisposedException.ThrowIf(_disposed, this);
         DescriptorWrites.UniformBuffer(_device, set.Set, binding, buffer);
+    }
+
+    /// <summary>
+    /// Points <paramref name="binding"/> of <paramref name="set"/> at a read-only storage buffer (SSBO),
+    /// whole range. Used for per-instance transforms read in the vertex shader (P3-M1).
+    /// </summary>
+    public void WriteStorageBuffer(DescriptorSetHandle set, uint binding, GpuBuffer buffer)
+    {
+        ArgumentNullException.ThrowIfNull(buffer);
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        DescriptorWrites.StorageBuffer(_device, set.Set, binding, buffer);
     }
 
     /// <summary>
