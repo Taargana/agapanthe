@@ -72,3 +72,7 @@ Linux/macOS jamais validés (P3-M0, bloqué : pas de machine) · rendu GPU-drive
   cassé les runs du draw instancié. Plus : `Despawn` d'un parent corrompt `ComputeWorld`, collision `FrameContext`,
   étage `Input` infaisable sans arête `Engine → Platform`. **SPEC v2** écrite (11 corrections), en relecture.
 - 2026-07-14: Pooling + prefabs **écartés du périmètre** (décision humaine) → inscrits au [backlog §4](../docs/BACKLOG.md).
+- 2026-07-14: **Fin de session — constat visuel humain sur une grille de casques** (`grid:20x20`) : dégradé de lumière
+  par casque + anneaux d'ombre sur le sol. Diagnostic : **config Sandbox** (rig studio + `ShadowDistance` mis à l'échelle
+  sur la diagonale), **pas de régression moteur** ; le plafond réel est le **CSM** (backlog §2). Fix Sandbox **approuvé
+  mais non appliqué** → repris en tête de la session 16 (détail : `docs/AVANCEMENT.md` § Reprise).

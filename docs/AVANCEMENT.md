@@ -212,25 +212,51 @@ Les transforms des entités visibles sont **compactées chaque frame dans un sto
 - 🔴 `ShadowFit.UpstreamExtent` dérive des **bounds globales** : une entité qui bouge à 10 000 km fera vibrer la plage de profondeur de la shadow map de tout le monde (mord dès la physique) → la dériver de la **liste de casters**.
 - 🟠 Slots persistants dirty-trackés (les 2 SSBO fusionnent, `RenderItem.WorldTransform` devient mort) · cull CPU O(n) ~2 ms AOT à 10k (c'est ce que le cull GPU rembourse) · plafond **16 bits** mesh/matériau (limite dure documentée) · `SortKey` sans profondeur.
 
+## P3-M2 — Scheduler de systèmes + lifecycle d'entités (`Agapanthe.Engine`) (2026-07-14, session 15)
+
+Spec : [2026-07-14-p3m2-scheduler-lifecycle-design.md](plans/2026-07-14-p3m2-scheduler-lifecycle-design.md). Commit socle : `90627a5`.
+
+**Nouveau projet `Agapanthe.Engine`** — la seule couche qui marie World + Rendering (ne référence pas Platform, ne possède rien). L'**ordre de frame a quitté le Sandbox** : l'invariant `propagate → aggregate → fit → cull → draw` vit dans `FrameOrchestrator` + `SceneViewSystem`, exécuté par un `SystemScheduler` à étages (`Input → Simulation → PostSimulation → Render`), ordre = donnée testable. Deux interfaces disjointes (`ISystem`/`TickContext` sans GPU, `IRenderSystem`/`RenderContext`). `Tick` tourne **hors** de `DrawFrame` (sinon un resize sauterait la simulation — D1.a). Le spin/churn du banc sont devenus des `ISystem` applicatifs.
+
+**Lifecycle d'entités (D2)** : `Spawn`/`SpawnDeferred`/`Despawn`/`SetParent`/`IsAlive` publics sur `GameWorld`, tout différé à une **barrière de fin d'étage**, **`Despawn` cascade** sur les descendants (scan `Parent` à point fixe). `EntityRef` porte désormais le **`GlobalId`** (`ulong`, identité durable qui précède la création), résolu via une map `_live` — le hot path ne la touche jamais. **Pas de `CommandBuffer` d'Arch** : file de commandes propre au World (le buffer d'Arch 2.1.0 invalide ses handles au playback, ne se reset pas, ne résout pas les refs dans les composants — correction D2 v3 après audit du code décompilé). Scope resserré (YAGNI) : pas d'`AddComponent<T>` générique public, `SetParent` seul (pooling/prefabs → backlog).
+
+**Cull d'ombre deux passes (D3)** : le wedge extrudé est **infini vers l'amont** → un caster à 10 000 km piloterait `UpstreamExtent` et ferait exploser la précision de profondeur. Corrigé par un **7ᵉ plan de coupe** bornant le wedge à `ShadowCasterDistance` (ancré sur la sphère du frustum). Circularité fit↔cull cassée en deux passes : passe 1 (`CollectRenderLists`) cull wedge borné + `casterBounds` + tableau parallèle de sphères ; fit (footprint sur `sceneBounds`, profondeur sur `casterBounds`) ; passe 2 (`CompactShadowCasters`) compaction contre le volume de lumière puis tri.
+
+**Mesures** : banc `grid:100x100` **Release JIT ET NativeAOT** — draws **2+2**, **0 alloc/frame** (banc + mode churn), 0 leak, 0 validation · **311 tests** · 0 warning · **NativeAOT PASS** (probe `AotComponentProbe` + Sandbox) · **capture bit-identique `9790D95D`** (D3 est un no-op observable sur la scène par défaut ; le fix est prouvé à l'échelle par test unitaire — `eyeDistance` reste borné vs >1e6 sinon).
+
+**Double audit de clôture PASS** (`csharp-lowlevel` + `engine-architect`, aucun FAIL/MAJEUR) — findings mineurs appliqués : **garde F7** (`_pass1ShadowList` : `CompactShadowCasters` refuse une liste qui n'est pas celle du dernier `CollectRenderLists` — un contrat non gardé serait violé au premier split-screen/CSM), **test D3.a resserré** (borne liée au mécanisme, plus `*10` arbitraire), **spec nettoyée** (§2/§3.2 et récit `Stage.Input`).
+
+**Dette ouverte / non-bloquants notés** :
+- 🔴 **Linux/macOS toujours jamais validés** (AOT + SPIR-V hors-ligne Windows-only) — **P3-M0**, toujours le premier item.
+- 🟠 **CSM devra sortir l'état de passe-1 (`_casterSpheres`) du World** (contrainte F7 : une seule `RenderView`/frame, désormais **gardée**).
+- 🟠 Cascade despawn en **O(profondeur × N_parent)** *quand un despawn est en attente* (re-scan complet par itération du point fixe) — invisible à l'échelle actuelle, à surveiller avec des hiérarchies profondes (physique/gameplay). Corrigeable par une file de travail BFS, au prix d'une liste d'enfants (refusée par le design).
+- 🟠 Verdict visuel humain P3-M1 **et** P3-M2 encore dus (P3-M2 bit-identique → non bloquant pour la clôture technique).
+- (Report P3-M1 : cull GPU = `DrawIndexedIndirect` + `drawIndirectFirstInstance` ; slots persistants dirty-trackés ; `SortKey` sans profondeur ; plafond 16 bits mesh/matériau.)
+
 ## Reprise — où repartir
 
 > Trajectoire long terme (CSM, rendu GPU-driven, nuages volumétriques, atmosphère, ombres planétaires analytiques,
 > physique) : **[BACKLOG.md](BACKLOG.md)** — chaque item dit *ce qui casse sans lui* et *à quelle échelle il devient
 > obligatoire*.
 
-**Point de reprise (2026-07-14, session 14)** : **P3-M1 clos** (double audit PASS, findings appliqués). Prochaine tâche = **P3-M2 — rendu GPU-driven** (slots persistants + cull compute + draw indirect), ou **P3-M0 — validation Linux/macOS** dès qu'une machine Linux est disponible (aujourd'hui indisponible côté humain).
+**Point de reprise (2026-07-14, session 15)** : **P3-M2 clos** (scheduler + lifecycle + couche `Agapanthe.Engine` + cull d'ombre borné ; double audit PASS, findings appliqués ; commit `90627a5`). Prochaine tâche = **P3-M0 — validation Linux/macOS** dès qu'une machine Linux est disponible (aujourd'hui indisponible côté humain), ou **P3-M3 — physique** (dépendances payées : origine quantifiée ✓, bounds per-frame ✓, scheduler ✓, lifecycle ✓ ; c'est elle qui fera mordre `ShadowFit.UpstreamExtent`, désormais dérivé des casters), ou le **rendu GPU-driven** reporté de P3-M1 (cull compute + draw indirect). Verdict visuel humain P3-M1/P3-M2 encore dû (P3-M2 bit-identique).
+
+**En attente, à faire au démarrage de la session 16 (fix approuvé, non appliqué)** — constat visuel humain de fin de session 15 sur une **grille de casques** (`AGAPANTHE_SCENE=grid:20x20`) : (a) « chaque casque a sa propre lumière » et (b) artefacts d'ombre en anneaux sur le sol. **Diagnostic : configuration du Sandbox, pas une régression moteur** (la capture de référence reste bit-identique, un casque seul est correct).
+- (a) `SetupLights` (`samples/Sandbox/Program.cs`) monte un rig studio 3-points **mis à l'échelle sur la diagonale de la scène** (gonflée par le plan de sol) → point lights à ~450 m avec atténuation en carré inverse → dégradé de luminosité à travers la foule. **Fix approuvé** : sur une scène multi-instances (`rows * cols > 1`), couper les point lights → soleil + IBL seuls (garder le rig pour le showcase mono-modèle).
+- (b) `FrameCamera` fait `renderer.ShadowDistance = diagonal * 4f` → la shadow map 4096² s'étale sur ~500 m (~0,12 m/texel) → aliasing rasant sur le sol plat. **Fix approuvé** : plafonner `ShadowDistance` à une valeur absolue modeste (~50 m) ; les casques lointains cessent simplement de projeter dans la vue, ce que `ShadowCasterDistance` (D3) gère sans popping.
+- **Ce que ça révèle côté moteur** : une **cascade d'ombre unique ne peut pas être à la fois nette et longue portée** — plafond structurel, le vrai correctif est le **CSM**, déjà au [backlog §2](BACKLOG.md). À surveiller après le plafond : si de l'acné d'ombre subsiste, le depth bias (calibré pour une scène de 2 m) devra s'exprimer en espace texel de shadow map — durcissement moteur mineur, à constater, pas à postuler.
 
 **Branche** : `phase2-foundations`. Commits P2-M4 : `12a07e3` (W0 Frustum+sphère+banc) · `7d9428a` (W1 origine quantifiée + ordre de frame + skybox origin-exact) · `c5b7da7` (W2 culling) · `458e017` (W3 radix + SortKey) · `99076c1` (W4 banc + AnimateDrawables) · `2827777` (durcissements audits : σ_max exact).
 
 **Séquencement Phase 3 recommandé (engine-architect)** — par dépendances et par ce que chaque jalon *prouve* :
 1. **P3-M0 — Validation Linux/macOS + durcissement du gate shutdown.** *En premier* : AOT et SPIR-V hors-ligne sont **prouvés Windows uniquement** ; « fondations cross-platform » est une hypothèse tant qu'un vrai Linux n'a pas tourné. Cheap, demi-jalon.
 2. ~~**P3-M1 — Instancing + les 2 dettes de culling**~~ ✅ **clos** (session 14, voir plus haut).
-3. **P3-M2 — Rendu GPU-driven** (slots persistants dirty-trackés, cull compute, draw indirect) **+ scheduler de systèmes minimal** (l'ordre de frame doit quitter le Sandbox) et cycle de vie d'entités (`Despawn`, `Parent` pendant).
+3. ~~**P3-M2 — Scheduler + lifecycle + `Agapanthe.Engine`**~~ ✅ **clos** (session 15, voir plus haut). *Le rendu GPU-driven (slots persistants, cull compute, draw indirect) reporté de P3-M1 reste ouvert — désormais un jalon distinct, pas un prérequis.*
 4. **P3-M3 — Physique** (dépend de : origine quantifiée ✓, lifecycle, bounds per-frame).
 5. **P3-M4 — Sérialisation source-gen** (partage le générateur du rooting ; parallélisable). **Audio** en dernier / opportuniste.
 
 **Dette léguée par la Phase 2 (détail : board S13), par « quand ça mord »** :
-- ~~🔴 `AggregateBounds` plié une fois~~ ✅ **soldé en P3-M1** (recalcul par frame ; reste à sortir l'ordre de frame du Sandbox → scheduler).
+- ~~🔴 `AggregateBounds` plié une fois~~ ✅ **soldé en P3-M1** (recalcul par frame) ; ~~ordre de frame dans le Sandbox~~ ✅ **soldé en P3-M2** (`FrameOrchestrator` + scheduler).
 - ~~🔴 Cull du volume de lumière conservateur~~ ✅ **soldé en P3-M1** (`ExtrudedShadowFrustum` ANDé au volume de lumière ; CSM = vrai correctif plus tard).
 - 🔴 **Linux/macOS jamais validés** (AOT + SPIR-V hors-ligne Windows-only) — premier item P3.
 - 🟠 `SortKey` sans profondeur (pas de front-to-back opaque ; transparence future **fausse** sans tri profondeur) · déterminisme du tri exige `(matériau, RenderOrder)` globalement unique · propagation O(n·d) déférée (hiérarchies profondes) · pas d'API `Despawn`.

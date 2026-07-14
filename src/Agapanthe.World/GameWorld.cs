@@ -46,6 +46,13 @@ public sealed class GameWorld : IDisposable
     // (a second view would clobber it before pass 2 — CSM will have to lift this out of the World, spec F7).
     private readonly List<Vector4> _casterSpheres = new();
 
+    // The shadow list the LAST CollectRenderLists filled, so CompactShadowCasters can refuse to compact any other
+    // one (audit F7 guard): _casterSpheres belongs to that one pass-1, and a second CollectRenderLists (a second
+    // view: split-screen, a CSM cascade) overwrites it. Compacting the earlier list against the later view's spheres
+    // would desync silently — no crash, just phantom casters. The project guards this class of contract elsewhere
+    // (AssertOwnerThread), so it guards it here too rather than leaving F7 a comment.
+    private RenderList? _pass1ShadowList;
+
     // Built once: constructing a QueryDescription per frame would defeat the zero-alloc goal.
     private static readonly QueryDescription PropagateDesc =
         new QueryDescription().WithAll<LocalTransform, WorldTransform, WorldPosition>();
@@ -726,6 +733,7 @@ public sealed class GameWorld : IDisposable
         // 2 compacts it against the light volume first, then sorts (sorting now would desync the parallel spheres).
         render.SortByKey();
         casterBounds = casters;
+        _pass1ShadowList = shadowCasters; // the only list CompactShadowCasters may now consume (F7 guard)
     }
 
     /// <summary>
@@ -739,6 +747,16 @@ public sealed class GameWorld : IDisposable
         ObjectDisposedException.ThrowIf(_disposed, this);
         AssertOwnerThread();
         ArgumentNullException.ThrowIfNull(shadowCasters);
+        if (!ReferenceEquals(shadowCasters, _pass1ShadowList))
+        {
+            // Either no CollectRenderLists ran, or a later one (a second view) overwrote the parallel sphere array
+            // this compaction depends on. Compacting now would test these casters against the WRONG spheres (F7).
+            throw new InvalidOperationException(
+                "CompactShadowCasters must be called with the shadow list from the most recent CollectRenderLists " +
+                "(one RenderView per frame — the caster spheres are per-frame pass-1 state owned by the World).");
+        }
+
+        _pass1ShadowList = null; // consumed: a repeat compaction (or a stale list) now throws too
 
         var items = shadowCasters.ItemsMutable;
         var write = 0;

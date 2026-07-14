@@ -68,8 +68,18 @@ public sealed class ShadowCasterCullTests
 
         Assert.True(eyeDistanceIfUnbounded > 1e6f,
             $"the old behaviour (fit on scene bounds) should blow up; got {eyeDistanceIfUnbounded}");
-        Assert.True(eyeDistance < ShadowCasterDistance * 10f,
-            $"the depth range must stay bounded by the shadow-caster distance; got {eyeDistance}");
+        // Bound tied to the MECHANISM, not an arbitrary factor: with B excluded from the caster bounds, the depth
+        // range is driven by the footprint (≈ the frustum sphere) plus the upstream a caster within the shadow-caster
+        // distance can add — never by B at 1e7. eyeDistance = max(2·footprint, upstream+footprint); the footprint is
+        // the quantized frustum radius, so 2·anchorRadius bounds that term and ShadowCasterDistance bounds the other.
+        var (_, anchorRadius) = ShadowFit.FitFrustumSphere(in view, ShadowDistance);
+        // 3·anchorRadius covers the 2·(quantized footprint) term with room for the radius rung; + ShadowCasterDistance
+        // covers the upstream a legitimate caster can add. Orders of magnitude below the 1e7 a blown-up range would give.
+        var bound = ShadowCasterDistance + (3f * anchorRadius);
+        Assert.True(eyeDistance <= bound,
+            $"the depth range must stay in the caster-distance + footprint regime; got {eyeDistance}, bound {bound}");
+        Assert.True(eyeDistance < eyeDistanceIfUnbounded * 1e-3f,
+            $"the fix must collapse the depth range by >1000x vs fitting on scene bounds; got {eyeDistance} vs {eyeDistanceIfUnbounded}");
 
         // (ii) B is absent from the final caster list; A survives both passes.
         var lightFrustum = Frustum.FromViewProjection(ShadowFit.ComputeLightViewProj(

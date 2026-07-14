@@ -57,8 +57,11 @@ de teardown de `Program.cs:535-543` est le gate 0-leak — il reste au propriét
 pas du code. Ordre d'enregistrement = ordre d'exécution **au sein d'un étage** (garantie testée).
 
 **`Input` est un étage VIDE côté moteur** : l'input vit dans `Platform`, que `Engine` ne référence pas. C'est
-l'applicatif qui y enregistre ses systèmes (le Sandbox y met sa caméra). L'étage existe pour que l'ordre soit nommé,
-pas pour que le moteur le remplisse.
+l'applicatif qui y enregistre ses systèmes. L'étage existe pour que l'ordre soit nommé, pas pour que le moteur le
+remplisse. *(Livré : le Sandbox garde son contrôle caméra dans le callback `window.Updated` de la fenêtre — l'ordre
+`Updated` → `Rendered` garantit caméra-avant-`Tick` — plutôt que dans un `ISystem` de `Stage.Input`. L'étage reste
+donc vide côté Sandbox aussi ; il attend un vrai système d'input applicatif. Pas de dette : l'input est légitimement
+piloté par l'événement fenêtre.)*
 
 **Deux contextes, deux interfaces** — c'est le seul découpage qui préserve « la simulation tourne sans GPU » :
 
@@ -93,7 +96,9 @@ frameRenderer.DrawFrame(engine.RenderDelegate);  // étage Render seul, dans le 
 
 ### D2 — Lifecycle : `Spawn`/`Despawn` + structurel différé + reparentage — *décision humaine*
 
-- **`Spawn` / `Despawn(EntityRef)` / `AddComponent` / `RemoveComponent` / `SetParent`** publics sur `GameWorld`.
+- **`Spawn` / `SpawnDeferred` / `Despawn(EntityRef)` / `SetParent` / `IsAlive`** publics sur `GameWorld` (surface
+  livrée — voir la correction v3 ci-dessous : `AddComponent`/`RemoveComponent` génériques écartés, le reparentage
+  `SetParent`/`ClearParent` est la seule opération structurelle-composant du jalon).
 - **Tout changement structurel est différé** et appliqué à une **barrière en fin d'étage** (muter la structure pendant
   l'itération d'une query invalide les chunks — bug classique et silencieux de tout ECS).
 
@@ -219,8 +224,9 @@ signature** (plus de `lightFrustum` en entrée, un `out Double3Bounds casterBoun
 
 ### 3.2 `Agapanthe.World`
 
-- Lifecycle (D2) : `Spawn`, `Despawn`, `AddComponent`, `RemoveComponent`, `SetParent`, `IsAlive`,
-  `FlushStructuralChanges()` (appelé par le scheduler à la barrière — **jamais** par l'utilisateur en pleine query).
+- Lifecycle (D2) : `Spawn`, `SpawnDeferred`, `Despawn`, `SetParent` (reparentage = add/remove du composant `Parent`),
+  `IsAlive`, `FlushStructuralChanges()` (appelé par le scheduler à la barrière — **jamais** par l'utilisateur en
+  pleine query). Pas de `AddComponent`/`RemoveComponent` génériques (v3, YAGNI).
 - `CollectRenderLists` : nouvelle signature (D3.c passe 1) + `CompactShadowCasters` (passe 2).
 - Reste **GPU-free**. Les systèmes existants sont exposés à Engine via des adaptateurs `ISystem` minces — mais
   `CollectRenderLists` change **bel et bien** de code (D3.c) : la v1 prétendait le contraire, à tort.
