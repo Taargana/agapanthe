@@ -1,6 +1,6 @@
 # Agapanthe — Plan complet & état d'avancement
 
-**Mis à jour** : 2026-07-13 (session 13 — **PHASE 2 CLOSE** — frustum culling + montée en charge : 10 000 entités cullées à 10 000 km, 0 alloc/frame, en NativeAOT ; double audit signe la clôture) · **Machines de dev** : macOS (Apple M3, MoltenVK) + Windows 11 (RTX 5070 Ti, Vulkan 1.3 core) · **Cibles** : Windows / Linux / macOS
+**Mis à jour** : 2026-07-14 (session 14 — **vérifs humaines de la Phase 2 soldées** : banc M4 PASS with concerns [perf → P3-M1], précision M3 PASS, hot reload M1 PASS) · 2026-07-13 (session 13 — **PHASE 2 CLOSE** — frustum culling + montée en charge : 10 000 entités cullées à 10 000 km, 0 alloc/frame, en NativeAOT ; double audit signe la clôture) · **Machines de dev** : macOS (Apple M3, MoltenVK) + Windows 11 (RTX 5070 Ti, Vulkan 1.3 core) · **Cibles** : Windows / Linux / macOS
 
 ## Vision
 
@@ -213,7 +213,10 @@ Détail complet : [.absolute-human/archive/board-session8-M8.md](../.absolute-hu
 - 🟠 `SortKey` sans profondeur (pas de front-to-back opaque ; transparence future **fausse** sans tri profondeur) · déterminisme du tri exige `(matériau, RenderOrder)` globalement unique · propagation O(n·d) déférée (hiérarchies profondes) · pas d'API `Despawn`.
 - 🟡 `AssertOwnerThread` Debug-only vs futur job system · **crash shutdown Silk.NET reproductible** (`AGAPANTHE_UNLOAD_TEST=20`, ~2/10, après le rapport propre — garder le gate CI keyé sur la ligne de rapport, pas l'exit code) · pas d'assertion CI du critère de sortie.
 
-**Vérifs humaines encore dues (non bloquantes)** : (a) **P2-M4** — verdict visuel du banc `grid:100x100` en fenêtre + le skybox de W1 (nouveau shader, jugé headless seulement). (b) **P2-M3** — feel caméra (wrap du yaw) ; démo précision : `AGAPANTHE_WORLD_ORIGIN="10000000,10000000,10000000"` → indiscernable de l'origine ; à `1e15`, tout claque (même panne que le `float` à 10 000 km, repoussée de 8 ordres de grandeur). (c) **P2-M1** — hot reload Debug live (edit shader → recompile < 1 s), non re-testé depuis M8.
+**Vérifs humaines de la Phase 2 — SOLDÉES (2026-07-14, session 14, Windows/RTX 5070 Ti)** · protocoles : [p2m4](visual-checks/2026-07-14-p2m4-bench-skybox.md) · [p2m3](visual-checks/2026-07-14-p2m3-precision-camera.md) · [p2m1](visual-checks/2026-07-14-p2m1-hot-reload-live.md).
+- (a) **P2-M4** — banc `grid:100x100` + skybox W1 : **PASS with concerns**. Cull + skybox corrects et stables ; concern = **FPS bas sur la grande grille** → dette perf **assumée** de M4 (amplifiée par le run Debug + validation layers : 74–92 ms/frame vs 3,7 ms JIT-Release / ~6 ms AOT). **Remboursement = P3-M1.**
+- (b) **P2-M3** — précision + feel caméra : **PASS**. Découverte des preuves headless : **l'alignement sur la maille (snap 1024 m) gouverne le bit-exact, pas la magnitude** — offset aligné à 10 M km (0,029 % de canaux ≠) plus proche du bit-exact qu'offset non aligné à 10 000 km (0,925 %) ; les deux indiscernables à l'œil. 1e15 visiblement dégradé (double qui casse).
+- (c) **P2-M1** — hot reload Debug live : **PASS** (reload < 1 s confirmé en fenêtre, budget headless 0,9–2,2 ms/passe).
 
 **Env vars du banc (P2-M4)** : `AGAPANTHE_SCENE=grid:NxN` (réplique le modèle en grille — un upload) · `AGAPANTHE_CULL_STATS=1` (mode banc : caméra dans la scène, spin déterministe, log visibles/total + temps + alloc).
 
