@@ -35,9 +35,12 @@ public readonly struct ExtrudedShadowFrustum
     // +inf) to keep the dot product NaN-free.
     private static readonly Vector4 AlwaysInside = new(0f, 0f, 0f, float.MaxValue);
 
-    // Margin toward DROPPING a near-parallel plane. Keeping a borderline plane would tighten the wedge and could
-    // drop a caster whose shadow reaches the view (false negative → popping); dropping it only widens the wedge
-    // (a safe false positive). So we keep a plane only when it faces upstream by more than this margin.
+    // Margin toward KEEPING a near-parallel plane. The exact rule keeps a plane iff dot(n, dir) ≤ 0, bound
+    // INCLUDED: a plane exactly parallel to the light ray is not a borderline case, it is the plane that closes the
+    // wedge sideways. With the sun overhead and a level camera the four lateral planes sit exactly at dot == 0, so
+    // dropping them would degenerate the wedge into a half-space that culls nothing. We therefore keep the
+    // borderline ones. That is safe: a plane whose true dot is +δ ≤ ε only mis-rejects casters more than d/δ (≥ 1000
+    // km) upstream, and those are already dropped by the light-volume test we AND with.
     private const float ParallelEpsilon = 1e-4f;
 
     private ExtrudedShadowFrustum(
@@ -54,24 +57,31 @@ public readonly struct ExtrudedShadowFrustum
     /// <summary>
     /// Builds the wedge from the camera frustum and the light's propagation direction (source→surface), both in
     /// the same camera-relative space. A frustum plane with inward normal <c>n</c> survives iff sweeping toward the
-    /// light (<c>-direction</c>) keeps points on its inner side, i.e. <c>dot(n, direction) &lt; -ε</c>; the rest are
-    /// dropped (their side becomes open toward the light). A degenerate direction (near zero) drops every plane, so
-    /// the wedge keeps everything — the conservative fallback.
+    /// light (<c>-direction</c>) keeps points on its inner side, i.e. <c>dot(n, direction) ≤ 0</c> (ε toward
+    /// keeping); the rest are dropped (their side becomes open toward the light). A degenerate direction (near zero)
+    /// drops every plane, so the wedge keeps everything — the conservative fallback, since the fit then picks its
+    /// own default direction and we must not second-guess it.
     /// </summary>
     public static ExtrudedShadowFrustum FromCameraFrustum(in Frustum cameraFrustum, Vector3 lightDirection)
     {
+        var length = lightDirection.Length();
+        if (length <= 1e-8f)
+        {
+            return new ExtrudedShadowFrustum(
+                AlwaysInside, AlwaysInside, AlwaysInside, AlwaysInside, AlwaysInside, AlwaysInside);
+        }
+
         Span<Vector4> planes = stackalloc Vector4[6];
         cameraFrustum.CopyPlanes(planes);
-
-        var length = lightDirection.Length();
-        var dir = length > 1e-8f ? lightDirection / length : Vector3.Zero;
+        var dir = lightDirection / length;
 
         for (var i = 0; i < 6; i++)
         {
             var n = new Vector3(planes[i].X, planes[i].Y, planes[i].Z);
-            // Keep the plane only if it faces upstream (its inner half-space contains the light-ward ray). Drop the
-            // rest — including near-parallel ones (|dot| ≤ ε) — so the wedge is never tighter than the true region.
-            if (Vector3.Dot(n, dir) >= -ParallelEpsilon)
+            // Drop the plane only if it clearly faces DOWNSTREAM (its inner half-space is not stable under the
+            // light-ward sweep). Everything else — including the exactly-parallel planes, which are the ones that
+            // close the wedge sideways — is kept.
+            if (Vector3.Dot(n, dir) > ParallelEpsilon)
             {
                 planes[i] = AlwaysInside;
             }

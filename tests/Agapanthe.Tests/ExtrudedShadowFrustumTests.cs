@@ -64,16 +64,43 @@ public sealed class ExtrudedShadowFrustumTests
     }
 
     [Fact]
+    public void ZenithLight_StillDropsALateralOffScreenCaster()
+    {
+        // The engine's most ordinary configuration: sun straight down, level camera. Every lateral plane of the
+        // frustum is then EXACTLY parallel to the light ray (dot == 0). Those planes are what closes the wedge
+        // sideways, so they must be KEPT — drop them and the wedge degenerates into "everything above the ground",
+        // which culls nothing. A caster far to the side drops its shadow straight down, far from the view: it must
+        // not survive the wedge.
+        var extruded = ExtrudedShadowFrustum.FromCameraFrustum(in Camera, new Vector3(0f, -1f, 0f));
+        var caster = new Vector3(20f, 0f, -10f);
+
+        Assert.False(Camera.Intersects(caster, R));
+        Assert.False(extruded.Intersects(caster, R));
+
+        // …while a caster directly ABOVE the view is still upstream of it and must be kept.
+        Assert.True(extruded.Intersects(new Vector3(0f, 40f, -10f), R));
+    }
+
+    [Fact]
     public void NearParallelLight_DoesNotProduceAFalseNegative()
     {
-        // Light almost parallel to -X but tipped slightly into -Z, so the near/far planes are borderline. The ε
-        // bias must DROP borderline planes (widen the wedge), never keep one and clip a caster whose shadow enters.
-        // The same lateral off-screen caster as the headline case must still be kept.
-        var dir = Vector3.Normalize(new Vector3(-1f, 0f, -1e-4f));
+        // Light almost parallel to -X, tipped a hair into -Z, so the near/far planes are borderline. Keeping a
+        // borderline plane can only mis-reject casters absurdly far upstream (≥ d/ε), never one whose shadow
+        // actually reaches the view: the same lateral off-screen caster as the headline case is still kept.
+        var dir = Vector3.Normalize(new Vector3(-1f, 0f, -1e-6f));
         var extruded = ExtrudedShadowFrustum.FromCameraFrustum(in Camera, dir);
         var caster = new Vector3(20f, 0f, -10f);
 
         Assert.False(Camera.Intersects(caster, R));
         Assert.True(extruded.Intersects(caster, R)); // no false negative from the borderline planes
+    }
+
+    [Fact]
+    public void DegenerateLightDirection_KeepsEverything()
+    {
+        // No direction to sweep along → no wedge to trust. Keep every caster; the light-volume test still governs.
+        var extruded = ExtrudedShadowFrustum.FromCameraFrustum(in Camera, Vector3.Zero);
+
+        Assert.True(extruded.Intersects(new Vector3(500f, -300f, 900f), R));
     }
 }

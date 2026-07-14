@@ -28,6 +28,10 @@ public sealed unsafe class DescriptorAllocator : IDisposable
     // Storage images are rare (compute write targets, M7): a handful of IBL views, not per-material. 16 per
     // pool is ample and keeps the persistent pool from over-reserving descriptor memory.
     private const uint StorageImagesPerPool = 16;
+    // Storage BUFFERS are per-frame today (the instance transforms, P3-M1) and so come from FrameContext's own
+    // pool — but a persistent set may hold one tomorrow, and a pool that does not declare the type fails the
+    // allocation outright. Declaring it costs nothing.
+    private const uint StorageBuffersPerPool = 16;
 
     private readonly GraphicsDevice _device;
     private readonly List<DescriptorPool> _pools = new();
@@ -179,17 +183,18 @@ public sealed unsafe class DescriptorAllocator : IDisposable
 
     private void CreatePool()
     {
-        var sizes = stackalloc DescriptorPoolSize[3]
+        var sizes = stackalloc DescriptorPoolSize[4]
         {
             new DescriptorPoolSize(DescriptorType.UniformBuffer, UniformBuffersPerPool),
             new DescriptorPoolSize(DescriptorType.CombinedImageSampler, CombinedImageSamplersPerPool),
             new DescriptorPoolSize(DescriptorType.StorageImage, StorageImagesPerPool),
+            new DescriptorPoolSize(DescriptorType.StorageBuffer, StorageBuffersPerPool),
         };
         var poolInfo = new DescriptorPoolCreateInfo
         {
             SType = StructureType.DescriptorPoolCreateInfo,
             MaxSets = SetsPerPool,
-            PoolSizeCount = 3,
+            PoolSizeCount = 4,
             PPoolSizes = sizes,
         };
         DescriptorPool pool;

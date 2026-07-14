@@ -42,7 +42,11 @@ public readonly struct RenderItem
     /// into the low bits makes the total order deterministic; a "stable sort" alone would not, because the pre-sort
     /// input order is itself non-deterministic. The tie-break keeps its <b>full 32 bits</b> — never narrow it.
     /// </para>
-    /// <para>Material and mesh indices must fit in 16 bits (65 535 max), asserted in Debug builds.</para>
+    /// <para>
+    /// <b>Hard limit:</b> material and mesh indices must fit in 16 bits (65 535 each) — the engine's documented
+    /// ceiling on live meshes/materials. Beyond it the key aliases: the render stays CORRECT (batching compares the
+    /// real handles, not the key), but the grouping degrades. Asserted in Debug builds.
+    /// </para>
     /// </summary>
     public static ulong ComposeSortKey(int materialIndex, int meshIndex, uint tieBreak)
     {
@@ -52,4 +56,13 @@ public readonly struct RenderItem
             meshIndex is >= 0 and <= 0xFFFF, "meshIndex must fit in 16 bits for the sort key.");
         return ((ulong)(uint)materialIndex << 48) | ((ulong)(uint)meshIndex << 32) | tieBreak;
     }
+
+    /// <summary>
+    /// The same key with mesh and material SWAPPED, for the shadow-caster list: the depth pass binds no material,
+    /// so it batches by mesh alone. A material-major key would fragment a mesh shared by <c>k</c> materials into
+    /// <c>k</c> depth draws; a mesh-major key keeps it one contiguous run. Same tie-break, so the order stays
+    /// deterministic.
+    /// </summary>
+    public static ulong ComposeShadowSortKey(int meshIndex, int materialIndex, uint tieBreak)
+        => ComposeSortKey(meshIndex, materialIndex, tieBreak);
 }

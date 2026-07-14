@@ -53,21 +53,19 @@ internal static class ShadowFit
         var (frustumCenter, frustumRadius) = FitFrustumSphere(in view, shadowDistance);
         var (sceneCenter, sceneRadius) = FitSceneSphere(in sceneBounds, view.Origin);
 
-        Vector3 center;
-        float radius;
-        if (sceneRadius <= frustumRadius)
-        {
-            // The scene is smaller than what the camera can see: shadow the scene, tightly. No snapping — a
-            // static scene fit does not move, so it cannot shimmer, and leaving it alone keeps this the exact
-            // matrix the pre-M3 renderer produced.
-            center = sceneCenter;
-            radius = sceneRadius;
-        }
-        else
-        {
-            center = SnapToTexelGrid(frustumCenter, view.Origin, dir, frustumRadius, shadowResolution);
-            radius = frustumRadius;
-        }
+        // The scene is smaller than what the camera can see → shadow the scene, tightly; otherwise fit the frustum.
+        var (rawCenter, rawRadius) = sceneRadius <= frustumRadius
+            ? (sceneCenter, sceneRadius)
+            : (frustumCenter, frustumRadius);
+
+        // Both fits are quantized, and both must be. The scene fit used to be left raw on the grounds that "a
+        // static scene cannot shimmer" — true then, false since P3-M1 recomputes the world bounds every frame: the
+        // moment an entity spins or translates, the scene sphere breathes and its centre drifts, and an unsnapped
+        // map resamples the whole shadow every frame (crawling edges). Snapping the centre alone would not be
+        // enough either: the texel grid is derived FROM the radius, so a radius that varies continuously moves the
+        // grid it defines. Quantize the radius first, then snap the centre onto the grid that radius fixes.
+        var radius = QuantizeRadius(rawRadius);
+        var center = SnapToTexelGrid(rawCenter, view.Origin, dir, radius, shadowResolution);
 
         // Depth range. The eye must sit UPSTREAM of every caster: a caster outside the fitted sphere still throws
         // its shadow INTO it, and one that falls outside the light's depth range is clipped — it simply stops
@@ -175,6 +173,24 @@ internal static class ShadowFit
         var center = (min + max) * 0.5f;
         var radius = Vector3.Distance(min, max) * 0.5f;
         return (center, radius > 1e-4f ? radius * 1.1f : 1f);
+    }
+
+    /// <summary>
+    /// Rounds the fitted radius UP onto a coarse ladder (16 steps per octave), so a sphere that breathes with the
+    /// scene — an entity spinning, a caster translating — holds a constant radius instead of varying continuously.
+    /// The texel grid the snap quantizes onto is derived from this radius; a radius that never settles is a grid
+    /// that never settles, and the snap would buy nothing. Rounding UP only ever grows the fit, so nothing that was
+    /// shadowed falls outside it, and the ladder costs at most ~6% of the shadow map's resolution.
+    /// </summary>
+    private static float QuantizeRadius(float radius)
+    {
+        if (!float.IsFinite(radius) || radius <= 1e-4f)
+        {
+            return radius;
+        }
+
+        var step = MathF.Pow(2f, MathF.Ceiling(MathF.Log2(radius))) / 16f;
+        return MathF.Ceiling(radius / step) * step;
     }
 
     /// <summary>

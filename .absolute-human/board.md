@@ -86,7 +86,9 @@ Convention tests : GPU-free → xUnit ; GPU → capture byte-identique + 0 val/0
 
 ## Hors périmètre (→ P3-M2 « rendu GPU-driven »)
 
-Slots persistants dirty-trackés · culling GPU compute · draw indirect · visibility index buffer. Le VS passera de `transforms[gl_InstanceIndex]` à `transforms[visible[gl_InstanceIndex]]` — 1 ligne, chemin de draw inchangé.
+Slots persistants dirty-trackés · culling GPU compute · draw indirect · visibility index buffer. Le VS passera de `transforms[gl_InstanceIndex]` à `transforms[visible[gl_InstanceIndex]]`.
+
+> **Correction (audit de clôture)** : « 1 ligne, chemin de draw inchangé » était **faux**. Avec un cull GPU, l'`instanceCount` d'un batch n'est plus connu côté CPU → il faut `vkCmdDrawIndexedIndirect(Count)`, donc `BufferUsage.Indirect`, `CommandList.DrawIndexedIndirect`, et la feature **`drawIndirectFirstInstance`** (le `firstInstance` d'un draw **direct** est gratuit ; celui d'un draw **indirect** ne l'est pas). Piste : porter l'offset de batch en **push constant** → s'affranchit de `firstInstance` et neutralise F4/MoltenVK du même coup.
 
 ## Rollback Point
 
@@ -100,3 +102,9 @@ Slots persistants dirty-trackés · culling GPU compute · draw indirect · visi
 - 2026-07-14: **V2 verte** — AW-020 (scene pass instancié : `mesh.vert` lit SSBO b6, batching (material,mesh), `firstInstance`). AW-021 gate : casque **byte-identique** (SHA match, 0 canal), grille 3×3 = 9 casques distincts (firstInstance validé), 0 validation, 0 leak. Checkpoint V0-V2 committé (`d7de0fd`).
 - 2026-07-14: **V3 verte** — AW-030 (shadow pass instancié : `shadow.vert` lit SSBO, push 64B, batching par mesh). AW-031 gate : casque+ombres byte-identique, 0 validation, 0 leak.
 - 2026-07-14: **V4+V5 vertes** — AW-041 (`AggregateBounds` per-frame, debt #1), AW-052 (`CollectRenderLists` + `in ExtrudedShadowFrustum` AND, appels tests + `AotRootingSmoke` MAJ, anti-popping F3 révisé + test drop d'intégration). Gate : 281 tests, casque byte-identique, **casters 10 000 → 5040**, cull+collect+record ~78 → 6,9 ms (Debug), 0 alloc/leak/validation.
+- 2026-07-14: **V6 verte** — banc + compteurs de draw calls. Mesures : draws **12 556 → 2**, cull+collect 3,7 → ~2,0 ms (Release JIT), ~6 → ~2,2 ms (AOT), 0 alloc/frame.
+- 2026-07-14: **V7 — double audit de clôture** (`csharp-lowlevel` + `engine-architect`) : **PASS / PASS, 0 bloquant**, 2 MAJEURS **corrigés dans le jalon** :
+  - 🔴 **ε du wedge inversé** (`ExtrudedShadowFrustum:74`) : les plans *exactement parallèles* au rayon étaient jetés — or ce sont eux qui ferment le wedge. Soleil au zénith + caméra à plat ⇒ 4 plans latéraux tombés ⇒ **le wedge ne cullait plus rien** ; le banc y échappait par accident (soleil non aligné). Corrigé (drop ssi `dot > +ε`), test zénith ajouté, test near-parallel réécrit (il épinglait le mauvais comportement).
+  - 🔴 **Fit d'ombre instable** (`ShadowFit`) : la branche « scène » ne snappait pas (hypothèse « scène statique » tuée par les bounds désormais per-frame) ⇒ crawl des bords d'ombre dès qu'une entité bouge. Rayon **quantifié** (16 crans/octave) + snap texel dans **les deux** branches + test en escalier. **Conséquence assumée : capture casque plus bit-identique** (0,25 % de canaux, décalage sub-texel) — rendu vérifié intact.
+  - Mineurs appliqués : clé **mesh-major** pour la liste d'ombre (fin de la sur-découpe) · `InstanceBufferRing` extrait de `Renderer` (compaction dupliquée + **shrink** après 60 frames sous ¼ de capacité) · rebind du set 1 seulement au changement de matériau · pool persistant déclarant `StorageBuffer` · `GpuBuffer.Write` en multiplication 64 bits · plafond 16 bits documenté comme limite dure.
+  - Gate final : **284 tests**, 0 warning, 0 validation, 0 leak, 0 alloc/frame, **NativeAOT PASS** (banc 10k : draws 1+1, ~2,2 ms).

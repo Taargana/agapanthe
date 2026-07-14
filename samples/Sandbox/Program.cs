@@ -259,6 +259,7 @@ window.Loaded += () =>
                 var avgMs = System.Diagnostics.Stopwatch.GetElapsedTime(0, benchTicks).TotalMilliseconds / BenchLogEvery;
                 Log.Info(
                     $"Sandbox: [cull-stats] frame {benchFrame} — visible {renderList.Count} + shadow {shadowCasters.Count}, " +
+                    $"draws {renderer.LastSceneDrawCalls}+{renderer.LastShadowDrawCalls} (instanced), " +
                     $"cull+collect avg {avgMs:F3} ms/frame, per-frame alloc {alloc} B.");
                 benchTicks = 0;
             }

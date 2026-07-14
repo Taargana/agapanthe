@@ -36,6 +36,35 @@ public sealed class ShadowFitTests
             center + new Double3(halfSize, halfSize, halfSize));
 
     [Fact]
+    public void SceneFit_IsStable_WhenTheSceneBoundsBreathe()
+    {
+        // Since P3-M1 the world bounds are recomputed EVERY frame, so an entity that spins or drifts makes the scene
+        // sphere breathe and slide a little each frame. Left unquantized, the fit would then resample the whole
+        // shadow map every frame and every shadow edge would crawl. Quantized, the map is a STEP function of the
+        // scene: the radius never moves off its rung (so the texel grid it defines is fixed), and the centre only
+        // jumps whole texels.
+        var view = View(Double3.Zero);
+        var widths = new HashSet<float>();
+        var phases = new HashSet<(double, double)>();
+
+        // Sweep the scene across ~8 texels in 64 steps, growing it slightly as we go. Unquantized, that is 64
+        // distinct maps (a continuous slide). Quantized, the centre lands on a handful of grid positions.
+        const float texel = 5f / Resolution; // 2·radius/resolution, radius ≈ 2.5 after quantization
+        for (var step = 0; step < 64; step++)
+        {
+            var drift = step * (texel / 8.0);
+            var breathed = Box(new Double3(drift, 0, 0), 1.2 + (drift * 0.01));
+            var fit = ShadowFit.ComputeLightViewProj(in view, in breathed, Sun, shadowDistance: 0f, Resolution);
+            widths.Add(FittedWidth(fit));
+            // Round off the ~1e-7 float noise of the round trip; the x/y phase is what crawls (z is not snapped).
+            phases.Add((Math.Round(fit.M41, 6), Math.Round(fit.M42, 6)));
+        }
+
+        Assert.Single(widths); // the radius stays on one rung: the texel grid it defines never moves
+        Assert.InRange(phases.Count, 1, 16); // a staircase of whole texels over the sweep, not 64 distinct maps
+    }
+
+    [Fact]
     public void SmallScene_FitsTheScene_NotTheMuchLargerFrustum()
     {
         // A helmet in a 1000 m frustum: fitting the frustum would spread the shadow map over ~1 km and leave the

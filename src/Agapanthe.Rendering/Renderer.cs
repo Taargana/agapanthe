@@ -79,9 +79,8 @@ public sealed class Renderer : IDisposable
     // Per-frame-slot per-instance transform SSBOs (P3-M1): host-visible, the visible entities' model matrices
     // compacted here in sorted order each frame, read by the vertex shader via gl_InstanceIndex. Grown on demand
     // (never per-frame in steady state); the scene and shadow passes see different visible subsets, hence two.
-    private readonly GpuBuffer?[] _sceneTransforms = new GpuBuffer?[GraphicsDevice.FramesInFlight];
-    private readonly GpuBuffer?[] _shadowTransforms = new GpuBuffer?[GraphicsDevice.FramesInFlight];
-    private const int InitialInstanceCapacity = 1024;
+    private readonly InstanceBufferRing _sceneTransforms;
+    private readonly InstanceBufferRing _shadowTransforms;
 
     /// <summary>Instanced draw calls issued by the last scene / shadow pass (P3-M1 bench diagnostic).</summary>
     public int LastSceneDrawCalls { get; private set; }
@@ -190,6 +189,8 @@ public sealed class Renderer : IDisposable
         ArgumentNullException.ThrowIfNull(shaderDirectory);
 
         _device = device;
+        _sceneTransforms = new InstanceBufferRing(device);
+        _shadowTransforms = new InstanceBufferRing(device);
 
         try
         {
@@ -740,15 +741,11 @@ public sealed class Renderer : IDisposable
 
         // The caster list, in its stable sorted order (spec §6 condition b), culled against the LIGHT volume (never
         // the camera frustum — spec §3.5). Compact its transforms into this slot's shadow SSBO, then point set 0 at
-        // it. The depth pass binds no material, so it batches by MESH only (one instanced draw per contiguous mesh
-        // run); firstInstance offsets gl_InstanceIndex into the compacted buffer.
+        // it. The depth pass binds no material, so it batches by MESH only — and the caster list carries a
+        // MESH-major key (RenderItem.ComposeShadowSortKey), so each mesh is one contiguous run even when several
+        // materials share it. firstInstance offsets gl_InstanceIndex into the compacted buffer.
         var items = shadowCasters.Items;
-        var instanceBuffer = EnsureInstanceBuffer(_shadowTransforms, frame.Slot, items.Length);
-        var dst = instanceBuffer.MappedSpan<Matrix4x4>(items.Length);
-        for (var i = 0; i < items.Length; i++)
-        {
-            dst[i] = items[i].WorldTransform;
-        }
+        var instanceBuffer = _shadowTransforms.Compact(frame.Slot, items);
 
         var shadowSet = frame.AllocateSet(_shadowSetLayout!);
         frame.WriteStorageBuffer(shadowSet, 0, instanceBuffer);
@@ -863,13 +860,7 @@ public sealed class Renderer : IDisposable
         // sorted order, then point binding 6 at it (P3-M1). This is the one place the GPU-free RenderList meets the
         // GPU: World stays graphics-free (it filled RenderItem.WorldTransform), the Renderer does the copy.
         var items = renderList.Items;
-        var instanceBuffer = EnsureInstanceBuffer(_sceneTransforms, frame.Slot, items.Length);
-        var dst = instanceBuffer.MappedSpan<Matrix4x4>(items.Length);
-        for (var i = 0; i < items.Length; i++)
-        {
-            dst[i] = items[i].WorldTransform;
-        }
-
+        var instanceBuffer = _sceneTransforms.Compact(frame.Slot, items);
         frame.WriteStorageBuffer(frameSet, 6, instanceBuffer);
 
         cmd.BindPipeline(pipeline);
@@ -883,6 +874,7 @@ public sealed class Renderer : IDisposable
         // per-batch rebind of the transform buffer. This collapses ~N draws to one per (material, mesh) pair.
         LastSceneDrawCalls = 0;
         var start = 0;
+        var boundMaterial = MaterialHandle.Invalid;
         while (start < items.Length)
         {
             var material = items[start].Material;
@@ -894,7 +886,14 @@ public sealed class Renderer : IDisposable
             }
 
             var mesh = registry.Resolve(meshHandle);
-            cmd.BindDescriptorSet(pipeline, 1, registry.Resolve(material).DescriptorSet); // set 1: per-material
+            // The key is material-major, so consecutive batches often share one material (same material, several
+            // meshes): rebind set 1 only when it actually changes.
+            if (material != boundMaterial)
+            {
+                cmd.BindDescriptorSet(pipeline, 1, registry.Resolve(material).DescriptorSet); // set 1: per-material
+                boundMaterial = material;
+            }
+
             cmd.BindVertexBuffer(mesh.VertexBuffer);
             cmd.BindIndexBuffer(mesh.IndexBuffer, mesh.IndexFormat);
             cmd.DrawIndexed(mesh.IndexCount, (uint)(end - start), firstIndex: 0, vertexOffset: 0, firstInstance: (uint)start);
@@ -918,33 +917,6 @@ public sealed class Renderer : IDisposable
         }
 
         cmd.EndRendering();
-    }
-
-    // Returns this slot's per-instance transform SSBO, sized for at least <paramref name="count"/> matrices. Grows
-    // by doubling (never shrinks) and only when the count exceeds the current capacity, so steady state allocates
-    // nothing; the replaced buffer goes through the deferred deletion queue. Safe to recreate here: a slot's buffer
-    // is only read while that slot is in flight, and by the time we record it again its fence has been waited on.
-    private GpuBuffer EnsureInstanceBuffer(GpuBuffer?[] buffers, int slot, int count)
-    {
-        var stride = (ulong)Unsafe.SizeOf<Matrix4x4>();
-        var needed = Math.Max(count, 1);
-        var existing = buffers[slot];
-        var capacity = existing is null ? 0 : (int)(existing.SizeBytes / stride);
-        if (existing is not null && capacity >= needed)
-        {
-            return existing;
-        }
-
-        existing?.Dispose();
-        var newCapacity = capacity == 0 ? InitialInstanceCapacity : capacity * 2;
-        if (newCapacity < needed)
-        {
-            newCapacity = needed;
-        }
-
-        var buffer = new GpuBuffer(_device, (ulong)newCapacity * stride, BufferUsage.Storage);
-        buffers[slot] = buffer;
-        return buffer;
     }
 
     /// <summary>
@@ -1097,9 +1069,10 @@ public sealed class Renderer : IDisposable
         {
             _cameraUbos[i]?.Dispose();
             _lightsUbos[i]?.Dispose();
-            _sceneTransforms[i]?.Dispose();
-            _shadowTransforms[i]?.Dispose();
         }
+
+        _sceneTransforms.Dispose();
+        _shadowTransforms.Dispose();
 
         _shaderCompiler?.Dispose();
 

@@ -92,7 +92,14 @@ the draw-call cost at this scale.
 ### Out of scope (→ next milestone P3-M2 "GPU-driven rendering")
 Persistent dirty-tracked per-object slots, GPU compute culling, indirect draws, a visibility index
 buffer. When those arrive, the vertex shader moves from `transforms[gl_InstanceIndex]` to
-`transforms[visible[gl_InstanceIndex]]` — a one-line shader change; the draw path is unchanged.
+`transforms[visible[gl_InstanceIndex]]`.
+
+> **Correction (closing audit, 2026-07-14).** This was originally written as "a one-line shader change; the draw
+> path is unchanged". That is **wrong**: once the cull runs on the GPU, a batch's `instanceCount` is no longer known
+> CPU-side, so the draw must become `vkCmdDrawIndexedIndirect(Count)` — which needs `BufferUsage.Indirect`, a
+> `CommandList.DrawIndexedIndirect`, and the **`drawIndirectFirstInstance`** feature (a non-zero `firstInstance` is
+> free in a *direct* draw, not in an *indirect* one). Consider carrying the batch offset in a push constant instead:
+> it removes the dependency on `firstInstance` entirely and neutralises risk F4 (MoltenVK) at the same time.
 
 ## Components & seams
 

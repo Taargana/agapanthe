@@ -193,22 +193,41 @@ Détail complet : [.absolute-human/archive/board-session8-M8.md](../.absolute-hu
 
 **Dette héritée (phase 2)** : immutable samplers (comparateur hardware) avec CSM · parsing `KHR_lights_punctual` depuis le glTF · texel-snapping des ombres · prefilter env single-mip (fireflies possibles sur HDRI contrasté) · instancing multi-mesh · MikkTSpace si artefacts · auto-exposure · upload async.
 
+## P3-M1 — Instancing (SSBO) + solde des 2 dettes de culling (2026-07-14, session 14)
+
+Spec : [2026-07-14-p3m1-instancing-culling-design.md](plans/2026-07-14-p3m1-instancing-culling-design.md).
+
+Les transforms des entités visibles sont **compactées chaque frame dans un storage buffer host-visible** (un par frame-in-flight, `InstanceBufferRing`) que le vertex shader indexe par `gl_InstanceIndex` ; la liste triée est **batchée par (matériau, mesh)** → **un draw instancié par batch**, `firstInstance` servant d'offset. Les deux dettes de culling de M4 sont soldées : `AggregateBounds()` est recalculé **par frame**, et les shadow casters sont testés contre un **`ExtrudedShadowFrustum`** (frustum caméra étendu vers la lumière, ANDé avec le volume de lumière).
+
+**Mesures (banc `grid:100x100`, 10 000 entités)** : draw calls **12 556 → 2** (1 scène + 1 ombre) · shadow casters **10 000 → ~5 000** · cull+collect **Release JIT 3,7 → ~2,0 ms**, **NativeAOT ~6 → ~2,2 ms** · **0 alloc/frame**, 0 leak, 0 message de validation, 0 warning, **284 tests verts**, AOT PASS.
+
+**Corrections issues du double audit de clôture** (findings appliqués, pas reportés) :
+- 🔴 **Règle ε du wedge inversée** : le code jetait les plans **exactement parallèles** au rayon — or ce sont eux qui ferment le wedge latéralement. Avec un **soleil au zénith et une caméra à plat** (la config la plus banale du moteur), les 4 plans latéraux tombaient et le wedge **ne cullait plus rien** ; le banc y échappait par accident (soleil non aligné sur un axe). Corrigé (garde à la borne, biais keep) + test zénith qui l'épingle.
+- 🔴 **Fit d'ombre redevenu instable** : `ShadowFit` ne snappait pas la branche « scène » (« une scène statique ne peut pas shimmer » — hypothèse tuée par les bounds désormais recalculées par frame). Le rayon est maintenant **quantifié** (16 crans par octave) et le centre **snappé au texel dans les deux branches** → le fit est une fonction en escalier, plus de crawl des bords d'ombre. Conséquence assumée : la capture casque n'est **plus bit-identique** à P2 (0,25 % de canaux, décalage sub-texel des ombres) — rendu vérifié intact.
+- Clé de tri **mesh-major** pour la liste d'ombre (la passe depth ne lie aucun matériau → plus de sur-découpe) · SSBO qui **rétrécissent** après 60 frames sous le quart de leur capacité · rebind du set 1 seulement au changement de matériau · pool de descripteurs persistant déclarant `StorageBuffer` · `GpuBuffer.Write` en multiplication 64 bits.
+
+**Dette ouverte par P3-M1 (→ P3-M2, rendu GPU-driven)** :
+- 🔴 Le cull GPU **n'est pas « une ligne de shader »** : il impose `DrawIndexedIndirect` + `BufferUsage.Indirect` + la feature **`drawIndirectFirstInstance`** (qui, elle, n'est pas gratuite). Piste : porter l'offset de batch en **push constant** → neutralise du même coup le risque `baseInstance` sur MoltenVK.
+- 🔴 **L'ordre des systèmes vit dans le Sandbox** (`PropagateTransforms → AggregateBounds → ComputeLightViewProj → CollectRenderLists`) : dette #1 soldée *à l'appel*, pas dans le moteur → premier client du **scheduler**.
+- 🔴 `ShadowFit.UpstreamExtent` dérive des **bounds globales** : une entité qui bouge à 10 000 km fera vibrer la plage de profondeur de la shadow map de tout le monde (mord dès la physique) → la dériver de la **liste de casters**.
+- 🟠 Slots persistants dirty-trackés (les 2 SSBO fusionnent, `RenderItem.WorldTransform` devient mort) · cull CPU O(n) ~2 ms AOT à 10k (c'est ce que le cull GPU rembourse) · plafond **16 bits** mesh/matériau (limite dure documentée) · `SortKey` sans profondeur.
+
 ## Reprise — où repartir
 
-**Point de reprise (2026-07-13, session 13)** : **PHASE 2 CLOSE.** P2-M0 → P2-M4 clos et committés ; la Phase 2 est signée par le double audit de clôture. Board session 13 archivé ([board-session13-P2M4.md](../.absolute-human/archive/board-session13-P2M4.md)). Prochaine tâche = **ouvrir la Phase 3** (gameplay : lifecycle/scheduler, physique, sérialisation, audio, streaming à l'horizon).
+**Point de reprise (2026-07-14, session 14)** : **P3-M1 clos** (double audit PASS, findings appliqués). Prochaine tâche = **P3-M2 — rendu GPU-driven** (slots persistants + cull compute + draw indirect), ou **P3-M0 — validation Linux/macOS** dès qu'une machine Linux est disponible (aujourd'hui indisponible côté humain).
 
 **Branche** : `phase2-foundations`. Commits P2-M4 : `12a07e3` (W0 Frustum+sphère+banc) · `7d9428a` (W1 origine quantifiée + ordre de frame + skybox origin-exact) · `c5b7da7` (W2 culling) · `458e017` (W3 radix + SortKey) · `99076c1` (W4 banc + AnimateDrawables) · `2827777` (durcissements audits : σ_max exact).
 
 **Séquencement Phase 3 recommandé (engine-architect)** — par dépendances et par ce que chaque jalon *prouve* :
 1. **P3-M0 — Validation Linux/macOS + durcissement du gate shutdown.** *En premier* : AOT et SPIR-V hors-ligne sont **prouvés Windows uniquement** ; « fondations cross-platform » est une hypothèse tant qu'un vrai Linux n'a pas tourné. Cheap, demi-jalon.
-2. **P3-M1 — Buffer d'instances persistant + les 2 dettes de culling** (bounds per-frame dirty-tracké + cull des casters contre le frustum caméra extrudé). Paiement direct de l'origine quantifiée, rendu pur, rembourse la dette perf de M4.
-3. **P3-M2 — Cycle de vie d'entités (`Despawn`, `Parent` pendant) + scheduler de systèmes minimal.** Le substrat du gameplay.
+2. ~~**P3-M1 — Instancing + les 2 dettes de culling**~~ ✅ **clos** (session 14, voir plus haut).
+3. **P3-M2 — Rendu GPU-driven** (slots persistants dirty-trackés, cull compute, draw indirect) **+ scheduler de systèmes minimal** (l'ordre de frame doit quitter le Sandbox) et cycle de vie d'entités (`Despawn`, `Parent` pendant).
 4. **P3-M3 — Physique** (dépend de : origine quantifiée ✓, lifecycle, bounds per-frame).
 5. **P3-M4 — Sérialisation source-gen** (partage le générateur du rooting ; parallélisable). **Audio** en dernier / opportuniste.
 
 **Dette léguée par la Phase 2 (détail : board S13), par « quand ça mord »** :
-- 🔴 **`AggregateBounds` plié une fois → périmé dès qu'une entité TRANSLATE** (le banc survit « par chance de géométrie », le spin ne déplace pas les centres). À corriger **avant la physique** — sinon `FitSceneSphere`/`UpstreamExtent` deviennent faux → clipping d'ombre (celui que M3 a corrigé) ou cadrage faux.
-- 🔴 **Cull du volume de lumière conservateur** (tous casters gardés sur scène plate) → resserrer via le frustum caméra extrudé le long de −lightDir (sans faux négatif) ; CSM = vrai correctif plus tard.
+- ~~🔴 `AggregateBounds` plié une fois~~ ✅ **soldé en P3-M1** (recalcul par frame ; reste à sortir l'ordre de frame du Sandbox → scheduler).
+- ~~🔴 Cull du volume de lumière conservateur~~ ✅ **soldé en P3-M1** (`ExtrudedShadowFrustum` ANDé au volume de lumière ; CSM = vrai correctif plus tard).
 - 🔴 **Linux/macOS jamais validés** (AOT + SPIR-V hors-ligne Windows-only) — premier item P3.
 - 🟠 `SortKey` sans profondeur (pas de front-to-back opaque ; transparence future **fausse** sans tri profondeur) · déterminisme du tri exige `(matériau, RenderOrder)` globalement unique · propagation O(n·d) déférée (hiérarchies profondes) · pas d'API `Despawn`.
 - 🟡 `AssertOwnerThread` Debug-only vs futur job system · **crash shutdown Silk.NET reproductible** (`AGAPANTHE_UNLOAD_TEST=20`, ~2/10, après le rapport propre — garder le gate CI keyé sur la ligne de rapport, pas l'exit code) · pas d'assertion CI du critère de sortie.

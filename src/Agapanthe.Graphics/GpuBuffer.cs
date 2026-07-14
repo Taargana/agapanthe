@@ -120,7 +120,9 @@ public sealed unsafe class GpuBuffer : IDisposable
                 "Write<T> is only valid on a host-visible buffer; use the staging upload path for device-local memory.");
         }
 
-        var bytes = (ulong)(data.Length * Unsafe.SizeOf<T>());
+        // 64-bit multiply: a span of > 2 GiB worth of elements would overflow an int product and report a nonsense
+        // size (the check below would still reject it, with an absurd message).
+        var bytes = (ulong)((long)data.Length * Unsafe.SizeOf<T>());
         if (bytes > SizeBytes)
         {
             throw new GraphicsException($"Write of {bytes} bytes exceeds buffer size {SizeBytes}.");

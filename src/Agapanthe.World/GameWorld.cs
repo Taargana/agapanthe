@@ -353,16 +353,20 @@ public sealed class GameWorld : IDisposable
                 // Sort key: material then mesh in the high bits (so a sorted run shares one (material, mesh) pair =
                 // one instanced draw, P3-M1), the stable RenderOrder in the low bits as the deterministic tie-break
                 // (spec §6 condition b — Arch's chunk order is not stable).
-                var key = RenderItem.ComposeSortKey(meshes[i].Material.Index, meshes[i].Mesh.Index, orders[i].Value);
-                var item = new RenderItem(model, meshes[i].Mesh, meshes[i].Material, key);
                 if (inCamera)
                 {
-                    render.Add(item);
+                    var key = RenderItem.ComposeSortKey(
+                        meshes[i].Material.Index, meshes[i].Mesh.Index, orders[i].Value);
+                    render.Add(new RenderItem(model, meshes[i].Mesh, meshes[i].Material, key));
                 }
 
                 if (inLight)
                 {
-                    shadowCasters.Add(item);
+                    // The depth pass binds no material, so the caster list is keyed MESH-major: one contiguous run
+                    // (= one instanced depth draw) per mesh, even when several materials share it.
+                    var shadowKey = RenderItem.ComposeShadowSortKey(
+                        meshes[i].Mesh.Index, meshes[i].Material.Index, orders[i].Value);
+                    shadowCasters.Add(new RenderItem(model, meshes[i].Mesh, meshes[i].Material, shadowKey));
                 }
             }
         }
