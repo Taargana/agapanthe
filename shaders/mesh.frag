@@ -183,14 +183,31 @@ float directionalShadow(vec3 wp) {
 
     float reference = ndc.z;
     vec2 texel = 1.0 / vec2(textureSize(shadowMap, 0));
+
+    // 5x5 PCF, bilinearly weighted per tap. Two things fix the stair-stepped edge a plain 3x3 leaves behind: the
+    // wider kernel gives 26 penumbra levels instead of 10, and weighting each tap by its bilinear coverage of the
+    // sample point (rather than averaging 25 equal binary results) makes the transition continuous as the shadow
+    // slides across a texel — a nearest-sampled binary compare cannot be smoothed any other way, because the
+    // sampler must not blend raw depths before the comparison.
+    vec2 texelPos = uv / texel - 0.5;
+    vec2 frac = fract(texelPos);
+    vec2 base = (floor(texelPos) + 0.5) * texel;
+
     float sum = 0.0;
-    for (int y = -1; y <= 1; ++y) {
-        for (int x = -1; x <= 1; ++x) {
-            float stored = texture(shadowMap, uv + vec2(x, y) * texel).r;
-            sum += reference <= stored ? 1.0 : 0.0;
+    float weightSum = 0.0;
+    for (int y = -2; y <= 2; ++y) {
+        for (int x = -2; x <= 2; ++x) {
+            vec2 offset = vec2(x, y);
+            // Bilinear coverage of this tap: 1 at the sample point, falling to 0 one texel away.
+            vec2 w = max(vec2(0.0), 1.0 - abs(offset - frac));
+            float weight = w.x * w.y + 0.25; // + a flat floor so the outer taps still soften the edge
+            float stored = texture(shadowMap, base + offset * texel).r;
+            sum += weight * (reference <= stored ? 1.0 : 0.0);
+            weightSum += weight;
         }
     }
-    return sum / 9.0;
+
+    return sum / weightSum;
 }
 
 void main() {

@@ -1,5 +1,6 @@
 using System.Numerics;
 using Agapanthe.Assets;
+using Agapanthe.Assets.Model;
 using Agapanthe.Core;
 using Agapanthe.Graphics;
 using Agapanthe.Platform;
@@ -65,6 +66,7 @@ var resizePending = false;
 // the per-frame cull cost + visible/total counts + allocation delta are logged every BenchLogEvery frames. Pair
 // it with AGAPANTHE_SCENE=grid:100x100 for the 10 000-entity exit-criterion run.
 var benchMode = Environment.GetEnvironmentVariable("AGAPANTHE_CULL_STATS") is { Length: > 0 };
+var inputDebug = Environment.GetEnvironmentVariable("AGAPANTHE_INPUT_DEBUG") is { Length: > 0 };
 const int BenchLogEvery = 60;
 var benchFrame = 0;
 long benchTicks = 0;
@@ -97,6 +99,9 @@ window.Loaded += () =>
     // Renderer owns the mesh pipeline, both descriptor set layouts, the material allocator and the
     // per-frame camera UBOs. It exposes MaterialAllocator/MaterialSetLayout for the SceneBuilder.
     renderer = new Renderer(device, swapchain, shaderDir);
+    // Half a stop under 1: the studio HDRI is bright enough that at exposure 1 the backdrop and the ground both
+    // clip to white and every shadow drowns. (+/- still moves it in thirds of a stop at runtime.)
+    renderer.Exposure = 0.5f;
 
     // Load the model to CPU DTOs (no GPU dependency), then upload it into a GPU-resident Scene.
     var model = GltfLoader.Load(modelPath);
@@ -127,6 +132,21 @@ window.Loaded += () =>
     }
 
     var worldOrigin = ParseDouble3(Environment.GetEnvironmentVariable("AGAPANTHE_WORLD_ORIGIN"));
+
+    // A double's ULP grows with magnitude: at 1e15 m it is ~0.125 m, which is LARGER than a walking step — the
+    // camera then refuses to move along that axis, silently, because the step rounds straight back to where it
+    // started. (That is the same wall the FLOAT position hit at 1e7 m, and the reason positions are double at all;
+    // double just moves it out by 8 orders of magnitude, it does not remove it.) Beyond ~1e12 m the movement is
+    // visibly quantized, so say so rather than let it look like a broken strafe.
+    var originReach = Math.Max(Math.Max(Math.Abs(worldOrigin.X), Math.Abs(worldOrigin.Y)), Math.Abs(worldOrigin.Z));
+    if (originReach > 1e12)
+    {
+        Log.Warn(
+            $"Sandbox: AGAPANTHE_WORLD_ORIGIN is {originReach:0.###e+00} m out — a double's step there is " +
+            $"~{Math.BitIncrement(originReach) - originReach:F3} m, so camera movement will be quantized or drop " +
+            "entirely on the large axes. Fine for a precision capture; unusable for flying around.");
+    }
+
     var (modelId, specs) = registry.Load(
         device, model, renderer.MaterialSetLayout, worldOrigin);
 
@@ -178,25 +198,78 @@ window.Loaded += () =>
         renderer.ShadowDistance = camera.Far;
     }
 
+    // A GROUND to catch the shadows. Without it the model floats in the HDRI and the only shadow receiver is the
+    // model itself: shadow quality, shadow crawl and the whole shadow-fit path are then impossible to SEE — the
+    // P3-M1 visual check ran straight into that. A plain lit quad, sized to what is in the scene (the model, or the
+    // 100×100 bench grid) and sitting just under it, uploaded through the normal model path — it is a ModelAsset
+    // like any other, so it costs no new engine API. Spawned AFTER the framing so the camera still frames the
+    // MODEL, not the (much larger) floor. AGAPANTHE_GROUND=0 removes it, which is what the precision captures want
+    // (they compare against pre-ground baselines).
+    var groundSpawned = false;
+    if (Environment.GetEnvironmentVariable("AGAPANTHE_GROUND") is not "0" && !sceneBounds.IsEmpty)
+    {
+        var extent = sceneBounds.Max - sceneBounds.Min;
+        var span = Math.Max(Math.Max(extent.X, extent.Z), 1e-3);
+        // Wide enough that its edges leave the frame: a small slab floating in the sky reads as a platform, not as
+        // ground. Clears the bench grid too (span already spans it).
+        var groundSize = (float)Math.Max((span * 2.5) + (extent.Y * 8.0), 40.0);
+        var groundOrigin = new Double3(
+            (sceneBounds.Min.X + sceneBounds.Max.X) * 0.5,
+            sceneBounds.Min.Y - (extent.Y * 0.02) - 0.01, // just under the lowest geometry, never intersecting it
+            (sceneBounds.Min.Z + sceneBounds.Max.Z) * 0.5);
+
+        var (_, groundSpecs) = registry.Load(
+            device, BuildGroundModel(groundSize), renderer.MaterialSetLayout, groundOrigin);
+        foreach (var spec in groundSpecs)
+        {
+            world.SpawnImported(in spec);
+        }
+
+        // The ground IS part of the scene from here on: the light placement and the shadow fit must see it.
+        sceneBounds = world.AggregateBounds();
+        groundSpawned = true;
+        Log.Info(
+            $"Sandbox: [scene] ground plane {groundSize:F1} m at y={groundOrigin.Y:F2} " +
+            "(AGAPANTHE_GROUND=0 to remove).");
+    }
+
     // Default M5 lighting: a warm directional key (sun) plus a cool rim and a soft fill point
     // light placed from the scene bounds — a classic 3-point setup that reads PBR materials
     // well. HDR intensities (> 1) are expected; the ACES tonemap compresses them.
     SetupLights(renderer.Lights, in sceneBounds);
 
-    // Load the HDRI environment and generate IBL (M7). The renderer needs an environment before it can draw
-    // (the ambient and skybox both sample it). Default is the fixture copied into models/ next to the
-    // executable; AGAPANTHE_HDRI=<path> swaps in any other equirectangular .hdr.
-    var iblHdrPath = Environment.GetEnvironmentVariable("AGAPANTHE_HDRI") is { Length: > 0 } hdriOverride
-        ? hdriOverride
-        : Path.Combine(modelsDir, "studio_small_1k.hdr");
-    if (File.Exists(iblHdrPath))
+    // The environment (M7): the renderer needs one before it can draw — the ambient and the skybox both sample it.
+    // AGAPANTHE_HDRI=<path> always wins. Otherwise: with the ground on, an OUTDOOR sky, generated procedurally; with
+    // AGAPANTHE_GROUND=0, the studio HDRI fixture, which is what the material/IBL captures have always used.
+    // <para>
+    // Why not the studio HDRI over grass: it is an INDOOR probe, with dark walls a few metres left and right. A
+    // skybox sits at infinity, so those walls never recede however far you fly — the scene reads as a corridor you
+    // cannot leave. An open sky removes the walls and, being physically consistent with the sun, also lights the
+    // ground the way the shadow expects.
+    // </para>
+    var hdriOverride = Environment.GetEnvironmentVariable("AGAPANTHE_HDRI");
+    if (hdriOverride is { Length: > 0 } && File.Exists(hdriOverride))
     {
-        renderer.SetEnvironment(HdrImageLoader.Load(iblHdrPath));
-        Log.Info($"Sandbox: environment '{iblHdrPath}'.");
+        renderer.SetEnvironment(HdrImageLoader.Load(hdriOverride));
+        Log.Info($"Sandbox: environment '{hdriOverride}'.");
+    }
+    else if (groundSpawned)
+    {
+        renderer.SetEnvironment(BuildSkyEnvironment(renderer.Lights.Directional.Direction));
+        Log.Info("Sandbox: environment = procedural outdoor sky (AGAPANTHE_HDRI=<path.hdr> to override).");
     }
     else
     {
-        Log.Error($"Sandbox: HDRI environment '{iblHdrPath}' not found; the M7 renderer requires one to draw.");
+        var iblHdrPath = Path.Combine(modelsDir, "studio_small_1k.hdr");
+        if (File.Exists(iblHdrPath))
+        {
+            renderer.SetEnvironment(HdrImageLoader.Load(iblHdrPath));
+            Log.Info($"Sandbox: environment '{iblHdrPath}'.");
+        }
+        else
+        {
+            Log.Error($"Sandbox: HDRI environment '{iblHdrPath}' not found; the M7 renderer requires one to draw.");
+        }
     }
 
     // The scene clear color lives on the Renderer now (it owns the scene pass); the FrameRenderer only
@@ -373,17 +446,40 @@ window.Updated += dt =>
         return;
     }
 
+    // GLFW reports keys by their US-QWERTY POSITION, so on an AZERTY keyboard the physical W/A keys are the ones
+    // engraved Z/Q. Accept both spellings (and the arrow keys) so the camera moves whatever the layout.
     var input = new CameraInput(
-        moveForward: window.IsKeyDown(Key.W),
-        moveBackward: window.IsKeyDown(Key.S),
-        moveLeft: window.IsKeyDown(Key.A),
-        moveRight: window.IsKeyDown(Key.D),
+        moveForward: window.IsKeyDown(Key.W) || window.IsKeyDown(Key.Z) || window.IsKeyDown(Key.Up),
+        moveBackward: window.IsKeyDown(Key.S) || window.IsKeyDown(Key.Down),
+        moveLeft: window.IsKeyDown(Key.A) || window.IsKeyDown(Key.Q) || window.IsKeyDown(Key.Left),
+        moveRight: window.IsKeyDown(Key.D) || window.IsKeyDown(Key.Right),
         moveUp: window.IsKeyDown(Key.Space),
         // ControlLeft is intercepted by macOS in some setups (Ctrl+click = right click), so C
         // doubles as the descend key.
         moveDown: window.IsKeyDown(Key.ControlLeft) || window.IsKeyDown(Key.C),
         lookDelta: window.MouseDelta,
         sprint: window.IsKeyDown(Key.ShiftLeft));
+
+    // AGAPANTHE_INPUT_DEBUG=1 logs what the window actually reports and what the camera actually does with it —
+    // the only way to tell "the key never arrived" from "the movement was computed wrong", which no capture and no
+    // unit test can distinguish (the controller itself is covered: CameraTests.Controller_Strafe_*).
+    if (inputDebug)
+    {
+        var before = camera.Position;
+        controller.Update(camera, (float)dt, in input);
+        var delta = camera.Position - before;
+        if (input.MoveForward || input.MoveBackward || input.MoveLeft || input.MoveRight
+            || input.MoveUp || input.MoveDown)
+        {
+            Log.Info(
+                $"[input] fwd={input.MoveForward} back={input.MoveBackward} left={input.MoveLeft} " +
+                $"right={input.MoveRight} | right-axis={camera.Right} forward-axis={camera.Forward} " +
+                $"| delta=({delta.X:F3}, {delta.Y:F3}, {delta.Z:F3})");
+        }
+
+        return;
+    }
+
     controller.Update(camera, (float)dt, in input);
 };
 
@@ -669,6 +765,228 @@ static double ModelDiagonal(ImportedEntitySpec[] specs)
     return Math.Max(Double3.Distance(min, max), 1d);
 }
 
+// A grass-covered ground quad in the X/Z plane, centred on its own local origin (its world position comes from the
+// worldOrigin handed to ResourceRegistry.Load). Wound counter-clockwise seen from above (glTF convention),
+// normal +Y, UVs tiled so one texture repeat covers ~2 m however large the quad is.
+// <para>
+// No new shader and no new pipeline: the grass is a procedural TEXTURE fed through the existing PBR material path,
+// so the ground is a ModelAsset like any other. A flat grey floor was the first attempt and it was useless — the
+// studio HDRI blows it out to white and the shadow drowns in it. Grass gives the two things a shadow needs to be
+// readable: a dark, non-metallic, fully rough albedo, and fine high-frequency detail whose edges make shadow crawl
+// visible at a glance.
+// </para>
+static ModelAsset BuildGroundModel(float size)
+{
+    var h = size * 0.5f;
+    var tiles = MathF.Max(size / 2f, 1f); // one grass tile ≈ 2 m of ground
+    var mesh = new MeshAsset
+    {
+        Positions = [new(-h, 0f, -h), new(h, 0f, -h), new(h, 0f, h), new(-h, 0f, h)],
+        Normals = [Vector3.UnitY, Vector3.UnitY, Vector3.UnitY, Vector3.UnitY],
+        Uvs = [new(0f, 0f), new(tiles, 0f), new(tiles, tiles), new(0f, tiles)],
+        Indices = [0, 2, 1, 0, 3, 2],
+        MaterialIndex = 0,
+        Name = "Ground",
+    };
+
+    var material = new MaterialAsset
+    {
+        BaseColorFactor = Vector4.One, // the colour lives in the texture
+        BaseColorImage = 0,
+        MetallicFactor = 0f,
+        RoughnessFactor = 1f,
+        Name = "GrassMaterial",
+    };
+
+    return new ModelAsset
+    {
+        Meshes = [mesh],
+        Materials = [material],
+        Images = [BuildGrassImage()],
+        Name = "Ground",
+    };
+}
+
+// An outdoor sky as an equirectangular HDR, generated at load — no asset to ship, and physically consistent with
+// the sun the scene actually uses (<paramref name="sunDirection"/> is the light's propagation direction, so the sun
+// disc goes at -sunDirection). Linear radiance, values well above 1 around the sun: that is what makes the IBL read
+// as daylight rather than as a flat grey dome.
+// <para>
+// Layout matches HdrImageLoader's equirect convention: u wraps azimuth, v goes top (zenith, v=0) to bottom (nadir).
+// The lower hemisphere is a dim, desaturated bounce — no second ground, just enough to keep undersides from reading
+// as a void.
+// </para>
+static HdrImageAsset BuildSkyEnvironment(Vector3 sunDirection)
+{
+    const int Width = 512;
+    const int Height = 256;
+    var pixels = new float[Width * Height * 4];
+
+    var sun = sunDirection.LengthSquared() > 1e-8f
+        ? Vector3.Normalize(-sunDirection) // toward the sun
+        : Vector3.UnitY;
+
+    var zenith = new Vector3(0.10f, 0.24f, 0.68f);
+    var horizon = new Vector3(0.66f, 0.76f, 0.92f);
+    // Below the horizon the environment must READ as the grass continuing to the horizon, not as a grey wall the
+    // scene is boxed in by — that grey band is exactly what made the studio probe feel like a corridor.
+    var distantGround = new Vector3(0.10f, 0.17f, 0.06f);
+
+    for (var y = 0; y < Height; y++)
+    {
+        // v in [0,1] → polar angle [0, pi]; the direction is the unit vector that pixel looks at.
+        var theta = (y + 0.5f) / Height * MathF.PI;
+        var sinTheta = MathF.Sin(theta);
+        var cosTheta = MathF.Cos(theta); // +1 at the zenith, -1 at the nadir
+
+        for (var x = 0; x < Width; x++)
+        {
+            var phi = ((x + 0.5f) / Width * 2f * MathF.PI) - MathF.PI;
+            var dir = new Vector3(sinTheta * MathF.Sin(phi), cosTheta, -sinTheta * MathF.Cos(phi));
+
+            Vector3 color;
+            if (cosTheta >= 0f)
+            {
+                // Sky: zenith → horizon, biased so most of the gradient sits near the horizon (as in reality).
+                var t = MathF.Pow(1f - cosTheta, 2.5f);
+                color = Vector3.Lerp(zenith, horizon, t) * 1.6f;
+            }
+            else
+            {
+                // Below the horizon: distant grass, hazed toward the horizon line and darkening toward the nadir.
+                var t = MathF.Pow(1f + cosTheta, 0.6f); // 1 at the horizon, 0 straight down
+                color = Vector3.Lerp(distantGround * 0.55f, Vector3.Lerp(distantGround, horizon, 0.35f), t);
+            }
+
+            // Sun: a small bright disc with a soft glow around it. Radiance far above 1 — this is the HDR part, and
+            // what gives the specular highlights their punch.
+            var cosToSun = Vector3.Dot(dir, sun);
+            if (cosToSun > 0.9986f) // ≈ 3° disc, a few times the real sun for a usable highlight
+            {
+                color += new Vector3(120f, 112f, 96f);
+            }
+            else if (cosToSun > 0.9f)
+            {
+                var glow = MathF.Pow((cosToSun - 0.9f) / 0.0986f, 4f);
+                color += new Vector3(6f, 5.4f, 4.4f) * glow;
+            }
+
+            var o = (((y * Width) + x) * 4);
+            pixels[o + 0] = color.X;
+            pixels[o + 1] = color.Y;
+            pixels[o + 2] = color.Z;
+            pixels[o + 3] = 1f;
+        }
+    }
+
+    return new HdrImageAsset { RgbaPixels = pixels, Width = Width, Height = Height };
+}
+
+// A seamless, tileable grass albedo, generated once at load (256², sRGB). Deterministic (fixed seed) so captures
+// stay reproducible. Two layers, both wrapped modulo the texture size so the tile has no seam: a soft patchy
+// variation (clumps of lighter/darker grass) and thousands of short blades drawn as 1-pixel-wide strokes leaning
+// in varied directions. Dark and desaturated on purpose — a bright floor clips under the studio HDRI and swallows
+// the shadow this ground exists to show.
+static ImageAsset BuildGrassImage()
+{
+    const int Size = 256;
+    var pixels = new byte[Size * Size * 4];
+    var rng = new Random(1337);
+
+    // Base: a dark green with low-frequency patchiness. The "clumps" are a handful of Gaussian-ish blobs summed
+    // into a scalar field, cheap and seamless because every distance is taken modulo the tile.
+    Span<(float X, float Y, float Amp, float Radius)> clumps = stackalloc (float, float, float, float)[24];
+    for (var i = 0; i < clumps.Length; i++)
+    {
+        clumps[i] = (
+            (float)rng.NextDouble() * Size,
+            (float)rng.NextDouble() * Size,
+            ((float)rng.NextDouble() * 2f) - 1f,
+            20f + ((float)rng.NextDouble() * 50f));
+    }
+
+    for (var y = 0; y < Size; y++)
+    {
+        for (var x = 0; x < Size; x++)
+        {
+            var patch = 0f;
+            foreach (var c in clumps)
+            {
+                var dx = WrappedDelta(x - c.X, Size);
+                var dy = WrappedDelta(y - c.Y, Size);
+                var d2 = ((dx * dx) + (dy * dy)) / (c.Radius * c.Radius);
+                patch += c.Amp * MathF.Exp(-d2);
+            }
+
+            var shade = Math.Clamp(0.5f + (patch * 0.22f), 0f, 1f);
+            // Lerp between a shaded, almost brown-green and a fresher green.
+            var r = 0.055f + (0.045f * shade);
+            var g = 0.13f + (0.16f * shade);
+            var b = 0.04f + (0.05f * shade);
+            WritePixel(pixels, x, y, Size, r, g, b);
+        }
+    }
+
+    // Blades: short strokes of a lighter or darker green, giving the high-frequency detail that makes a moving
+    // shadow edge legible. Drawn straight into the tile with wrapped coordinates, so they cross the seam cleanly.
+    for (var i = 0; i < 9000; i++)
+    {
+        var x0 = (float)rng.NextDouble() * Size;
+        var y0 = (float)rng.NextDouble() * Size;
+        var angle = ((float)rng.NextDouble() * MathF.PI) - (MathF.PI * 0.5f); // mostly upright, leaning either way
+        var length = 3f + ((float)rng.NextDouble() * 5f);
+        var tint = ((float)rng.NextDouble() * 2f) - 1f; // lighter or darker than the base
+        var dx = MathF.Sin(angle);
+        var dy = -MathF.Cos(angle);
+
+        for (var t = 0f; t < length; t += 0.5f)
+        {
+            var px = ((int)MathF.Round(x0 + (dx * t)) % Size + Size) % Size;
+            var py = ((int)MathF.Round(y0 + (dy * t)) % Size + Size) % Size;
+            var fade = 1f - (t / length); // the tip fades out
+            var r = 0.06f + (0.05f * tint * fade);
+            var g = 0.20f + (0.16f * tint * fade);
+            var b = 0.05f + (0.05f * tint * fade);
+            WritePixel(pixels, px, py, Size, MathF.Max(r, 0f), MathF.Max(g, 0f), MathF.Max(b, 0f));
+        }
+    }
+
+    return new ImageAsset { Rgba8Pixels = pixels, Width = Size, Height = Size, IsSrgb = true };
+
+    // The shortest signed distance on a wrapped axis: what makes the tile seamless.
+    static float WrappedDelta(float d, int size)
+    {
+        var half = size * 0.5f;
+        if (d > half)
+        {
+            d -= size;
+        }
+        else if (d < -half)
+        {
+            d += size;
+        }
+
+        return d;
+    }
+
+    // Linear colour in, sRGB byte out — the image is declared sRGB, so the encode must happen here.
+    static void WritePixel(byte[] pixels, int x, int y, int size, float r, float g, float b)
+    {
+        var o = ((y * size) + x) * 4;
+        pixels[o + 0] = LinearToSrgb(r);
+        pixels[o + 1] = LinearToSrgb(g);
+        pixels[o + 2] = LinearToSrgb(b);
+        pixels[o + 3] = 255;
+    }
+
+    static byte LinearToSrgb(float c)
+    {
+        c = Math.Clamp(c, 0f, 1f);
+        var s = c <= 0.0031308f ? c * 12.92f : (1.055f * MathF.Pow(c, 1f / 2.4f)) - 0.055f;
+        return (byte)Math.Clamp(MathF.Round(s * 255f), 0f, 255f);
+    }
+}
+
 // Spawns rows×cols copies of the model, centred on the base position, spaced on the X/Z plane. Each cell offsets
 // every spec's position and bumps its draw order so the whole grid has unique, deterministic SortKeys.
 static void SpawnGrid(GameWorld world, ImportedEntitySpec[] specs, int rows, int cols, double spacing)
@@ -716,7 +1034,10 @@ static void SetupLights(SceneLights lights, in Double3Bounds bounds)
     {
         Direction = new Vector3(0.4f, -0.7f, -0.6f), // down, slightly right, toward the model front
         Color = new Vector3(1f, 0.96f, 0.9f),        // warm sun
-        Intensity = 3f,
+        // The sun must DOMINATE the studio HDRI's ambient, or its shadow is a faint smudge on the ground and the
+        // whole shadow path (fit, crawl, caster cull) is unreadable — at intensity 3 it was. Paired with the
+        // sub-1 exposure below, which keeps the bright HDRI backdrop from clipping to white.
+        Intensity = 12f,
     };
     lights.Points[0] = new PointLight
     {

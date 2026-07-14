@@ -48,8 +48,13 @@ public sealed class Renderer : IDisposable
     /// <summary>
     /// Directional shadow-map side in texels (architect decision 9). Square, D32, created once at construction
     /// and invariant to swapchain resize (it is <b>not</b> an <see cref="EnsureTargets"/> attachment).
+    /// <para>
+    /// 4096 since the Sandbox grew a ground plane: a shadow is only as sharp as its texels are small, and a fit
+    /// that must span a floor rather than a single model spreads the map over metres. 64 MiB of D32 buys back the
+    /// texel density (a single cascade; CSM is the real answer when the world gets large).
+    /// </para>
     /// </summary>
-    public const uint ShadowMapResolution = 2048;
+    public const uint ShadowMapResolution = 4096;
 
     // Slope-scaled depth bias for the shadow pass, retained from M6 capture tuning (see the type remarks and
     // the M6-03 write-up). Constant fights the flat-surface acne floor; slope handles grazing-angle acne where

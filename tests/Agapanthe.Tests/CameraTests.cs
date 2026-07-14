@@ -152,6 +152,43 @@ public class CameraTests
     }
 
     [Fact]
+    public void Controller_Strafe_MovesSideways_NotForwards()
+    {
+        // The reported bug: pressing A/D drifted the camera forwards/backwards instead of strafing. Strafe must move
+        // along the camera's Right and NOTHING else — including when the camera is pitched, which is how the sample
+        // frames a model (Right stays horizontal, so a pitched camera still strafes level).
+        foreach (var pitch in new[] { 0f, -0.3f, 0.5f })
+        {
+            var right = new Camera { Position = Double3.Zero, Pitch = pitch };
+            new FreeCameraController { MoveSpeed = 10f }.Update(
+                right, 1f, new CameraInput(false, false, false, true, false, false, Vector2.Zero));
+
+            Assert.Equal(10d, right.Position.X, 4);  // straight along +X
+            Assert.Equal(0d, right.Position.Y, 4);
+            Assert.Equal(0d, right.Position.Z, 4);   // no forward/backward drift — the bug
+
+            var left = new Camera { Position = Double3.Zero, Pitch = pitch };
+            new FreeCameraController { MoveSpeed = 10f }.Update(
+                left, 1f, new CameraInput(false, false, true, false, false, false, Vector2.Zero));
+
+            Assert.Equal(-10d, left.Position.X, 4);
+            Assert.Equal(0d, left.Position.Z, 4);
+        }
+    }
+
+    [Fact]
+    public void Controller_Strafe_FollowsYaw()
+    {
+        // Yawed 90° (looking down +X), strafing right must go toward +Z.
+        var camera = new Camera { Position = Double3.Zero, Yaw = MathF.PI / 2f };
+        new FreeCameraController { MoveSpeed = 10f }.Update(
+            camera, 1f, new CameraInput(false, false, false, true, false, false, Vector2.Zero));
+
+        Assert.Equal(10d, camera.Position.Z, 4);
+        Assert.Equal(0d, camera.Position.X, 4);
+    }
+
+    [Fact]
     public void Controller_DiagonalMovement_IsNormalizedToConstantSpeed()
     {
         var camera = new Camera { Position = Double3.Zero };
