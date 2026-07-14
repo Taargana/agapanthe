@@ -88,9 +88,10 @@ public sealed class RenderingDataTests
         Assert.Equal(SamplerFilter.Linear, desc.Filter);
         Assert.Equal(SamplerFilter.Linear, desc.MipFilter);
         Assert.Equal(SamplerAddressMode.Repeat, desc.AddressMode);
-        // M5: material samplers request 8x anisotropy; the device clamps to its limit and falls
-        // back to isotropic when the feature is unsupported.
-        Assert.Equal(8f, desc.MaxAnisotropy);
+        // Material samplers request 16x anisotropy (raised from 8 when the Sandbox grew a ground plane: a grazing
+        // ground is the worst case for minification, and 16x is free on any modern GPU). The device clamps to its
+        // limit and falls back to isotropic when the feature is unsupported.
+        Assert.Equal(16f, desc.MaxAnisotropy);
     }
 
     [Fact]

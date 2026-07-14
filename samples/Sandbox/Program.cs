@@ -778,7 +778,10 @@ static double ModelDiagonal(ImportedEntitySpec[] specs)
 static ModelAsset BuildGroundModel(float size)
 {
     var h = size * 0.5f;
-    var tiles = MathF.Max(size / 2f, 1f); // one grass tile ≈ 2 m of ground
+    // One grass tile ≈ 4 m of ground. Tiling it tighter (2 m) put ~20 repeats across the quad, and at a grazing
+    // angle that many repeats of a fine texture beat against the pixel grid — the moiré "grid" the first version
+    // showed. Fewer, larger repeats keep the minification gentle.
+    var tiles = MathF.Max(size / 4f, 1f);
     var mesh = new MeshAsset
     {
         Positions = [new(-h, 0f, -h), new(h, 0f, -h), new(h, 0f, h), new(-h, 0f, h)],
@@ -882,19 +885,23 @@ static HdrImageAsset BuildSkyEnvironment(Vector3 sunDirection)
     return new HdrImageAsset { RgbaPixels = pixels, Width = Width, Height = Height };
 }
 
-// A seamless, tileable grass albedo, generated once at load (256², sRGB). Deterministic (fixed seed) so captures
-// stay reproducible. Two layers, both wrapped modulo the texture size so the tile has no seam: a soft patchy
-// variation (clumps of lighter/darker grass) and thousands of short blades drawn as 1-pixel-wide strokes leaning
-// in varied directions. Dark and desaturated on purpose — a bright floor clips under the studio HDRI and swallows
-// the shadow this ground exists to show.
+// A seamless, tileable grass albedo, generated once at load (512², sRGB, fixed seed so captures stay reproducible).
+// <para>
+// The first version drew 1-pixel blades into an 8-bit buffer at 256²: viewed at a grazing angle, that much
+// high-frequency detail beats against the pixel grid and the ground reads as a MOIRÉ GRID — no amount of anisotropic
+// filtering saves a texture whose detail is finer than a texel of its own mip chain. This version is built to
+// minify gracefully: it accumulates in LINEAR float, splats each blade with a soft (anti-aliased) footprint rather
+// than a hard pixel, keeps the blade/base contrast modest, and finishes with a small wrapped blur so the finest
+// frequencies are gone before the mip chain is ever built.
+// </para>
 static ImageAsset BuildGrassImage()
 {
-    const int Size = 256;
-    var pixels = new byte[Size * Size * 4];
+    const int Size = 512;
+    var linear = new float[Size * Size * 3];
     var rng = new Random(1337);
 
-    // Base: a dark green with low-frequency patchiness. The "clumps" are a handful of Gaussian-ish blobs summed
-    // into a scalar field, cheap and seamless because every distance is taken modulo the tile.
+    // Base: dark green with low-frequency patchiness. The clumps are Gaussian blobs summed into a scalar field,
+    // seamless because every distance is taken modulo the tile.
     Span<(float X, float Y, float Amp, float Radius)> clumps = stackalloc (float, float, float, float)[24];
     for (var i = 0; i < clumps.Length; i++)
     {
@@ -902,7 +909,7 @@ static ImageAsset BuildGrassImage()
             (float)rng.NextDouble() * Size,
             (float)rng.NextDouble() * Size,
             ((float)rng.NextDouble() * 2f) - 1f,
-            20f + ((float)rng.NextDouble() * 50f));
+            40f + ((float)rng.NextDouble() * 100f));
     }
 
     for (var y = 0; y < Size; y++)
@@ -919,39 +926,97 @@ static ImageAsset BuildGrassImage()
             }
 
             var shade = Math.Clamp(0.5f + (patch * 0.22f), 0f, 1f);
-            // Lerp between a shaded, almost brown-green and a fresher green.
-            var r = 0.055f + (0.045f * shade);
-            var g = 0.13f + (0.16f * shade);
-            var b = 0.04f + (0.05f * shade);
-            WritePixel(pixels, x, y, Size, r, g, b);
+            var o = (((y * Size) + x) * 3);
+            linear[o + 0] = 0.055f + (0.035f * shade);
+            linear[o + 1] = 0.135f + (0.12f * shade);
+            linear[o + 2] = 0.042f + (0.04f * shade);
         }
     }
 
-    // Blades: short strokes of a lighter or darker green, giving the high-frequency detail that makes a moving
-    // shadow edge legible. Drawn straight into the tile with wrapped coordinates, so they cross the seam cleanly.
-    for (var i = 0; i < 9000; i++)
+    // Blades: short strokes, splatted with a soft footprint so each one is anti-aliased instead of a hard pixel
+    // line. Modest tint (±20% of the base) — blades that fight the base colour are exactly what aliases.
+    for (var i = 0; i < 14000; i++)
     {
         var x0 = (float)rng.NextDouble() * Size;
         var y0 = (float)rng.NextDouble() * Size;
         var angle = ((float)rng.NextDouble() * MathF.PI) - (MathF.PI * 0.5f); // mostly upright, leaning either way
-        var length = 3f + ((float)rng.NextDouble() * 5f);
+        var length = 5f + ((float)rng.NextDouble() * 8f);
         var tint = ((float)rng.NextDouble() * 2f) - 1f; // lighter or darker than the base
         var dx = MathF.Sin(angle);
         var dy = -MathF.Cos(angle);
 
-        for (var t = 0f; t < length; t += 0.5f)
+        for (var t = 0f; t < length; t += 0.35f)
         {
-            var px = ((int)MathF.Round(x0 + (dx * t)) % Size + Size) % Size;
-            var py = ((int)MathF.Round(y0 + (dy * t)) % Size + Size) % Size;
-            var fade = 1f - (t / length); // the tip fades out
-            var r = 0.06f + (0.05f * tint * fade);
-            var g = 0.20f + (0.16f * tint * fade);
-            var b = 0.05f + (0.05f * tint * fade);
-            WritePixel(pixels, px, py, Size, MathF.Max(r, 0f), MathF.Max(g, 0f), MathF.Max(b, 0f));
+            var fade = (1f - (t / length)) * 0.2f; // the tip fades out; 0.2 caps the contrast
+            Splat(linear, Size, x0 + (dx * t), y0 + (dy * t), tint * fade);
         }
     }
 
+    Blur(linear, Size); // kills the last single-texel frequencies, which no mip level can represent
+
+    var pixels = new byte[Size * Size * 4];
+    for (var i = 0; i < Size * Size; i++)
+    {
+        pixels[(i * 4) + 0] = LinearToSrgb(linear[(i * 3) + 0]);
+        pixels[(i * 4) + 1] = LinearToSrgb(linear[(i * 3) + 1]);
+        pixels[(i * 4) + 2] = LinearToSrgb(linear[(i * 3) + 2]);
+        pixels[(i * 4) + 3] = 255;
+    }
+
     return new ImageAsset { Rgba8Pixels = pixels, Width = Size, Height = Size, IsSrgb = true };
+
+    // Adds `amount` (a relative brightening/darkening of the green) over the four texels the point straddles,
+    // weighted bilinearly — the blade gets sub-texel edges instead of a stair-stepped one.
+    static void Splat(float[] buffer, int size, float x, float y, float amount)
+    {
+        var ix = (int)MathF.Floor(x);
+        var iy = (int)MathF.Floor(y);
+        var fx = x - ix;
+        var fy = y - iy;
+
+        for (var j = 0; j <= 1; j++)
+        {
+            for (var i = 0; i <= 1; i++)
+            {
+                var w = (i == 0 ? 1f - fx : fx) * (j == 0 ? 1f - fy : fy);
+                var px = ((ix + i) % size + size) % size;
+                var py = ((iy + j) % size + size) % size;
+                var o = (((py * size) + px) * 3);
+                buffer[o + 0] = MathF.Max(0f, buffer[o + 0] * (1f + (amount * w)));
+                buffer[o + 1] = MathF.Max(0f, buffer[o + 1] * (1f + (amount * w * 1.4f)));
+                buffer[o + 2] = MathF.Max(0f, buffer[o + 2] * (1f + (amount * w)));
+            }
+        }
+    }
+
+    // A wrapped 3x3 box blur. Cheap, and it is what turns "detail the mip chain cannot represent" (which aliases)
+    // into "detail it can" (which filters).
+    static void Blur(float[] buffer, int size)
+    {
+        var source = (float[])buffer.Clone();
+        for (var y = 0; y < size; y++)
+        {
+            for (var x = 0; x < size; x++)
+            {
+                var o = (((y * size) + x) * 3);
+                for (var c = 0; c < 3; c++)
+                {
+                    var sum = 0f;
+                    for (var j = -1; j <= 1; j++)
+                    {
+                        for (var i = -1; i <= 1; i++)
+                        {
+                            var px = ((x + i) % size + size) % size;
+                            var py = ((y + j) % size + size) % size;
+                            sum += source[(((py * size) + px) * 3) + c];
+                        }
+                    }
+
+                    buffer[o + c] = sum / 9f;
+                }
+            }
+        }
+    }
 
     // The shortest signed distance on a wrapped axis: what makes the tile seamless.
     static float WrappedDelta(float d, int size)
@@ -970,15 +1035,6 @@ static ImageAsset BuildGrassImage()
     }
 
     // Linear colour in, sRGB byte out — the image is declared sRGB, so the encode must happen here.
-    static void WritePixel(byte[] pixels, int x, int y, int size, float r, float g, float b)
-    {
-        var o = ((y * size) + x) * 4;
-        pixels[o + 0] = LinearToSrgb(r);
-        pixels[o + 1] = LinearToSrgb(g);
-        pixels[o + 2] = LinearToSrgb(b);
-        pixels[o + 3] = 255;
-    }
-
     static byte LinearToSrgb(float c)
     {
         c = Math.Clamp(c, 0f, 1f);

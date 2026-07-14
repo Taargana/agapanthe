@@ -60,6 +60,14 @@ texels grossissent et le bord d'ombre marche en escalier (constaté session 14).
   Phase 1. Attention MoltenVK : pas de comparateur mutable.
 - *Mord : dès la première scène de gameplay avec un vrai terrain.*
 
+### 2.1bis PCSS — pénombre à largeur variable
+Le PCF actuel (5×5 pondéré) est une pénombre de **largeur fixe** : le seul réglage possible est « net mais cranté »
+(noyau étroit) ou « lisse mais mou » (noyau large). On a choisi le second. **PCSS** (*percentage-closer soft shadows*)
+sort du compromis : une première passe estime la distance entre le receveur et l'occulteur (*blocker search*), et la
+largeur du filtre en découle — bord **net au contact** (sous l'objet), flou quand l'ombre est loin de ce qui la
+projette. C'est ce que fait l'œil. À faire **avec ou après le CSM** (les deux partagent la sélection de cascade).
+*Mord : dès qu'un objet posé au sol doit avoir un contact crédible.*
+
 ### 2.2 Ombres analytiques planétaires
 Une planète éclairée par un soleil quasi ponctuel : la nuit, c'est `dot(N, L) < 0`. Le terminateur sort de la formule,
 à toute échelle, sans une seule texture. Les **éclipses** (lune → planète) : intersection rayon/sphère et cône d'ombre,
@@ -118,4 +126,8 @@ quantifiée (P2-M3/M4). Tenir en orbite à 400 km sans que les pixels tremblent,
   (fireflies possibles sur HDRI contrasté).
 - **Upload asynchrone** des assets (aujourd'hui synchrone au chargement).
 - **MikkTSpace** si des artefacts de normal mapping apparaissent.
+- **Aliasing de texture au rasant** : traité une fois (herbe du Sandbox — texture 512² accumulée en flottant, brins
+  splattés avec un footprint bilinéaire, flou final, aniso 16×). La règle générale à retenir : **une texture dont le
+  détail est plus fin qu'un texel de sa propre mip chain aliasera quoi qu'on filtre** — c'est à la génération/à
+  l'auteur de l'asset qu'on la corrige, pas au sampler.
 - **Sol du Sandbox** : plan unique aujourd'hui. Un vrai terrain (heightmap + LOD) est un prérequis du §2.3.

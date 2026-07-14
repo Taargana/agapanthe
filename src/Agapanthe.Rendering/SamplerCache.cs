@@ -62,7 +62,7 @@ public sealed class SamplerCache : IDisposable
         Filter: ToFilter(settings.MagFilter),
         MipFilter: ToFilter(settings.MinFilter),
         AddressMode: ToAddressMode(settings.WrapU),
-        MaxAnisotropy: 8f,
+        MaxAnisotropy: 16f, // grazing ground planes are the worst case; 16 is free on any modern GPU (clamped to the device limit)
         MipLodBias: 0f);
 
     private static SamplerFilter ToFilter(TextureFilter filter) => filter switch
