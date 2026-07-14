@@ -4,9 +4,10 @@ namespace Agapanthe.Rendering.Passes;
 
 /// <summary>
 /// Pass 0 (M6, decision 7): the directional shadow depth pass. Depth-only (no fragment shader, no color
-/// attachment), no descriptor set — <c>lightViewProj</c> (offset 0) and each mesh's world transform (offset
-/// 64) travel as 128 bytes of push constants. Slope-scaled depth bias fights acne. The pipeline is invariant
-/// to swapchain resize; the shadow map image itself stays owned by the <see cref="Renderer"/>.
+/// attachment). <c>lightViewProj</c> travels as a 64-byte push constant (offset 0); per-instance model matrices
+/// come from set 0 binding 0 (a storage buffer indexed by gl_InstanceIndex, P3-M1) so casters are drawn
+/// instanced. Slope-scaled depth bias fights acne. The pipeline is invariant to swapchain resize; the shadow map
+/// image itself stays owned by the <see cref="Renderer"/>.
 /// </summary>
 internal sealed class ShadowPass : ReloadablePass
 {
@@ -17,15 +18,18 @@ internal sealed class ShadowPass : ReloadablePass
         stride: 60,
         attributes: [new VertexAttribute(Location: 0, Offset: 0, PixelFormat.R32G32B32Sfloat)]);
 
+    private readonly DescriptorSetLayout _instanceSetLayout;
     private readonly PixelFormat _depthFormat;
     private readonly float _depthBiasConstant;
     private readonly float _depthBiasSlope;
 
     public ShadowPass(
         GraphicsDevice device, string shaderDirectory, ShaderCompiler compiler,
+        DescriptorSetLayout instanceSetLayout,
         PixelFormat depthFormat, float depthBiasConstant, float depthBiasSlope)
         : base(device, shaderDirectory, [("shadow.vert", ShaderStage.Vertex)])
     {
+        _instanceSetLayout = instanceSetLayout;
         _depthFormat = depthFormat;
         _depthBiasConstant = depthBiasConstant;
         _depthBiasSlope = depthBiasSlope;
@@ -38,8 +42,9 @@ internal sealed class ShadowPass : ReloadablePass
             VertexShader = modules[0],
             FragmentShader = null,
             VertexLayout = ShadowVertexLayout,
-            SetLayouts = [],
-            PushConstants = [new PushConstantRange(0, 128, ShaderStages.Vertex)],
+            // Set 0 = per-instance model matrices (P3-M1); lightViewProj stays a push constant (offset 0, 64 B).
+            SetLayouts = [_instanceSetLayout],
+            PushConstants = [new PushConstantRange(0, 64, ShaderStages.Vertex)],
             ColorFormat = PixelFormat.Undefined,
             DepthFormat = _depthFormat,
             DepthTest = true,

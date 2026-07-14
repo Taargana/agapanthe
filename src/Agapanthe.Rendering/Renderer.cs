@@ -147,6 +147,9 @@ public sealed class Renderer : IDisposable
     private IblResources? _iblResources;
     private DescriptorSetLayout? _skyboxSetLayout;
 
+    // Shadow pass set 0 (P3-M1): one storage buffer of per-instance model matrices, read in the vertex stage.
+    private DescriptorSetLayout? _shadowSetLayout;
+
     // The four reloadable passes as a stable array (built once), so PollShaderReload iterates them without
     // re-allocating the collection every frame. Same instances as the individual _xxxPass fields.
     private IReloadablePipeline[] _reloadablePasses = [];
@@ -274,8 +277,11 @@ public sealed class Renderer : IDisposable
             _scenePass = new ScenePass(
                 device, shaderDirectory, _shaderCompiler,
                 _frameSetLayout, _materialSetLayout, HdrFormat, DepthFormat);
+            _shadowSetLayout = new DescriptorSetLayout(
+                device,
+                [new DescriptorBinding(0, DescriptorKind.StorageBuffer, ShaderStages.Vertex)]);
             _shadowPass = new ShadowPass(
-                device, shaderDirectory, _shaderCompiler,
+                device, shaderDirectory, _shaderCompiler, _shadowSetLayout,
                 DepthFormat, ShadowDepthBiasConstant, ShadowDepthBiasSlope);
             _tonemapPass = new TonemapPass(
                 device, shaderDirectory, _shaderCompiler,
@@ -682,21 +688,23 @@ public sealed class Renderer : IDisposable
 
         // lightViewProj is computed by the caller (before the caster list is culled against the light volume) and
         // shared by the shadow pass (render depth) and the scene pass (pack into the lights UBO for the PCF lookup).
-        RecordShadowPass(cmd, shadowCasters, registry, in lightViewProj);
+        RecordShadowPass(cmd, frame, shadowCasters, registry, in lightViewProj);
         RecordScenePass(cmd, frame, renderList, registry, in view, target, in lightViewProj);
         RecordTonemapPass(cmd, frame, target);
     }
 
     /// <summary>
     /// Pass 0 (M6, decision 7): renders scene depth from the directional light's viewpoint into the shadow
-    /// map. Depth-only, no descriptor set — <paramref name="lightViewProj"/> (offset 0) and each mesh's world
-    /// transform (offset 64) are pushed as constants. The shadow map's WAR acquire mirrors the HDR target: the
-    /// first frame comes from Undefined, later frames from ShaderReadOnly (the previous frame's scene-pass
-    /// sample), so this depth write serializes after that read. loadOp=Clear(1.0), storeOp=Store because the
-    /// scene pass samples the result; a closing DepthAttachment→ShaderReadOnly barrier hands it over.
+    /// map. Depth-only; <paramref name="lightViewProj"/> is a push constant (offset 0) and per-instance model
+    /// matrices come from a compacted storage buffer (set 0, binding 0), so casters are drawn instanced (P3-M1).
+    /// The shadow map's WAR acquire mirrors the HDR target: the first frame comes from Undefined, later frames
+    /// from ShaderReadOnly (the previous frame's scene-pass sample), so this depth write serializes after that
+    /// read. loadOp=Clear(1.0), storeOp=Store because the scene pass samples the result; a closing
+    /// DepthAttachment→ShaderReadOnly barrier hands it over.
     /// </summary>
     private void RecordShadowPass(
-        CommandList cmd, RenderList shadowCasters, ResourceRegistry registry, in Matrix4x4 lightViewProj)
+        CommandList cmd, FrameContext frame, RenderList shadowCasters, ResourceRegistry registry,
+        in Matrix4x4 lightViewProj)
     {
         // RenderDoc/Nsight capture region for the whole pass (barriers + draws). No-op when debug utils is
         // off, so it stays on the per-frame path at zero cost; the name is a literal (no per-frame alloc).
@@ -727,21 +735,42 @@ public sealed class Renderer : IDisposable
         cmd.SetViewportScissor(ShadowMapResolution, ShadowMapResolution);
 
         cmd.BindPipeline(pipeline);
-        // lightViewProj is constant across the pass: push it once (offset 0), then per-instance model (offset 64).
+        // lightViewProj is constant across the pass: push it once (offset 0). Per-instance models come from the SSBO.
         cmd.PushConstants(pipeline, ShaderStages.Vertex, in lightViewProj, offsetBytes: 0);
 
-        // The caster list, in its stable sorted order (spec §6 condition b). In M2 it is a passthrough of every
-        // drawable; M4 culls it against the LIGHT volume (never the camera frustum — see spec §3.5).
+        // The caster list, in its stable sorted order (spec §6 condition b), culled against the LIGHT volume (never
+        // the camera frustum — spec §3.5). Compact its transforms into this slot's shadow SSBO, then point set 0 at
+        // it. The depth pass binds no material, so it batches by MESH only (one instanced draw per contiguous mesh
+        // run); firstInstance offsets gl_InstanceIndex into the compacted buffer.
         var items = shadowCasters.Items;
+        var instanceBuffer = EnsureInstanceBuffer(_shadowTransforms, frame.Slot, items.Length);
+        var dst = instanceBuffer.MappedSpan<Matrix4x4>(items.Length);
         for (var i = 0; i < items.Length; i++)
         {
-            var mesh = registry.Resolve(items[i].Mesh);
+            dst[i] = items[i].WorldTransform;
+        }
+
+        var shadowSet = frame.AllocateSet(_shadowSetLayout!);
+        frame.WriteStorageBuffer(shadowSet, 0, instanceBuffer);
+        cmd.BindDescriptorSet(pipeline, 0, shadowSet);
+
+        LastShadowDrawCalls = 0;
+        var start = 0;
+        while (start < items.Length)
+        {
+            var meshHandle = items[start].Mesh;
+            var end = start + 1;
+            while (end < items.Length && items[end].Mesh == meshHandle)
+            {
+                end++;
+            }
+
+            var mesh = registry.Resolve(meshHandle);
             cmd.BindVertexBuffer(mesh.VertexBuffer);
             cmd.BindIndexBuffer(mesh.IndexBuffer, mesh.IndexFormat);
-
-            var model = items[i].WorldTransform;
-            cmd.PushConstants(pipeline, ShaderStages.Vertex, in model, offsetBytes: 64);
-            cmd.DrawIndexed(mesh.IndexCount);
+            cmd.DrawIndexed(mesh.IndexCount, (uint)(end - start), firstIndex: 0, vertexOffset: 0, firstInstance: (uint)start);
+            LastShadowDrawCalls++;
+            start = end;
         }
 
         cmd.EndRendering();
@@ -1046,8 +1075,10 @@ public sealed class Renderer : IDisposable
 
         _iblResources?.Dispose();
         _skyboxSetLayout?.Dispose();
+        _shadowSetLayout?.Dispose();
         _iblResources = null;
         _skyboxSetLayout = null;
+        _shadowSetLayout = null;
 
         // Directional shadow map + its sampler (the pipeline lived in the disposed ShadowPass).
         _shadowSampler?.Dispose();

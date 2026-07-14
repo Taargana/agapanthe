@@ -153,8 +153,9 @@ window.Loaded += () =>
         }
     }
 
-    // System 2: the scene extent now comes from the world (union of per-entity world spheres), replacing
-    // Scene.Bounds*. Static here (nothing moves yet), so it is folded once rather than every frame.
+    // System 2: the scene extent comes from the world (union of per-entity world spheres), replacing Scene.Bounds*.
+    // Folded once here to frame the camera and place the lights; re-aggregated every frame in drawScene (P3-M1,
+    // debt #1) so it tracks moving entities.
     sceneBounds = world.AggregateBounds();
 
     // Frame the model: sit the camera back by 1.5x the diagonal along a slightly-raised front direction,
@@ -204,13 +205,13 @@ window.Loaded += () =>
 
     // Capturing the world/registry/lists/camera/renderer (all assigned by now) exactly once — the delegate is
     // built a single time here, never per frame. The per-frame chain is the contract of spec §3.5: propagate
-    // transforms (system 1), then build the two render lists (passthrough in M2, culled in M4), then draw.
-    // AggregateBounds is NOT re-run per frame: nothing moves in M2, so the extent is folded once above.
+    // transforms (system 1), aggregate bounds (system 2, per-frame since P3-M1), then build the two render lists
+    // (culled: camera frustum → render, light volume ∧ extruded frustum → shadow casters), then draw.
     drawScene = (cmd, frame, target) =>
     {
         // Bench: spin every drawable in place (direct WorldTransform write, zero-alloc, no archetype move) and
-        // drift the camera yaw, both by a fixed step per frame so captures stay deterministic. The spheres do not
-        // move (spin preserves the bounding sphere), so sceneBounds stays valid without a per-frame refold.
+        // drift the camera yaw, both by a fixed step per frame so captures stay deterministic. sceneBounds is now
+        // re-aggregated every frame below (debt #1), so it would track the entities even if they translated.
         if (benchMode)
         {
             // Capture BEFORE animating so the alloc measurement below covers AnimateDrawables too (it is the only
@@ -228,12 +229,20 @@ window.Loaded += () =>
         var view = camera.CreateView();
         world!.PropagateTransforms();
 
+        // Bounds per-frame (P3-M1, debt #1): re-aggregate the world extent every frame so it tracks entities that
+        // move — the M4 fold-once path went stale the instant anything translated. Zero-alloc (chunk iteration,
+        // struct return); it must run before ComputeLightViewProj, which fits the shadow to this extent.
+        sceneBounds = world.AggregateBounds();
+
         // Frame order (M4): the light matrix is computed HERE, before the render lists, so the caster list can be
         // culled against the light VOLUME (not the camera frustum). The camera frustum culls the render list.
         var lightViewProj = renderer!.ComputeLightViewProj(in view, in sceneBounds);
         var cameraFrustum = Frustum.FromViewProjection(view.View * view.Projection);
         var lightFrustum = Frustum.FromViewProjection(lightViewProj);
-        world.CollectRenderLists(renderList, shadowCasters, in view, in cameraFrustum, in lightFrustum);
+        // Shadow-caster cull (P3-M1, debt #2): AND the light volume with the camera frustum extruded toward the
+        // light, so off-screen casters whose shadows never reach the view are dropped (no false negatives).
+        var lightExtruded = ExtrudedShadowFrustum.FromCameraFrustum(in cameraFrustum, renderer.Lights.Directional.Direction);
+        world.CollectRenderLists(renderList, shadowCasters, in view, in cameraFrustum, in lightFrustum, in lightExtruded);
 
         renderer.DrawScene(
             renderList, shadowCasters, registry!, in view, in lightViewProj, cmd, frame, target);

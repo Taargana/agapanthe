@@ -8,14 +8,20 @@
 // the shadow pass allocation-free (no position-only geometry copy).
 layout(location = 0) in vec3 inPosition;
 
-// 128 bytes of push constants (no descriptor set — architect decision 7). Same proj*view convention as the
-// camera: lightViewProj is the row-vector view·proj uploaded column-major, so `lightViewProj * model * pos`
-// reproduces `p · model · view · proj` and bakes the Vulkan Y-flip + Z[0,1] (OrthographicVulkan).
+// lightViewProj travels as a 64-byte push constant (constant across the pass). Same proj*view convention as the
+// camera: it is the row-vector view·proj uploaded column-major, so `lightViewProj * model * pos` reproduces
+// `p · model · view · proj` and bakes the Vulkan Y-flip + Z[0,1] (OrthographicVulkan).
 layout(push_constant) uniform PushConstants {
     mat4 lightViewProj; // offset 0
-    mat4 model;         // offset 64
 } push;
 
+// Set 0, binding 0 = per-instance model matrices (P3-M1): the renderer compacts the visible casters' baked
+// matrices here in sorted order, and firstInstance offsets gl_InstanceIndex into this buffer. std430 mat4[] is
+// 64-byte-strided, matching the CPU Matrix4x4[].
+layout(std430, set = 0, binding = 0) readonly buffer InstanceTransforms {
+    mat4 model[];
+} instances;
+
 void main() {
-    gl_Position = push.lightViewProj * push.model * vec4(inPosition, 1.0);
+    gl_Position = push.lightViewProj * instances.model[gl_InstanceIndex] * vec4(inPosition, 1.0);
 }

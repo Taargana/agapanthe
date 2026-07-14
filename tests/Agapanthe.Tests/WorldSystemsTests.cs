@@ -28,6 +28,11 @@ public sealed class WorldSystemsTests
         MathHelpers.LookAt(Vector3.Zero, -Vector3.UnitZ, Vector3.UnitY)
         * MathHelpers.PerspectiveVulkan(MathF.PI / 3f, 1f, 0.1f, 100f));
 
+    // A degenerate extruded frustum (zero light direction → every plane dropped) that keeps every caster: for the
+    // tests that exercise transform/aggregation/camera-culling, not the shadow-caster tightening (P3-M1, debt #2).
+    private static readonly ExtrudedShadowFrustum AllCasters =
+        ExtrudedShadowFrustum.FromCameraFrustum(in Wide, Vector3.Zero);
+
     private static ImportedEntitySpec Drawable(Double3 position, float radius, uint order)
         => new(new MeshHandle(0, 1), new MaterialHandle(0, 1), position, Matrix4x4.Identity,
             Vector3.Zero, radius, order);
@@ -112,7 +117,7 @@ public sealed class WorldSystemsTests
         world.PropagateTransforms();
 
         var list = new RenderList();
-        world.CollectRenderLists(list, new RenderList(), ViewAt(Double3.Zero), in Wide, in Wide);
+        world.CollectRenderLists(list, new RenderList(), ViewAt(Double3.Zero), in Wide, in Wide, in AllCasters);
         Assert.Equal(baked, list.Items[0].WorldTransform); // bit-for-bit unchanged
     }
 
@@ -136,10 +141,10 @@ public sealed class WorldSystemsTests
             Matrix4x4.Identity, Vector3.Zero, 0f, 0));
 
         var atOrigin = new RenderList();
-        near.CollectRenderLists(atOrigin, new RenderList(), ViewAt(Double3.Zero), in Wide, in Wide);
+        near.CollectRenderLists(atOrigin, new RenderList(), ViewAt(Double3.Zero), in Wide, in Wide, in AllCasters);
 
         var atFar = new RenderList();
-        farAway.CollectRenderLists(atFar, new RenderList(), ViewAt(far), in Wide, in Wide);
+        farAway.CollectRenderLists(atFar, new RenderList(), ViewAt(far), in Wide, in Wide, in AllCasters);
 
         Assert.Equal(atOrigin.Items[0].WorldTransform, atFar.Items[0].WorldTransform);
     }
@@ -229,7 +234,7 @@ public sealed class WorldSystemsTests
 
         var render = new RenderList();
         var shadow = new RenderList();
-        world.CollectRenderLists(render, shadow, ViewAt(Double3.Zero), in Camera, in Wide);
+        world.CollectRenderLists(render, shadow, ViewAt(Double3.Zero), in Camera, in Wide, in AllCasters);
 
         Assert.Equal(1, render.Count);                 // only the one in front
         Assert.Equal(0ul, render.Items[0].SortKey);    // and it is the front one (order 0)
@@ -237,21 +242,42 @@ public sealed class WorldSystemsTests
     }
 
     [Fact]
-    public void CollectRenderLists_KeepsAnOffScreenCasterInTheShadowList()
+    public void CollectRenderLists_KeepsAnOffScreenCasterWhoseShadowEntersTheView()
     {
-        // Anti-popping (spec §3.5): a caster OUTSIDE the camera frustum still throws its shadow into the view, so
-        // it must stay in the shadow-caster list even though it is absent from the render list. Culling the caster
-        // list against the camera frustum (instead of the light volume) is exactly the bug this guards against —
-        // its shadow would blink out the moment the caster left the screen edge.
+        // Anti-popping (spec §3.5, P3-M1 debt #2): a caster OUTSIDE the camera frustum whose shadow still reaches
+        // the view must stay in the shadow-caster list. Here the light travels -Z, so a caster behind the camera
+        // (at +Z) casts its shadow forward INTO the frustum → it must survive both the light volume AND the
+        // extruded-frustum cull. The extruded frustum is the camera frustum swept toward the light, so this
+        // upstream caster is inside it.
         using var world = new GameWorld();
-        world.SpawnImported(Drawable(new Double3(0, 0, 10), 1f, 0)); // behind the camera
+        world.SpawnImported(Drawable(new Double3(0, 0, 10), 1f, 0)); // behind the camera, upstream of the light
 
+        var extruded = ExtrudedShadowFrustum.FromCameraFrustum(in Camera, new Vector3(0f, 0f, -1f));
         var render = new RenderList();
         var shadow = new RenderList();
-        world.CollectRenderLists(render, shadow, ViewAt(Double3.Zero), in Camera, in Wide);
+        world.CollectRenderLists(render, shadow, ViewAt(Double3.Zero), in Camera, in Wide, in extruded);
 
         Assert.Equal(0, render.Count);  // invisible to the camera
-        Assert.Equal(1, shadow.Count);  // but still a shadow caster
+        Assert.Equal(1, shadow.Count);  // but still a shadow caster (its shadow enters the view)
+    }
+
+    [Fact]
+    public void CollectRenderLists_DropsACasterWhoseShadowMissesTheView()
+    {
+        // The tightening the extruded frustum buys (P3-M1 debt #2): a caster far BELOW the view, with the light
+        // travelling straight down, casts its shadow further down — never into the frustum. The light volume
+        // (Wide) would keep it, but ANDing the extruded frustum (its "bottom" plane is kept for a downward light)
+        // drops it. This is the off-screen caster that used to bloat the shadow list on a flat scene.
+        using var world = new GameWorld();
+        world.SpawnImported(Drawable(new Double3(0, -100, -10), 1f, 0)); // far below, shadow goes further down
+
+        var extruded = ExtrudedShadowFrustum.FromCameraFrustum(in Camera, new Vector3(0f, -1f, 0f));
+        var render = new RenderList();
+        var shadow = new RenderList();
+        world.CollectRenderLists(render, shadow, ViewAt(Double3.Zero), in Camera, in Wide, in extruded);
+
+        Assert.Equal(0, render.Count);
+        Assert.Equal(0, shadow.Count); // dropped: its shadow never reaches the view
     }
 
     [Fact]
@@ -263,7 +289,7 @@ public sealed class WorldSystemsTests
         world.SpawnImported(Drawable(new Double3(0, 0, 0.5), 2f, 0)); // centre behind the eye, radius reaches ahead
 
         var render = new RenderList();
-        world.CollectRenderLists(render, new RenderList(), ViewAt(Double3.Zero), in Camera, in Wide);
+        world.CollectRenderLists(render, new RenderList(), ViewAt(Double3.Zero), in Camera, in Wide, in AllCasters);
 
         Assert.Equal(1, render.Count);
     }
@@ -302,7 +328,7 @@ public sealed class WorldSystemsTests
             world.AnimateDrawables(ref spin);
             world.PropagateTransforms();
             _ = world.AggregateBounds();
-            world.CollectRenderLists(render, shadow, ViewAt(Double3.Zero), in Wide, in Wide);
+            world.CollectRenderLists(render, shadow, ViewAt(Double3.Zero), in Wide, in Wide, in AllCasters);
         }
 
         var before = GC.GetAllocatedBytesForCurrentThread();
@@ -311,7 +337,7 @@ public sealed class WorldSystemsTests
             world.AnimateDrawables(ref spin); // the W4 path — its zero-alloc must be covered too (audit Med1)
             world.PropagateTransforms();
             _ = world.AggregateBounds();
-            world.CollectRenderLists(render, shadow, ViewAt(Double3.Zero), in Wide, in Wide);
+            world.CollectRenderLists(render, shadow, ViewAt(Double3.Zero), in Wide, in Wide, in AllCasters);
         }
 
         var allocated = GC.GetAllocatedBytesForCurrentThread() - before;

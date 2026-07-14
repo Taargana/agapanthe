@@ -155,8 +155,10 @@ public sealed class GameWorld : IDisposable
             * MathHelpers.OrthographicVulkan(200f, 200f, -100f, 100f));
         var smokeView = new RenderView(
             Double3.Zero, Vector3.Zero, Matrix4x4.Identity, Matrix4x4.Identity, 1f, 1f, 0.1f, 1f);
+        // Extruded shadow frustum (P3-M1): built here too so the ILC roots the type + Intersects under AOT.
+        var wideExtruded = ExtrudedShadowFrustum.FromCameraFrustum(in wide, -Vector3.UnitY);
         var render = new RenderList();
-        CollectRenderLists(render, new RenderList(), in smokeView, in wide, in wide);
+        CollectRenderLists(render, new RenderList(), in smokeView, in wide, in wide, in wideExtruded);
         if (render.Count != 8)
         {
             throw new InvalidOperationException(
@@ -309,7 +311,8 @@ public sealed class GameWorld : IDisposable
     /// </para>
     /// </summary>
     public void CollectRenderLists(
-        RenderList render, RenderList shadowCasters, in RenderView view, in Frustum cameraFrustum, in Frustum lightFrustum)
+        RenderList render, RenderList shadowCasters, in RenderView view, in Frustum cameraFrustum,
+        in Frustum lightFrustum, in ExtrudedShadowFrustum lightExtruded)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
         AssertOwnerThread();
@@ -337,7 +340,10 @@ public sealed class GameWorld : IDisposable
                 var center = worldCenter.ToVector3(origin);
 
                 var inCamera = cameraFrustum.Intersects(center, radius);
-                var inLight = lightFrustum.Intersects(center, radius);
+                // A caster matters only if it is in the light VOLUME (what the shadow map covers) AND upstream of
+                // the view along the light (its shadow can reach the screen) — the extruded frustum (P3-M1, debt
+                // #2). ANDing tightens the caster set without ever dropping a shadow that reaches the view.
+                var inLight = lightFrustum.Intersects(center, radius) && lightExtruded.Intersects(center, radius);
                 if (!inCamera && !inLight)
                 {
                     continue;
