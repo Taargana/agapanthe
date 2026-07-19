@@ -89,6 +89,31 @@ Une planète éclairée par un soleil quasi ponctuel : la nuit, c'est `dot(N, L)
 à toute échelle, sans une seule texture. Les **éclipses** (lune → planète) : intersection rayon/sphère et cône d'ombre,
 formule fermée. **Ne jamais rasteriser une shadow map à l'échelle d'un système solaire** — mauvais outil.
 
+### 2.0bis Dette léguée par P3-M5 (CSM) — double audit session 18
+
+- 🟠 **Le cull par cascade est quasi inopérant** (audit graphics MINEUR-1) : les volumes ortho viennent de sphères
+  englobantes de tranches, donc ils **se recouvrent massivement** — celui de la cascade 3 contient presque tout le
+  champ proche (et déborde ~97 m *derrière* la caméra). Presque chaque caster entre dans les 4 listes →
+  **~4× la géométrie rasterisée** dans la passe d'ombre, et 4× le buffer d'instances. Image juste, coût GPU réel.
+  *Ça mord : au banc `grid:100x100` (part des 11,4 ms).* Correctif : borner aussi la tranche **en profondeur**
+  (plan aval), ou passer le cull d'ombre en compute → **backlog §1 (GPU-driven shadow cull)**.
+- 🟠 **Setback amont fixe κ=4·r** (spec, decision log) : la marge est **proportionnelle au rayon de la cascade**,
+  donc la **cascade 0 est la plus exposée**. Un contenu vertical dépassant `4r₀` au-dessus de la tranche proche
+  perd son ombre **dans la cascade proche seulement** et la garde au loin → l'ombre d'une tour **disparaît quand on
+  s'en approche**. Mode de défaillance vicieux (incohérence sous déplacement caméra) mais hors d'atteinte pour du
+  contenu de 2 m. *Mord : premier bâtiment/falaise/grue.* Correctif : `UpstreamExtent` par cascade.
+- 🟡 **Code mort du wedge retiré** : `ShadowFit.ComputeLightViewProj`, `ExtrudedShadowFrustum` (+ ses tests),
+  `Renderer.ComputeFrustumSphere`, `ShadowCasterDistance` — ~200 lignes de production que **seuls les tests
+  exercent** encore. Décider : supprimer, ou documenter comme conservé. (Le retrait du wedge lui-même est propre :
+  aucun invariant orphelin, la dette P3-M2 « sortir `_casterSpheres` du World » est **soldée**.)
+- 🟡 **Empreinte mémoire des listes de casters** : 4 `RenderList` à ~10k casters ≈ 12 Mo de tableaux managés au banc
+  (conséquence directe du recouvrement ci-dessus). Pas un leak ; disparaît avec le vrai cull.
+- 🟡 **Doc XML obsolète** : bloc `<summary>` résiduel de `ComputeLightViewProj` (`Renderer.cs`) et doc de
+  `CollectRenderLists` (`GameWorld.cs`) décrivant encore le wedge + un `<see cref="CompactShadowCasters"/>` mort.
+- 🟡 **`textureLod` / flot divergent** ✅ **soldé** (session 18) · **bias par cascade** : **NE PAS FAIRE** — l'audit
+  graphique a montré que le bias slope-scaled est **invariant par cascade** (taille de texel et plage de profondeur
+  varient toutes deux linéairement en `r` et se compensent). Ajouter un bias par cascade casserait cette propriété.
+
 ### 2.2bis Ombres LOINTAINES — au-delà de la portée du CSM *(question ouverte, instruite session 18)*
 
 **Le constat** (humain, session 18, après le CSM) : un CSM a une **portée finie** (`Renderer.Cascades.MaxDistance`,

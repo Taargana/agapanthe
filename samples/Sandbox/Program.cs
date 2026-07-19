@@ -561,9 +561,14 @@ window.Rendered += dt =>
         {
             frameRenderer.WaitIdle();
             renderer.SaveHdrCapture(capturePath);
-            // P3-M2 F4: the shadow depth-range span this frame. Logged so the D3 capture drift (depth range now fit
-            // to caster bounds, not scene bounds) can be justified against the baseline rather than eyeballed.
-            Log.Info($"Sandbox: [shadow] eyeDistance {renderer.LastEyeDistance:F3} m (shadow-caster distance {renderer.ShadowCasterDistance:F1} m).");
+            // The shadow configuration this frame, logged so a capture's shadowing can be justified against the
+            // protocol rather than eyeballed. (This replaced a P3-M2 line printing eyeDistance + ShadowCasterDistance:
+            // both belonged to the single-cascade wedge that P3-M5 retired, so it had been printing 0.000 and a value
+            // with no effect on the render — a gate tool that lies is worse than no tool. Audit M2.)
+            Log.Info(
+                $"Sandbox: [shadow] CSM {renderer.Cascades.Count} cascades, lambda {renderer.Cascades.Lambda:F2}, " +
+                $"range {MathF.Min(renderer.Cascades.MaxDistance, renderer.ShadowDistance):F1} m " +
+                $"({Renderer.ShadowTileResolution}² per cascade in the {Renderer.ShadowMapResolution}² atlas).");
 
             // P3-M4 W1 gate: the GPU cull must keep exactly the CPU frustum test's visible set. WaitIdle above means
             // the compute has finished, so the args instanceCounts are readable. Assert equal (the milestone gate).

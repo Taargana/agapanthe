@@ -262,9 +262,11 @@ public sealed class ShadowFitTests
         }
 
         Assert.Equal(settings.MaxDistance, splits[^1], 2);
-        // The practical split packs the near cascades tighter than a uniform split would: cascade 0 is well under
-        // a quarter of the range (uniform would put it at exactly 50 m for 4 cascades over 200 m).
-        Assert.True(splits[0] < 50f, $"the near cascade ({splits[0]} m) should be tighter than the uniform 50 m");
+        // The practical split must pack the near cascade TIGHTLY — that is the whole point of the CSM, and the
+        // quantity that decides contact-shadow sharpness. The old bound (< 50 m, i.e. merely tighter than uniform)
+        // was far too loose: it happily passed at 25 m, where cascade 0 samples at 3.2 cm/texel and the 5×5 PCF
+        // smears the contact shadow over ~16 cm (audit MAJEUR-1). At the default λ=0.85 cascade 0 lands near 8 m.
+        Assert.True(splits[0] < 12f, $"the near cascade ({splits[0]:F1} m) is too wide for a sharp contact shadow");
     }
 
     [Fact]

@@ -179,13 +179,23 @@ public readonly struct LightsUniforms
     public readonly Vector4 CascadeSplits;
 
     /// <summary>
+    /// Shadow parameters (offset 448, 16 bytes; P3-M5): <c>x</c> = the view depth at which the distance fade-out
+    /// starts, <c>yzw</c> reserved. The fade hides the "shadow horizon" when the range is one WE chose
+    /// (<c>Cascades.MaxDistance</c> / <c>ShadowDistance</c>); when the range is instead imposed by the camera's far
+    /// plane there is no horizon to hide — the geometry is clipped there anyway — so the renderer sends a value
+    /// beyond the range and the fade never triggers (audit MAJEUR-2).
+    /// </summary>
+    public readonly Vector4 ShadowParams;
+
+    /// <summary>
     /// Packs <paramref name="lights"/>, the CSM <paramref name="cascades"/> and their <paramref name="splits"/> into
     /// the std140 block. The directional direction is normalized here (a degenerate zero direction falls back to
     /// straight down). All four point-light slots are copied from <see cref="SceneLights.Points"/>; the shader
     /// ignores slots at or beyond <see cref="SceneLights.PointCount"/>. No heap allocation: the result is a value
     /// type built on the stack.
     /// </summary>
-    public LightsUniforms(SceneLights lights, ReadOnlySpan<Matrix4x4> cascades, Vector4 splits, Double3 origin)
+    public LightsUniforms(
+        SceneLights lights, ReadOnlySpan<Matrix4x4> cascades, Vector4 splits, float fadeStart, Double3 origin)
     {
         ArgumentNullException.ThrowIfNull(lights);
 
@@ -215,5 +225,6 @@ public readonly struct LightsUniforms
         LightViewProj2 = cascades.Length > 2 ? cascades[2] : LightViewProj1;
         LightViewProj3 = cascades.Length > 3 ? cascades[3] : LightViewProj2;
         CascadeSplits = splits;
+        ShadowParams = new Vector4(fadeStart, 0f, 0f, 0f);
     }
 }

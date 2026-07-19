@@ -42,6 +42,7 @@ layout(set = 0, binding = 1) uniform LightsUbo {
     vec4 pointData[8];
     mat4 cascadeViewProj[4]; // offset 176 — one per CSM cascade (P3-M5), each mapping into its atlas tile
     vec4 cascadeSplits;      // offset 432 — far VIEW-space depth of cascades 0..3
+    vec4 shadowParams;       // offset 448 — x = distance fade-out start (huge = disabled), yzw reserved
 } lights;
 
 // Set 0, binding 2 = the directional shadow map (M6). A PLAIN sampler2D, not a sampler2DShadow: MoltenVK's
@@ -179,7 +180,10 @@ float sampleCascade(vec3 wp, int c) {
     // top-left texel origin, so v = ndc.y*0.5+0.5 directly, WITHOUT a 1-v flip (the ortho baked the flip).
     vec2 uvTile = ndc.xy * 0.5 + 0.5;
 
-    // Outside this cascade in XY: let the caller fall through to the next cascade rather than inventing a value.
+    // Outside this cascade in XY. UNREACHABLE for a fragment selected by depth: its slice is contained in the
+    // slice's bounding sphere, which is contained in this cascade's ortho box — so the projection always lands in
+    // the tile. Kept as a guard for the BLEND call (which samples cascade c+1 from inside slice c, one step outside
+    // that invariant): returning "lit" there can only lighten a shadow slightly at a seam, never corrupt the tile.
     if (uvTile.x < 0.0 || uvTile.x > 1.0 || uvTile.y < 0.0 || uvTile.y > 1.0) {
         return 1.0;
     }
@@ -213,7 +217,10 @@ float sampleCascade(vec3 wp, int c) {
             // Bilinear coverage of this tap: 1 at the sample point, falling to 0 one texel away.
             vec2 w = max(vec2(0.0), 1.0 - abs(offset - frac));
             float weight = w.x * w.y + 0.25; // + a flat floor so the outer taps still soften the edge
-            float stored = texture(shadowMap, clamp(base + offset * texel, tileMin, tileMax)).r;
+            // textureLod, not texture: the cascade selection is non-uniform across a quad at a split boundary, so
+            // the implicit derivatives here would be undefined by spec. The map has one mip and a Nearest sampler,
+            // so LOD 0 is what an implicit fetch resolves to anyway — this just stops relying on that accident.
+            float stored = textureLod(shadowMap, clamp(base + offset * texel, tileMin, tileMax), 0.0).r;
             sum += weight * (reference <= stored ? 1.0 : 0.0);
             weightSum += weight;
         }
@@ -254,10 +261,12 @@ float directionalShadow(vec3 wp) {
 
     // DISTANCE FADE-OUT (session 18, human visual finding). A CSM has a finite range, and stopping at it abruptly
     // draws a hard "shadow horizon" line across the ground — the artefact reads as a bug even though the shadows
-    // themselves are correct. Fading to lit over the last 20% of the range trades a visible edge for a gradual
-    // loss of shadowing, which the eye accepts. This does NOT create distant shadows: extending the range is
+    // themselves are correct. Fading to lit over the last stretch trades a visible edge for a gradual loss of
+    // shadowing, which the eye accepts. This does NOT create distant shadows: extending the range is
     // Cascades.MaxDistance, and true long-range occlusion is ray marching / analytic (backlog §2).
-    float fadeStart = maxDistance * 0.8;
+    // fadeStart comes from the CPU, which knows whether the range was CHOSEN (fade) or merely imposed by the
+    // camera's far plane (no horizon to hide — do not fade; audit MAJEUR-2). Disabled = a value past the range.
+    float fadeStart = lights.shadowParams.x;
     if (viewDepth > fadeStart && maxDistance > fadeStart) {
         float t = clamp((viewDepth - fadeStart) / (maxDistance - fadeStart), 0.0, 1.0);
         shadow = mix(shadow, 1.0, t);

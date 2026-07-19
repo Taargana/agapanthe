@@ -50,8 +50,18 @@ public readonly record struct ShadowSettings(uint Resolution, float DepthBiasCon
 /// <param name="MaxDistance">Far bound of the shadowed range, in metres.</param>
 public readonly record struct CascadeSettings(int Count, float Lambda, float MaxDistance)
 {
-    /// <summary>Four cascades, a balanced split (λ=0.5), shadowing out to 200 m.</summary>
-    public static CascadeSettings Default => new(4, 0.5f, 200f);
+    /// <summary>
+    /// Four cascades shadowing out to 200 m, with a strongly logarithmic split (λ=0.85).
+    /// <para>
+    /// λ was 0.5 and that wasted the near cascade (audit MAJEUR-1). With a near plane of ~0.1 m the logarithmic
+    /// term collapses (<c>0.1·2000^0.25 ≈ 0.67</c>), so a 50/50 blend lands close to the UNIFORM split: cascade 0
+    /// reached 25 m (3.2 cm/texel), and the 5×5 PCF smeared the contact shadow over ~16 cm. At λ=0.85 cascade 0
+    /// covers ~8 m at 1.0 cm/texel — <b>3.2× sharper at contact for 2.5% coarser texels in cascade 3</b>, because
+    /// the far cascade's radius is dominated by <c>far·tan(fov)</c>, not by the width of its own slice. λ 0.75–0.95
+    /// is the usual range for a 0.1→200 m span; 0.5 suits a short range.
+    /// </para>
+    /// </summary>
+    public static CascadeSettings Default => new(4, 0.85f, 200f);
 }
 
 public sealed class Renderer : IDisposable
@@ -817,6 +827,13 @@ public sealed class Renderer : IDisposable
         ArgumentNullException.ThrowIfNull(renderList);
         ArgumentNullException.ThrowIfNull(cascadeCasters);
         ArgumentNullException.ThrowIfNull(registry);
+        // The 2x2 atlas holds four tiles; a fifth cascade would place its viewport at y = 4096 on a 4096² map and
+        // trip VUID-vkCmdSetScissor. Guarded here because this is a public API (audit F7).
+        if (cascades.Length is < 1 or > 4)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(cascades), cascades.Length, "the 2x2 shadow atlas supports 1 to 4 cascades.");
+        }
         ArgumentNullException.ThrowIfNull(frame);
         ObjectDisposedException.ThrowIf(_disposed, this);
         if (!_iblResources!.HasEnvironment)
@@ -1048,8 +1065,16 @@ public sealed class Renderer : IDisposable
         var uniforms = new CameraUniforms(view.View, view.Projection, view.EyeRelative);
         ubo.Write(new ReadOnlySpan<CameraUniforms>(in uniforms));
 
+        // Distance fade-out threshold (audit MAJEUR-2). The fade exists to hide the SHADOW HORIZON — the hard line
+        // where a chosen range stops. If the cascades were instead cut short by the camera's far plane, there is no
+        // horizon to hide (geometry is clipped there regardless), and fading would just erase the last 20% of the
+        // shadows in any tightly-framed scene. So: fade only when OUR range binds; otherwise push the threshold
+        // past the range so the shader never triggers it.
+        var chosenRange = MathF.Min(Cascades.MaxDistance, ShadowDistance);
+        var fadeStart = view.Far <= chosenRange ? float.MaxValue : chosenRange * 0.8f;
+
         var lightsUbo = _lightsUbos[frame.Slot]!;
-        var lightsUniforms = new LightsUniforms(Lights, cascades, cascadeSplits, view.Origin);
+        var lightsUniforms = new LightsUniforms(Lights, cascades, cascadeSplits, fadeStart, view.Origin);
         lightsUbo.Write(new ReadOnlySpan<LightsUniforms>(in lightsUniforms));
 
         var frameSet = frame.AllocateSet(_frameSetLayout!);
@@ -1217,7 +1242,7 @@ public sealed class Renderer : IDisposable
 
     // One draw batch (P3-M4 W0): a contiguous run of the sorted render list that shares a (material, mesh) pair —
     // the scene — or a mesh — the shadow pass. Offset/Count index the compacted instance SSBO.
-    private readonly struct Batch(MeshHandle mesh, MaterialHandle material, uint offset, uint count)
+    internal readonly struct Batch(MeshHandle mesh, MaterialHandle material, uint offset, uint count)
     {
         public readonly MeshHandle Mesh = mesh;
         public readonly MaterialHandle Material = material;
@@ -1252,7 +1277,7 @@ public sealed class Renderer : IDisposable
     // Same, keyed by MESH only (the shadow pass binds no material — one contiguous run per mesh). APPENDS at
     // <paramref name="writeIndex"/> and folds <paramref name="instanceBase"/> into each run's offset, so the N
     // cascades of the CSM (P3-M5) share one batch array and one instance buffer. Returns how many it appended.
-    private static int BuildShadowBatches(
+    internal static int BuildShadowBatches(
         ReadOnlySpan<RenderItem> items, ref Batch[] batches, int writeIndex = 0, uint instanceBase = 0)
     {
         var count = 0;

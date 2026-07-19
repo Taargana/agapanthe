@@ -13,12 +13,12 @@ public sealed class LightsUniformsTests
         [Matrix4x4.Identity, Matrix4x4.Identity, Matrix4x4.Identity, Matrix4x4.Identity];
 
     [Fact]
-    public void LightsUniforms_Is448BytesWithCascadesAt176()
+    public void LightsUniforms_Is464BytesWithCascadesAt176()
     {
         // 3 header vec4s + 4 point lights x 2 vec4s = 11 x 16 = 176, then FOUR mat4 cascades (P3-M5, 4 x 64 = 256)
-        // = 432, then the vec4 of cascade split depths = 448. The shader declares the matching std140 block; any
-        // size/offset drift breaks the GPU read silently. 448 is a multiple of 16, so std140 needs no trailing pad.
-        Assert.Equal(448, Marshal.SizeOf<LightsUniforms>());
+        // = 432, then the vec4 of cascade split depths = 448, then the vec4 of shadow params = 464. The shader declares
+        // the matching std140 block; any drift breaks the GPU read silently. 464 is a multiple of 16 — no trailing pad.
+        Assert.Equal(464, Marshal.SizeOf<LightsUniforms>());
         Assert.Equal(0, (int)Marshal.OffsetOf<LightsUniforms>(nameof(LightsUniforms.DirectionalDirection)));
         Assert.Equal(16, (int)Marshal.OffsetOf<LightsUniforms>(nameof(LightsUniforms.DirectionalColorIntensity)));
         Assert.Equal(32, (int)Marshal.OffsetOf<LightsUniforms>(nameof(LightsUniforms.AmbientPointCount)));
@@ -29,6 +29,7 @@ public sealed class LightsUniformsTests
         Assert.Equal(304, (int)Marshal.OffsetOf<LightsUniforms>(nameof(LightsUniforms.LightViewProj2)));
         Assert.Equal(368, (int)Marshal.OffsetOf<LightsUniforms>(nameof(LightsUniforms.LightViewProj3)));
         Assert.Equal(432, (int)Marshal.OffsetOf<LightsUniforms>(nameof(LightsUniforms.CascadeSplits)));
+        Assert.Equal(448, (int)Marshal.OffsetOf<LightsUniforms>(nameof(LightsUniforms.ShadowParams)));
     }
 
     [Fact]
@@ -42,7 +43,7 @@ public sealed class LightsUniformsTests
         }
 
         var splits = new Vector4(8f, 25f, 70f, 200f);
-        var packed = new LightsUniforms(lights, cascades, splits, Double3.Zero);
+        var packed = new LightsUniforms(lights, cascades, splits, float.MaxValue, Double3.Zero);
 
         Assert.Equal(cascades[0], packed.LightViewProj0);
         Assert.Equal(cascades[1], packed.LightViewProj1);
@@ -59,7 +60,7 @@ public sealed class LightsUniformsTests
         var lights = new SceneLights();
         var one = new[] { Matrix4x4.CreateTranslation(5, 6, 7) };
 
-        var packed = new LightsUniforms(lights, one, Vector4.Zero, Double3.Zero);
+        var packed = new LightsUniforms(lights, one, Vector4.Zero, float.MaxValue, Double3.Zero);
 
         Assert.Equal(one[0], packed.LightViewProj0);
         Assert.Equal(one[0], packed.LightViewProj1);
@@ -96,7 +97,7 @@ public sealed class LightsUniformsTests
         };
         lights.PointCount = 1;
 
-        var packed = new LightsUniforms(lights, Identity4, Vector4.Zero, Double3.Zero);
+        var packed = new LightsUniforms(lights, Identity4, Vector4.Zero, float.MaxValue, Double3.Zero);
 
         Assert.Equal(new Vector4(0f, -1f, 0f, 0f), packed.DirectionalDirection); // normalized
         Assert.Equal(3f, packed.DirectionalColorIntensity.W);
@@ -122,7 +123,7 @@ public sealed class LightsUniformsTests
             Directional = new DirectionalLight { Direction = Vector3.Zero, Color = Vector3.One, Intensity = 1f },
         };
 
-        var packed = new LightsUniforms(lights, Identity4, Vector4.Zero, Double3.Zero);
+        var packed = new LightsUniforms(lights, Identity4, Vector4.Zero, float.MaxValue, Double3.Zero);
         Assert.Equal(new Vector4(0f, -1f, 0f, 0f), packed.DirectionalDirection);
     }
 
@@ -143,7 +144,7 @@ public sealed class LightsUniformsTests
         lights.PointCount = 1;
 
         var origin = new Double3(10_000_000, 0, 0);
-        var packed = new LightsUniforms(lights, Identity4, Vector4.Zero, origin);
+        var packed = new LightsUniforms(lights, Identity4, Vector4.Zero, float.MaxValue, origin);
 
         // Exactly the offset from the eye — a float can represent (2, 5, -3) precisely, while 10_000_002 alone
         // is already quantized to the metre.

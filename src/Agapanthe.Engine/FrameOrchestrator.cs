@@ -155,25 +155,39 @@ public sealed class FrameOrchestrator
             // Fit the CSM cascades FIRST (P3-M5): each is fitted to its own frustum slice — camera-only, so it needs
             // no caster bounds. That is what retires the P3-M2 two-pass wedge: with the fit independent of the
             // casters, the casters can simply be culled against the finished cascade volumes, in one pass.
-            var cascades = o._cascades.AsSpan();
-            var splits = o._splits.AsSpan();
+            // Honour the renderer's cascade COUNT (audit M1): hard-coding 4 here left the tail matrices at
+            // default(Matrix4x4) whenever someone set a smaller count — a zero matrix yields a degenerate frustum
+            // that collects everything or nothing, doubles the shadow cost, and (splits[3] = 0) silently disables
+            // the distance fade. No crash, no validation error: exactly the kind of trap worth closing.
+            var count = Math.Clamp(o._renderer.Cascades.Count, 1, CascadeCount);
+            var cascades = o._cascades.AsSpan(0, count);
+            var splits = o._splits.AsSpan(0, count);
             o._renderer.ComputeCascades(in view, cascades, splits);
 
-            for (var c = 0; c < cascades.Length; c++)
+            for (var c = 0; c < count; c++)
             {
                 o._cascadeFrusta[c] = Frustum.FromViewProjection(cascades[c]);
             }
 
+            // The shader always reads a vec4 of splits and treats splits[3] as the shadowed range. With fewer than
+            // four cascades the unused lanes repeat the last real split, so the range stays true and the selection
+            // loop simply never picks a padded lane (LightsUniforms repeats the matrices the same way).
+            var last = splits[count - 1];
+            var splitVec = new Vector4(
+                splits[0],
+                count > 1 ? splits[1] : last,
+                count > 2 ? splits[2] : last,
+                count > 3 ? splits[3] : last);
+
             // Collect: scene CANDIDATES (all drawables, sorted, sphere-carrying — the camera cull runs on the GPU,
             // P3-M4), then the casters bucketed per cascade (NoShadowCast entities excluded, P3-M5).
             o._world.CollectRenderLists(o._render, in view);
-            o._world.CollectShadowCasters(o._cascadeFrusta.AsSpan(), o._cascadeCasters, in view);
+            o._world.CollectShadowCasters(o._cascadeFrusta.AsSpan(0, count), o._cascadeCasters, in view);
 
             // The camera frustum crosses into DrawScene, where the compute pass culls the scene candidates against it.
             o._renderer.DrawScene(
                 o._render, o._cascadeCasters, o._registry, in view, in cameraFrustum,
-                cascades, new Vector4(splits[0], splits[1], splits[2], splits[3]),
-                ctx.Cmd, ctx.Frame, ctx.Target);
+                cascades, splitVec, ctx.Cmd, ctx.Frame, ctx.Target);
         }
     }
 }

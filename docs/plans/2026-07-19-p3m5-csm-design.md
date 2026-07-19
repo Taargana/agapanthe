@@ -34,7 +34,7 @@ receives but does not cast (tightens every fit, kills the ground self-shadow acn
 
 ## 3. Cascade split
 
-`CascadeSettings { int Count = 4; float Lambda = 0.5f; float MaxDistance = 200f; }`. The split distances
+`CascadeSettings { int Count = 4; float Lambda = 0.85f; float MaxDistance = 200f; }`. The split distances
 follow the **practical scheme** (blend of logarithmic and uniform, weighted by `Lambda`):
 
 ```
@@ -42,7 +42,12 @@ dᵢ = lerp( near + (far-near)·(i/N),           // uniform
            near · (far/near)^(i/N),           // logarithmic
            Lambda )
 ```
-over `[view.Near, min(view.Far, MaxDistance)]`. Typical result ≈ 0-8 / 8-25 / 25-70 / 70-200 m.
+over `[view.Near, min(view.Far, MaxDistance)]`. At the default λ=0.85 the result is ≈ **0-8 / 8-19 / 19-48 / 48-200 m**
+(cascade 0 at ~1.0 cm/texel). **λ was 0.5 and that was wrong** (audit MAJEUR-1): with a ~0.1 m near plane the
+logarithmic term collapses, so a 50/50 blend sits close to the *uniform* split — the real result was
+0-25 / 25-52 / 52-90 / 90-200, i.e. a cascade 0 three times too wide (3.2 cm/texel, contact shadow smeared over
+~16 cm by the 5×5 PCF). Raising λ costs ~2.5% coarser texels in cascade 3, whose radius is dominated by
+`far·tan(fov)` rather than by its own slice width.
 
 ## 4. `ShadowFit.ComputeCascades` (`src/Agapanthe.Rendering/ShadowFit.cs`)
 
