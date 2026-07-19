@@ -252,12 +252,35 @@ Spec : [2026-07-14-p3m2-scheduler-lifecycle-design.md](plans/2026-07-14-p3m2-sch
 
 **Branche** : `phase2-foundations`. Commits P2-M4 : `12a07e3` (W0 Frustum+sphère+banc) · `7d9428a` (W1 origine quantifiée + ordre de frame + skybox origin-exact) · `c5b7da7` (W2 culling) · `458e017` (W3 radix + SortKey) · `99076c1` (W4 banc + AnimateDrawables) · `2827777` (durcissements audits : σ_max exact).
 
-**Séquencement Phase 3 recommandé (engine-architect)** — par dépendances et par ce que chaque jalon *prouve* :
-1. **P3-M0 — Validation Linux/macOS + durcissement du gate shutdown.** *En premier* : AOT et SPIR-V hors-ligne sont **prouvés Windows uniquement** ; « fondations cross-platform » est une hypothèse tant qu'un vrai Linux n'a pas tourné. Cheap, demi-jalon.
-2. ~~**P3-M1 — Instancing + les 2 dettes de culling**~~ ✅ **clos** (session 14, voir plus haut).
-3. ~~**P3-M2 — Scheduler + lifecycle + `Agapanthe.Engine`**~~ ✅ **clos** (session 15, voir plus haut). *Le rendu GPU-driven (slots persistants, cull compute, draw indirect) reporté de P3-M1 reste ouvert — désormais un jalon distinct, pas un prérequis.*
-4. **P3-M3 — Physique** (dépend de : origine quantifiée ✓, lifecycle, bounds per-frame).
-5. **P3-M4 — Sérialisation source-gen** (partage le générateur du rooting ; parallélisable). **Audio** en dernier / opportuniste.
+## Roadmap Phase 3 — état au 2026-07-19 (session 18)
+
+**Livrés :**
+| # | Jalon | Session | Ce qu'il a prouvé |
+|---|---|---|---|
+| P3-M1 | Instancing (SSBO) + 2 dettes de culling | S14 | 12 556 → 2 draws à 10k |
+| P3-M2 | Scheduler + lifecycle + `Agapanthe.Engine` | S15 | L'ordre de frame est un invariant du moteur, pas du Sandbox |
+| P3-M3 | Physique v1 (corps rigides linéaires) | S16 | Simulation déterministe, reproductible run-à-run, 0 alloc |
+| P3-M4 | Rendu GPU-driven (cull compute + draw indirect) | S17 | Le cull quitte le CPU ; GPU visible == CPU (2557 @10k) |
+| P3-M5 | **CSM** (4 cascades, atlas 2×2, `NoShadowCast`) | S18 | Ombres nettes près **et** loin ; les 4 artefacts du constat P3-M4 corrigés |
+
+**Ouverts, par ordre de recommandation** (chaque ligne dit *ce qui casse sans lui*) :
+
+1. 🔴 **P3-M0 — Validation Linux/macOS.** Toujours le premier item sur le fond : AOT et SPIR-V hors-ligne sont
+   **prouvés Windows uniquement**, donc « fondations cross-platform » reste une hypothèse. **Bloqué** : pas de
+   machine (décision humaine, reporté S16). *Le seul item dont l'ancienneté grandit sans qu'on puisse agir.*
+2. 🟠 **GPU-driven shadow cull + slots persistants** ([backlog §1](BACKLOG.md), §2.0bis). Le meilleur rapport
+   valeur/effort aujourd'hui : il rembourse **deux** dettes d'un coup — le cull par cascade quasi inopératoire de
+   P3-M5 (~4× les casters rasterisés) **et** la régression sort/upload O(n) de P3-M4 (le CPU trie/upload encore
+   les 10k candidats par frame). *Mord : déjà au banc, et à 40k il domine.*
+3. 🟠 **Terrain** ([backlog §5](BACKLOG.md)) — le sol est un quad plat. Prérequis de **beaucoup** : ray marching
+   pour les ombres lointaines (§2.3, la piste retenue avec l'humain), relief au soleil rasant, scènes crédibles.
+4. 🟡 **PCSS** ([backlog §2.1bis](BACKLOG.md)) — pénombre à largeur variable, partage la sélection de cascade
+   avec le CSM tout juste livré. Qualité pure, pas de dette remboursée.
+5. 🟡 **Sérialisation source-gen** (partage le générateur du rooting AOT ; parallélisable). **Audio** en dernier.
+
+**Dette transverse à ne pas perdre de vue** : rotation/friction physique ([§4](BACKLOG.md)) · transparence
+**doublement verrouillée** (`SortKey` sans profondeur **+** compaction atomique qui scramble l'ordre) ·
+~200 lignes mortes laissées par le retrait du wedge (§2.0bis) · crash shutdown Silk.NET (upstream).
 
 **Dette léguée par la Phase 2 (détail : board S13), par « quand ça mord »** :
 - ~~🔴 `AggregateBounds` plié une fois~~ ✅ **soldé en P3-M1** (recalcul par frame) ; ~~ordre de frame dans le Sandbox~~ ✅ **soldé en P3-M2** (`FrameOrchestrator` + scheduler).
