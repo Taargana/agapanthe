@@ -239,11 +239,24 @@ les fondations `double` + camera-relative + origine quantifiée ont été constr
 - 🟠 **Atmosphère + terminateur** (§3) : c'est ce qui fait qu'une planète *ressemble* à une planète. Sans ça, une
   sphère texturée reste une balle.
 
-**⚠️ Décision de design à trancher AVANT de coder** : « échelle 1/2 » appliqué **uniformément** ne change rien
-qualitativement (on reste à `1e10`–`1e11` m) — et à vraie échelle, **la planète est un point pendant l'essentiel du
-trajet**, ce qui ne fait pas une scène de test agréable. La plupart des jeux spatiaux **compressent les distances
-bien plus que les tailles** (rapport distinct pour les rayons et pour les orbites). À clarifier avec l'humain :
-*un seul facteur 1/2, ou tailles et distances à des facteurs différents ?*
+**✅ Décision (humain, session 18) : DEUX facteurs distincts — un pour les tailles, un pour les distances.**
+C'est le bon arbitrage, parce que la scène sert deux objectifs qui tirent en sens inverse :
+- **objectif de test** — de *grandes coordonnées absolues*, c'est tout l'intérêt (stresser `double` + depth) ;
+- **objectif d'usage** — une planète *atteignable et visible*, sinon on regarde un point pendant tout le trajet.
+
+Un facteur unique force à sacrifier l'un des deux. Deux facteurs laissent garder des distances énormes (la valeur
+de test) tout en rapprochant les corps de l'observateur (la valeur d'usage).
+
+**Point de départ proposé** (à caler à la construction, ce sont des molettes, pas des constantes gravées) :
+| | Facteur | Résultat |
+|---|---|---|
+| **Tailles** (rayons) | **1/2** | Terre **3 186 km**, Soleil **348 000 km** |
+| **Distances** (orbites) | **1/10** | 1 UA → **1,5e10 m** |
+
+Ça donne ~4 700 rayons terrestres entre la Terre et le Soleil (contre **23 480** à l'échelle réelle) : **5× plus
+compact**, tout en gardant des coordonnées à `1e10` m — soit exactement le régime qu'on veut éprouver
+(ULP `double` ≈ **2 µm** à cette distance : encore très confortable). *Le rapport tailles/distances est le vrai
+bouton de « game feel » ; le rendre configurable dès le départ évitera de le regretter.*
 
 **Découpage réaliste** (ce n'est pas un jalon, c'est une petite phase) :
 1. **Sphère planétaire nue à l'échelle** + fix du **depth range** (reversed-Z / multi-frustum) + jour/nuit

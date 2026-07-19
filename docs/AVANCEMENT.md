@@ -299,8 +299,9 @@ Rien n'est en cours, aucun jalon ouvert. Le board S18 est archivé.
 - **B. Premier pas planétaire** ([backlog §4bis](BACKLOG.md)) — le plus **excitant** et le plus **révélateur** :
   il valide (ou infirme) la thèse « fondations pour un univers persistant ». Mais il ouvre un problème
   **structurel non résolu** (le depth range) → prévoir une vraie phase d'instruction avant de coder.
-  ⚠️ **Question à trancher avec l'humain avant tout code** : « échelle 1/2 » = un facteur unique, ou tailles et
-  distances à des facteurs différents ? (À vraie échelle la planète est un point pendant l'essentiel du trajet.)
+  ✅ **Échelle tranchée (humain, S18)** : **deux facteurs distincts** — tailles et distances. Départ proposé :
+  tailles **1/2**, distances **1/10** (Terre 3 186 km, 1 UA → `1,5e10` m). Garde de grandes coordonnées — la valeur
+  de test — tout en rendant la planète atteignable. Détail et justification : [backlog §4bis](BACKLOG.md).
 - **C. Terrain** ([backlog §5](BACKLOG.md)) — prérequis de B (LOD sphérique) *et* du ray marching pour les ombres
   lointaines (§2.3). Le plus gros morceau des trois.
 
