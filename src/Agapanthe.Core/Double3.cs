@@ -56,7 +56,13 @@ public readonly struct Double3 : IEquatable<Double3>
 
     public double Length => Math.Sqrt((X * X) + (Y * Y) + (Z * Z));
 
+    /// <summary>Squared magnitude — avoids the square root where only comparisons are needed (broadphase).</summary>
+    public double LengthSquared => (X * X) + (Y * Y) + (Z * Z);
+
     public static double Distance(Double3 a, Double3 b) => (a - b).Length;
+
+    /// <summary>Squared distance between two points (no square root).</summary>
+    public static double DistanceSquared(Double3 a, Double3 b) => (a - b).LengthSquared;
 
     /// <summary>Component-wise minimum.</summary>
     public static Double3 Min(Double3 a, Double3 b)

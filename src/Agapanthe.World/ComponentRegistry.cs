@@ -72,6 +72,8 @@ public static class ComponentRegistry
             Root<MeshRef>();
             Root<Bounds>();
             Root<RenderOrder>();
+            Root<Velocity>();
+            Root<RigidBody>();
 
             _initialized = true;
         }

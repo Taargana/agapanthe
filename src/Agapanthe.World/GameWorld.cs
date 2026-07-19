@@ -31,7 +31,7 @@ namespace Agapanthe.World;
 /// </para>
 /// <para>Parallel iteration WITHIN one world (a future job system) is a separate question, unaffected by this.</para>
 /// </remarks>
-public sealed class GameWorld : IDisposable
+public sealed partial class GameWorld : IDisposable
 {
     private readonly ArchWorld _world;
 
@@ -520,8 +520,20 @@ public sealed class GameWorld : IDisposable
                 $"AOT smoke: AnimateDrawables visited {animator.Count} drawables, expected 10.");
         }
 
+        // Physics (P3-M3): two overlapping bodies + one StepPhysics roots the whole physics path under ILC — the
+        // BodyDesc chunk query, the Entity.Set scatter, and the broadphase/sort/impulse of ResolveBodyContacts (a
+        // lone body would skip the pair path entirely). Both carry WorldTransform + RenderOrder, so the final count
+        // rises to 12; the caller only asserts >= 9.
+        var bodySpec = new ImportedEntitySpec(
+            new MeshHandle(0, 1), new MaterialHandle(0, 1), new Double3(600, 0, 0), Matrix4x4.Identity,
+            Vector3.Zero, 1f, 200);
+        SpawnBody(in bodySpec, new Vector3(1, 0, 0), inverseMass: 1f, restitution: 0.3f, radius: 1f);
+        SpawnBody(in bodySpec, new Vector3(-1, 0, 0), inverseMass: 1f, restitution: 0.3f, radius: 1f); // overlaps → pair path
+        StepPhysics(PhysicsSettings.Default(groundY: -10f));
+
         // Chunk-iteration query (the path the systems use) touching several component arrays. Counts the 8 imported
-        // entities plus the 2 surviving deferred drawables (all carry WorldTransform + RenderOrder) = 10.
+        // entities, the 2 surviving deferred drawables, and the 2 physics bodies (all carry WorldTransform +
+        // RenderOrder) = 12.
         var count = 0;
         foreach (ref var chunk in _world.Query(new QueryDescription().WithAll<WorldTransform, RenderOrder>()))
         {

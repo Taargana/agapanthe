@@ -158,16 +158,27 @@ window.Loaded += () =>
 
     world = new GameWorld();
 
-    // AGAPANTHE_SCENE=grid:NxN (or grid:N) replicates the loaded model across an N×N grid — the M4 load bench.
-    // One model loaded, its handles are global (M3), so every cell is just more entities pointing at the same GPU
-    // resources: thousands of drawables for one upload. Cells are spaced by the model's own diagonal so they do
-    // not overlap, and each cell bumps the draw order so no two entities share a SortKey (pre-empts the W3
-    // determinism tie-break). Unset / unparseable → the model once, as before.
-    var (rows, cols) = ParseGrid(Environment.GetEnvironmentVariable("AGAPANTHE_SCENE"));
-    if (rows * cols > 1)
+    // AGAPANTHE_SCENE selects the scene layout. grid:NxN (or grid:N) replicates the loaded model across an N×N grid
+    // (the M4 load bench). drop:N replicates it as a cloud of physics BODIES above the ground (P3-M3). One model
+    // loaded, its handles are global (M3), so every copy is just more entities pointing at the same GPU resources.
+    // Unset / unparseable → the model once, as before.
+    var sceneSpec = Environment.GetEnvironmentVariable("AGAPANTHE_SCENE");
+    var (rows, cols) = ParseGrid(sceneSpec);
+    var dropCount = ParseDrop(sceneSpec);
+    bool multiInstance;
+    double? physicsGroundY = null; // set by drop mode: the Y of the collision plane AND the rendered ground quad
+    if (dropCount > 0)
+    {
+        physicsGroundY = SpawnDropScene(world, specs, dropCount, worldOrigin);
+        multiInstance = true;
+        Log.Info($"Sandbox: [scene] drop {dropCount} bodies = {dropCount * specs.Length} entities " +
+                 $"(ground y={physicsGroundY:F2}); set AGAPANTHE_PHYSICS=1 to simulate.");
+    }
+    else if (rows * cols > 1)
     {
         var spacing = ModelDiagonal(specs) * 1.5;
         SpawnGrid(world, specs, rows, cols, spacing);
+        multiInstance = true;
         Log.Info($"Sandbox: [scene] grid {rows}x{cols} = {rows * cols * specs.Length} entities " +
                  $"(spacing {spacing:F1} m), one model upload.");
     }
@@ -177,6 +188,8 @@ window.Loaded += () =>
         {
             world.SpawnImported(in spec);
         }
+
+        multiInstance = false;
     }
 
     // System 2: the scene extent comes from the world (union of per-entity world spheres), replacing Scene.Bounds*.
@@ -219,9 +232,12 @@ window.Loaded += () =>
         // Wide enough that its edges leave the frame: a small slab floating in the sky reads as a platform, not as
         // ground. Clears the bench grid too (span already spans it).
         var groundSize = (float)Math.Max((span * 2.5) + (extent.Y * 8.0), 40.0);
+        // In drop mode the plane must sit at the PHYSICS ground Y (bodies start high above it and fall onto it), not
+        // just under the initial cloud the way a static scene does. Everywhere else: just under the lowest geometry.
+        var groundY = physicsGroundY ?? (sceneBounds.Min.Y - (extent.Y * 0.02) - 0.01);
         var groundOrigin = new Double3(
             (sceneBounds.Min.X + sceneBounds.Max.X) * 0.5,
-            sceneBounds.Min.Y - (extent.Y * 0.02) - 0.01, // just under the lowest geometry, never intersecting it
+            groundY,
             (sceneBounds.Min.Z + sceneBounds.Max.Z) * 0.5);
 
         var (_, groundSpecs) = registry.Load(
@@ -247,7 +263,7 @@ window.Loaded += () =>
     // attenuation then paints a brightness gradient across the crowd ("each helmet has its own
     // light"). The sun + IBL are physically consistent across the whole grid; the studio rig is a
     // single-model showcase only.
-    SetupLights(renderer.Lights, in sceneBounds, multiInstance: rows * cols > 1);
+    SetupLights(renderer.Lights, in sceneBounds, multiInstance);
 
     // The environment (M7): the renderer needs one before it can draw — the ambient and the skybox both sample it.
     // AGAPANTHE_HDRI=<path> always wins. Otherwise: with the ground on, an OUTDOOR sky, generated procedurally; with
@@ -305,6 +321,18 @@ window.Loaded += () =>
         // Churn as a Simulation system: it enqueues spawns/despawns; the scheduler's end-of-Simulation barrier
         // (= world.FlushStructuralChanges) applies them before PostSimulation propagates. No manual flush.
         orchestrator.Add(Stage.Simulation, new ChurnSystem(world!, churnPerFrame));
+    }
+
+    // AGAPANTHE_PHYSICS=1 drives the drop:N bodies (P3-M3): a fixed-step rigid-body integration in the Simulation
+    // stage, so PostSimulation re-derives world transforms and bounds from the fallen positions and the two-pass
+    // shadow cull sees the casters MOVE (which is what makes ShadowFit.UpstreamExtent finally bite). Opt-in, and
+    // only meaningful with a drop scene (it needs a ground Y); a grid or the lone model just ignores it.
+    if (physicsGroundY is { } physGroundY && Environment.GetEnvironmentVariable("AGAPANTHE_PHYSICS") is "1")
+    {
+        var settings = PhysicsSettings.Default((float)physGroundY);
+        orchestrator.Add(Stage.Simulation, new PhysicsSystem(world!, in settings));
+        Log.Info($"Sandbox: [physics] enabled — gravity {settings.Gravity}, ground y={settings.GroundY:F2}, " +
+                 $"fixed dt {settings.FixedDt:F4}s.");
     }
 
     // Camera-relative proof (spec §3.3): both are world-space doubles, and the GPU sees neither — it only ever
@@ -739,6 +767,23 @@ static (int Rows, int Cols) ParseGrid(string? spec)
     return (1, 1);
 }
 
+// Parses AGAPANTHE_SCENE=drop:N into a body count. Anything else → 0 (not a drop scene).
+static int ParseDrop(string? spec)
+{
+    if (spec is null || !spec.StartsWith("drop:", StringComparison.OrdinalIgnoreCase))
+    {
+        return 0;
+    }
+
+    if (int.TryParse(spec[5..], out var n) && n > 0)
+    {
+        return n;
+    }
+
+    Log.Warn($"Sandbox: could not parse AGAPANTHE_SCENE='{spec}' (expected drop:N); using one model.");
+    return 0;
+}
+
 // The model's world-space diagonal, from the base specs: the span of every drawable's world sphere. Used to space
 // grid cells so copies of the model do not overlap. Differences cancel any world origin baked into the positions.
 static double ModelDiagonal(ImportedEntitySpec[] specs)
@@ -1060,6 +1105,69 @@ static void SpawnGrid(GameWorld world, ImportedEntitySpec[] specs, int rows, int
                     s.BoundsCenter, s.BoundsRadius, orderBase + s.Order));
             }
         }
+    }
+}
+
+// Spawns N physics BODIES (P3-M3): copies of the model as a cloud above the ground, each a rigid body with a
+// per-drawable collision radius. Laid out on a square X/Z lattice (so W1, with no body-body collision yet, lands a
+// non-overlapping field), with deterministic jitter and staggered start heights so the cloud rains down over ~1 s
+// rather than landing in one flat slap. Returns the ground Y: one radius below the model's natural centre, so a
+// body at its natural height rests exactly ON the plane. Deterministic by index — the reproducible-capture gate.
+static double SpawnDropScene(GameWorld world, ImportedEntitySpec[] specs, int n, Double3 worldOrigin)
+{
+    var radius = 1f; // representative collision radius across the model's drawables; spacing/ground scale to it
+    foreach (var s in specs)
+    {
+        radius = MathF.Max(radius, s.BoundsRadius * MathHelpers.MaxStretch(s.RotationScale));
+    }
+
+    // A compact CUBE cluster (side ≈ ∛n) dropped above the ground: spaced just over a diameter apart so nothing
+    // overlaps at spawn, it falls as a loose lattice and settles into a PILE — the outer bodies roll off the ones
+    // beneath, which is the whole point of the body-body collision (W2). A flat lattice would only ever land side by
+    // side. Deterministic jitter breaks the crystal so the heap looks natural.
+    var side = Math.Max(1, (int)Math.Ceiling(Math.Cbrt(n)));
+    var hspacing = radius * 2.1;
+    var vspacing = radius * 2.2;
+    var half = (side - 1) * 0.5;
+    var perLayer = side * side;
+    var groundY = worldOrigin.Y - radius;
+
+    for (var i = 0; i < n; i++)
+    {
+        var layer = i / perLayer;
+        var inLayer = i % perLayer;
+        var cx = inLayer % side;
+        var cz = inLayer / side;
+        var h = Hash(i);
+        var jx = (((h & 0xFFFF) / 65535.0) - 0.5) * radius * 0.4;
+        var jz = ((((h >> 16) & 0xFFFF) / 65535.0) - 0.5) * radius * 0.4;
+        var offset = new Double3(
+            ((cx - half) * hspacing) + jx,
+            (radius * 4.0) + (layer * vspacing), // stacked layers, whole cube above the ground
+            ((cz - half) * hspacing) + jz);
+
+        var orderBase = (uint)(i * specs.Length);
+        foreach (var s in specs)
+        {
+            var bodyRadius = s.BoundsRadius * MathHelpers.MaxStretch(s.RotationScale);
+            world.SpawnBody(
+                new ImportedEntitySpec(
+                    s.Mesh, s.Material, s.Position + offset, s.RotationScale,
+                    s.BoundsCenter, s.BoundsRadius, orderBase + s.Order),
+                velocity: Vector3.Zero, inverseMass: 1f, restitution: 0.3f, radius: bodyRadius);
+        }
+    }
+
+    return groundY;
+
+    // A cheap integer hash (Knuth multiplicative + xorshift finalizer): deterministic per-index jitter, no RNG state.
+    static uint Hash(int i)
+    {
+        var x = (uint)i * 2654435761u;
+        x ^= x >> 15;
+        x *= 2246822519u;
+        x ^= x >> 13;
+        return x;
     }
 }
 

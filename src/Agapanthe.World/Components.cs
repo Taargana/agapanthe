@@ -11,7 +11,12 @@ namespace Agapanthe.World;
 // (§3.2). Components are INTERNAL: nothing outside World needs them, and keeping them internal keeps Arch's
 // Entity (carried by Parent) out of any public surface (audit W1 M3).
 
-/// <summary>Stable identity, unique across processes (future streaming/serialization). Assigned at spawn.</summary>
+/// <summary>Stable identity, unique across processes (future streaming/serialization). Assigned at spawn.
+/// <para>
+/// <b>Downstream packing depends on this staying a dense per-run counter (&lt; 2³²).</b> The physics contact-pair
+/// sort key packs two <c>GlobalId</c>s into a <c>ulong</c> (P3-M3, <c>GameWorld.Physics</c>). The day streaming makes
+/// ids process-unique (sparse / high-bit-tagged), that packing — and any other 32-bit assumption — must be revisited.
+/// </para></summary>
 [Component]
 [StructLayout(LayoutKind.Sequential)]
 internal struct GlobalId
@@ -108,4 +113,32 @@ internal struct Bounds
 internal struct RenderOrder
 {
     public uint Value;
+}
+
+/// <summary>
+/// Linear velocity of a rigid body, in metres/second (P3-M3). Float, not <see cref="Double3"/>: a velocity
+/// magnitude never needs double precision, and integrating <c>pos += (Double3)(Linear · dt)</c> keeps the
+/// far-from-origin precision in the <see cref="WorldPosition"/> alone (spec §3, decision log).
+/// </summary>
+[Component]
+[StructLayout(LayoutKind.Sequential)]
+internal struct Velocity
+{
+    public Vector3 Linear;
+}
+
+/// <summary>
+/// The rigid-body payload (P3-M3, linear only — no rotation/inertia in v1). <see cref="InverseMass"/> is
+/// <c>1/m</c> so an immovable body is <c>0</c> (division-free in the impulse solver); <see cref="Restitution"/>
+/// is the bounciness in [0,1]; <see cref="Radius"/> is the COLLISION radius in world metres, independent of the
+/// render <see cref="Bounds"/> sphere. A body is a drawable created WITH this component (never added later — an
+/// add-component is an archetype move), so non-physics drawables keep their exact archetype.
+/// </summary>
+[Component]
+[StructLayout(LayoutKind.Sequential)]
+internal struct RigidBody
+{
+    public float InverseMass;
+    public float Restitution;
+    public float Radius;
 }
