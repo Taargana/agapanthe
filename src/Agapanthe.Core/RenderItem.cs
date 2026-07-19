@@ -22,12 +22,26 @@ public readonly struct RenderItem
     /// </summary>
     public readonly ulong SortKey;
 
+    /// <summary>
+    /// The item's camera-relative bounding sphere (<c>xyz</c> = centre in the frame's camera-relative space,
+    /// <c>w</c> = radius), P3-M4. Carried through the sort so the GPU cull can test each candidate against the
+    /// frustum planes; a stale/parallel sphere array would desync under the radix sort. The shadow-caster list
+    /// leaves it default — the depth pass never GPU-culls (it keeps the P3-M2 two-pass wedge on the CPU).
+    /// </summary>
+    public readonly Vector4 CameraRelativeSphere;
+
     public RenderItem(in Matrix4x4 worldTransform, MeshHandle mesh, MaterialHandle material, ulong sortKey)
+        : this(in worldTransform, mesh, material, sortKey, default)
+    {
+    }
+
+    public RenderItem(in Matrix4x4 worldTransform, MeshHandle mesh, MaterialHandle material, ulong sortKey, Vector4 cameraRelativeSphere)
     {
         WorldTransform = worldTransform;
         Mesh = mesh;
         Material = material;
         SortKey = sortKey;
+        CameraRelativeSphere = cameraRelativeSphere;
     }
 
     /// <summary>

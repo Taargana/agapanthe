@@ -115,6 +115,71 @@ public readonly unsafe struct CommandList
         => _device.Api.CmdDrawIndexed(_buffer, indexCount, instanceCount, firstIndex, vertexOffset, firstInstance);
 
     /// <summary>
+    /// Issues <paramref name="drawCount"/> indexed draws whose parameters are read from
+    /// <paramref name="args"/> (a <see cref="BufferUsage.Indirect"/> buffer of
+    /// <see cref="DrawIndexedIndirectCommand"/>) starting at <paramref name="offsetBytes"/>, each
+    /// <paramref name="stride"/> bytes apart (P3-M4). The command's <c>instanceCount</c> may be written by
+    /// the GPU (a compute cull) between recording and execution — that is the whole point of indirect.
+    /// <para>
+    /// The batch's offset into the instance SSBO travels as a <b>push constant</b>, never in the command's
+    /// <c>firstInstance</c>: a direct draw's <c>firstInstance</c> is free, but an indirect one needs the
+    /// <c>drawIndirectFirstInstance</c> feature (and MoltenVK's <c>baseInstance</c> is unreliable). Keeping
+    /// it out of the command sidesteps both (P3-M4 decision).
+    /// </para>
+    /// </summary>
+    public void DrawIndexedIndirect(GpuBuffer args, ulong offsetBytes, uint drawCount, uint stride)
+    {
+        ArgumentNullException.ThrowIfNull(args);
+        _device.Api.CmdDrawIndexedIndirect(_buffer, args.Handle, offsetBytes, drawCount, stride);
+    }
+
+    /// <summary>
+    /// A synchronization2 buffer memory barrier (P3-M4): orders writes to <paramref name="buffer"/> in the
+    /// <paramref name="from"/> scope before reads/writes in the <paramref name="to"/> scope. Used for the
+    /// compute-cull hazards — a compute shader writes the indirect-args and instance buffers, then a draw
+    /// reads the args (<see cref="BufferSync.IndirectRead"/>) and the vertex stage reads the instances
+    /// (<see cref="BufferSync.VertexStorageRead"/>). Routes through the same
+    /// <c>vkCmdPipelineBarrier2</c> path as the image transitions.
+    /// </summary>
+    public void BufferBarrier(GpuBuffer buffer, BufferSync from, BufferSync to)
+    {
+        ArgumentNullException.ThrowIfNull(buffer);
+        var (srcStage, srcAccess) = MapBufferSync(from);
+        var (dstStage, dstAccess) = MapBufferSync(to);
+
+        var barrier = new BufferMemoryBarrier2
+        {
+            SType = StructureType.BufferMemoryBarrier2,
+            SrcStageMask = srcStage,
+            SrcAccessMask = srcAccess,
+            DstStageMask = dstStage,
+            DstAccessMask = dstAccess,
+            SrcQueueFamilyIndex = Vk.QueueFamilyIgnored,
+            DstQueueFamilyIndex = Vk.QueueFamilyIgnored,
+            Buffer = buffer.Handle,
+            Offset = 0,
+            Size = Vk.WholeSize,
+        };
+        var dependency = new DependencyInfo
+        {
+            SType = StructureType.DependencyInfo,
+            BufferMemoryBarrierCount = 1,
+            PBufferMemoryBarriers = &barrier,
+        };
+        _device.CmdPipelineBarrier2(_buffer, &dependency);
+    }
+
+    // Maps an engine buffer-sync state to its (stage, access) pair for a sync2 buffer barrier (P3-M4).
+    private static (PipelineStageFlags2 Stage, AccessFlags2 Access) MapBufferSync(BufferSync sync) => sync switch
+    {
+        BufferSync.ComputeWrite => (PipelineStageFlags2.ComputeShaderBit, AccessFlags2.ShaderWriteBit),
+        BufferSync.ComputeRead => (PipelineStageFlags2.ComputeShaderBit, AccessFlags2.ShaderReadBit),
+        BufferSync.IndirectRead => (PipelineStageFlags2.DrawIndirectBit, AccessFlags2.IndirectCommandReadBit),
+        BufferSync.VertexStorageRead => (PipelineStageFlags2.VertexShaderBit, AccessFlags2.ShaderReadBit),
+        _ => throw new ArgumentOutOfRangeException(nameof(sync), sync, null),
+    };
+
+    /// <summary>
     /// Opens a dynamic-rendering scope for <paramref name="attachments"/> (color + optional depth). Routes
     /// through the device dispatch so it works on a Vulkan 1.3 core device and a 1.2 + KHR_dynamic_rendering
     /// device alike. Pair with <see cref="EndRendering"/>; issue <see cref="SetViewportScissor"/> before drawing.

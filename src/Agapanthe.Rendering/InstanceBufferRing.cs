@@ -51,6 +51,13 @@ internal sealed class InstanceBufferRing : IDisposable
         return buffer;
     }
 
+    /// <summary>
+    /// Sizes this slot's buffer to at least <paramref name="count"/> matrices and returns it WITHOUT writing —
+    /// for P3-M4 W1, where the compute cull (not the CPU) fills the buffer with the surviving instances. Same
+    /// grow/shrink discipline as <see cref="Compact"/>.
+    /// </summary>
+    public GpuBuffer EnsureCapacity(int slot, int count) => Ensure(slot, count);
+
     public void Dispose()
     {
         if (_disposed)

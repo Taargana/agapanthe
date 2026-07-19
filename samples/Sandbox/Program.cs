@@ -308,6 +308,9 @@ window.Loaded += () =>
     // one correct order and caches its own render delegate. The Sandbox adds only what is ITS business — the bench
     // spinner and the churn — as Stage.Simulation systems. That both keeps the invariant out of the sample AND
     // proves the scheduler is extensible.
+    // P3-M4 W1: AGAPANTHE_CULL_VERIFY=1 turns on the GPU-vs-CPU visible-count check, logged after the capture.
+    renderer!.VerifyCull = Environment.GetEnvironmentVariable("AGAPANTHE_CULL_VERIFY") is "1";
+
     orchestrator = FrameOrchestrator.CreateDefault(world!, renderer!, registry!, camera, renderList, shadowCasters);
     if (benchMode)
     {
@@ -516,8 +519,11 @@ window.Rendered += dt =>
         if (++benchFrame % BenchLogEvery == 0)
         {
             var avgMs = System.Diagnostics.Stopwatch.GetElapsedTime(0, benchTicks).TotalMilliseconds / BenchLogEvery;
+            // renderList.Count is the scene CANDIDATE count now (P3-M4): every drawable, uploaded for the GPU cull.
+            // The frustum cull runs on the GPU, so the CPU no longer holds a "visible" count (AGAPANTHE_CULL_VERIFY
+            // reads the GPU's back). shadowCasters is still the CPU wedge-culled caster count.
             Log.Info(
-                $"Sandbox: [cull-stats] frame {benchFrame} — visible {renderList.Count} + shadow {shadowCasters.Count}, " +
+                $"Sandbox: [cull-stats] frame {benchFrame} — candidates {renderList.Count} + shadow {shadowCasters.Count}, " +
                 $"draws {renderer!.LastSceneDrawCalls}+{renderer.LastShadowDrawCalls} (instanced), " +
                 $"tick+draw avg {avgMs:F3} ms/frame, per-frame alloc {alloc} B.");
             benchTicks = 0;
@@ -535,6 +541,15 @@ window.Rendered += dt =>
             // P3-M2 F4: the shadow depth-range span this frame. Logged so the D3 capture drift (depth range now fit
             // to caster bounds, not scene bounds) can be justified against the baseline rather than eyeballed.
             Log.Info($"Sandbox: [shadow] eyeDistance {renderer.LastEyeDistance:F3} m (shadow-caster distance {renderer.ShadowCasterDistance:F1} m).");
+
+            // P3-M4 W1 gate: the GPU cull must keep exactly the CPU frustum test's visible set. WaitIdle above means
+            // the compute has finished, so the args instanceCounts are readable. Assert equal (the milestone gate).
+            if (renderer.VerifyCull)
+            {
+                var gpu = renderer.ReadBackSceneVisible();
+                var cpu = renderer.LastSceneCpuVisible;
+                Log.Info($"Sandbox: [cull-verify] GPU visible {gpu} vs CPU visible {cpu} — {(gpu == cpu ? "MATCH" : "MISMATCH")}.");
+            }
         }
 
         window.Close();

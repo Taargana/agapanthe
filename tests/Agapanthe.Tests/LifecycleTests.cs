@@ -29,7 +29,7 @@ public sealed class LifecycleTests
     {
         var render = new RenderList();
         var shadow = new RenderList();
-        world.CollectRenderLists(render, shadow, ViewAt(Double3.Zero), in Wide, in AllCasters, out _);
+        world.CollectRenderLists(render, shadow, ViewAt(Double3.Zero), in AllCasters, out _);
         return render.Count;
     }
 

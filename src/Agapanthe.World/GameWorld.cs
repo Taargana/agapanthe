@@ -485,10 +485,11 @@ public sealed partial class GameWorld : IDisposable
         _ = AggregateBounds();
 
         // ALL THREE systems, so the probe covers exactly what the game runs per frame (audit M2, minor 1):
-        // CollectRenderLists is the only user of GetSpan<MeshRef/RenderOrder/Bounds>() and Frustum.Intersects,
-        // which the smoke would otherwise leave untested under AOT. A wide frustum containing the 8 imported
-        // drawables (at x 0..7) makes the count deterministic while still exercising the cull path + the
-        // camera-relative narrow. The two deferred drawables sit far off-axis (x 500), so they are culled here.
+        // CollectRenderLists is the only user of GetSpan<MeshRef/RenderOrder/Bounds>() and the camera-relative
+        // narrow, which the smoke would otherwise leave untested under AOT. Since P3-M4 the scene is NOT CPU-culled
+        // (the camera cull is a GPU compute pass), so the candidate list holds EVERY drawable that exists AT THIS
+        // POINT: 8 imported + 2 alive deferred (x 500) = 10. The physics bodies are spawned AFTER this call (they
+        // lift the final raw-query count to 12). The `wide` frustum still drives the shadow wedge + pass 2.
         var wide = Frustum.FromViewProjection(
             MathHelpers.LookAt(Vector3.Zero, -Vector3.UnitZ, Vector3.UnitY)
             * MathHelpers.OrthographicVulkan(200f, 200f, -100f, 100f));
@@ -499,12 +500,12 @@ public sealed partial class GameWorld : IDisposable
         var render = new RenderList();
         var smokeShadow = new RenderList();
         // BOTH passes of the D3.c shadow cull, so the ILC roots CompactShadowCasters + the parallel-sphere path too.
-        CollectRenderLists(render, smokeShadow, in smokeView, in wide, in wideExtruded, out _);
+        CollectRenderLists(render, smokeShadow, in smokeView, in wideExtruded, out _);
         CompactShadowCasters(smokeShadow, in wide);
-        if (render.Count != 8)
+        if (render.Count != 10)
         {
             throw new InvalidOperationException(
-                $"AOT smoke: CollectRenderLists produced {render.Count} drawables, expected 8.");
+                $"AOT smoke: CollectRenderLists produced {render.Count} candidates, expected 10.");
         }
 
         // AnimateDrawables is generic over a struct animator — the M4 direct-write animation path. Instantiate it
@@ -669,7 +670,7 @@ public sealed partial class GameWorld : IDisposable
     /// </para>
     /// </summary>
     public void CollectRenderLists(
-        RenderList render, RenderList shadowCasters, in RenderView view, in Frustum cameraFrustum,
+        RenderList render, RenderList shadowCasters, in RenderView view,
         in ExtrudedShadowFrustum lightExtruded, out Double3Bounds casterBounds)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
@@ -694,44 +695,37 @@ public sealed partial class GameWorld : IDisposable
             for (var i = 0; i < count; i++)
             {
                 // The world bounding sphere, narrowed to camera-relative (in double, then cast) — the same space
-                // the frusta live in. Testing the sphere is what culling needs; the (heavier) model matrix is
-                // built only for entities that survive.
+                // the frusta live in. Every drawable is a scene CANDIDATE (P3-M4): the camera-frustum cull moved to
+                // the GPU (a compute pass tests candidates[].sphere against the frustum planes and compacts the
+                // survivors), so the CPU no longer tests inCamera here — it narrows, bakes the model, and uploads.
                 WorldSphere(worlds[i].Value, positions[i].Value, bounds[i], out var worldCenter, out var radius);
                 var center = worldCenter.ToVector3(origin);
-
-                var inCamera = cameraFrustum.Intersects(center, radius);
-                // PASS 1 of the two-pass shadow cull (P3-M2 D3.c): a caster is kept here iff it is in the BOUNDED
-                // wedge — the camera frustum swept toward the light and cut a finite distance upstream. This is a
-                // SUPERSET of the final caster set; the light-volume test is deferred to pass 2 (CompactShadowCasters),
-                // because the light volume depends on the fit, and the fit depends on these casters' bounds. The
-                // wedge depends on neither, so it breaks the circularity.
-                var inWedge = lightExtruded.Intersects(center, radius);
-                if (!inCamera && !inWedge)
-                {
-                    continue;
-                }
+                var sphere = new Vector4(center, radius);
 
                 var model = ComposeModel(worlds[i].Value, positions[i].Value, origin);
-                // Sort key: material then mesh in the high bits (so a sorted run shares one (material, mesh) pair =
-                // one instanced draw, P3-M1), the stable RenderOrder in the low bits as the deterministic tie-break
-                // (spec §6 condition b — Arch's chunk order is not stable).
-                if (inCamera)
-                {
-                    var key = RenderItem.ComposeSortKey(
-                        meshes[i].Material.Index, meshes[i].Mesh.Index, orders[i].Value);
-                    render.Add(new RenderItem(model, meshes[i].Mesh, meshes[i].Material, key));
-                }
 
-                if (inWedge)
+                // Scene candidate — sorted by (material, mesh) so a run is one batch (P3-M1); it carries its
+                // camera-relative sphere so the GPU cull can test it (P3-M4). The tie-break is the stable RenderOrder
+                // (spec §6 condition b — Arch's chunk order is not stable).
+                var key = RenderItem.ComposeSortKey(
+                    meshes[i].Material.Index, meshes[i].Mesh.Index, orders[i].Value);
+                render.Add(new RenderItem(model, meshes[i].Mesh, meshes[i].Material, key, sphere));
+
+                // PASS 1 of the two-pass shadow cull (P3-M2 D3.c) — still CPU: a caster is kept iff it is in the
+                // BOUNDED wedge (the camera frustum swept toward the light, cut a finite distance upstream). This is
+                // a SUPERSET of the final caster set; the light-volume test is deferred to pass 2
+                // (CompactShadowCasters). The wedge depends on neither the fit nor the light volume, so it breaks the
+                // circularity. The shadow pass does not GPU-cull — this logic is subtle and stays here (P3-M4).
+                if (lightExtruded.Intersects(center, radius))
                 {
                     // The depth pass binds no material, so the caster list is keyed MESH-major: one contiguous run
                     // (= one instanced depth draw) per mesh, even when several materials share it.
                     var shadowKey = RenderItem.ComposeShadowSortKey(
                         meshes[i].Mesh.Index, meshes[i].Material.Index, orders[i].Value);
                     shadowCasters.Add(new RenderItem(model, meshes[i].Mesh, meshes[i].Material, shadowKey));
-                    // The caster's sphere, kept in a parallel array (RenderItem carries no sphere) so pass 2 can test
-                    // it against the light volume without recomputing it. Camera-relative, lock-step with the list.
-                    _casterSpheres.Add(new Vector4(center, radius));
+                    // The caster's sphere, kept in a parallel array (RenderItem's sphere is the CAMERA-relative one,
+                    // shared here) so pass 2 can test it against the light volume without recomputing it.
+                    _casterSpheres.Add(sphere);
 
                     // Accumulate the caster AABB in DOUBLE for the depth-range fit (D3.b): the same box AggregateBounds
                     // builds, but over the casters only.
@@ -741,8 +735,9 @@ public sealed partial class GameWorld : IDisposable
             }
         }
 
-        // The render list is FINAL after the camera cull, so it sorts now. The shadow list is NOT sorted here — pass
-        // 2 compacts it against the light volume first, then sorts (sorting now would desync the parallel spheres).
+        // The candidate list sorts now (into batch order for the GPU cull); the survivors' order within a batch is
+        // then decided by the compute compaction. The shadow list is NOT sorted here — pass 2 compacts it against
+        // the light volume first, then sorts (sorting now would desync the parallel spheres).
         render.SortByKey();
         casterBounds = casters;
         _pass1ShadowList = shadowCasters; // the only list CompactShadowCasters may now consume (F7 guard)

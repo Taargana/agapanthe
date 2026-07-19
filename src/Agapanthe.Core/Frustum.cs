@@ -87,7 +87,7 @@ public readonly struct Frustum
     /// <see cref="ExtrudedShadowFrustum"/> derive the shadow-caster wedge from the camera frustum without
     /// duplicating the Gribb-Hartmann extraction.
     /// </summary>
-    internal void CopyPlanes(Span<Vector4> dst)
+    public void CopyPlanes(Span<Vector4> dst)
     {
         dst[0] = _left;
         dst[1] = _right;

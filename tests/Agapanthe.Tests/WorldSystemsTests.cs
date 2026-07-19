@@ -37,15 +37,15 @@ public sealed class WorldSystemsTests
         => new(new MeshHandle(0, 1), new MaterialHandle(0, 1), position, Matrix4x4.Identity,
             Vector3.Zero, radius, order);
 
-    // Runs BOTH culling passes (P3-M2 D3.c): pass 1 fills the render list (camera cull) and the shadow list (wedge
-    // cull, a superset), then pass 2 compacts the shadow list against the light volume. Same argument order as the
-    // pre-D3 one-shot CollectRenderLists, so the shadow-list assertions still describe the FINAL caster set — the
-    // former "light volume ∧ extruded wedge" AND, now split across the two passes exactly as the engine does it.
+    // Runs the collect + the two-pass shadow cull (P3-M2 D3.c): CollectRenderLists fills the render list with ALL
+    // scene candidates (the camera cull is a GPU pass since P3-M4 — not tested here) and the shadow list (wedge
+    // cull, a superset), then pass 2 compacts the shadow list against the light volume. The shadow-list assertions
+    // describe the FINAL caster set — the "light volume ∧ extruded wedge" AND, split across the two passes.
     private static void Cull(
         GameWorld world, RenderList render, RenderList shadow, in RenderView view,
-        in Frustum cameraFrustum, in Frustum lightFrustum, in ExtrudedShadowFrustum wedge)
+        in Frustum lightFrustum, in ExtrudedShadowFrustum wedge)
     {
-        world.CollectRenderLists(render, shadow, in view, in cameraFrustum, in wedge, out _);
+        world.CollectRenderLists(render, shadow, in view, in wedge, out _);
         world.CompactShadowCasters(shadow, in lightFrustum);
     }
 
@@ -130,7 +130,7 @@ public sealed class WorldSystemsTests
         world.PropagateTransforms();
 
         var list = new RenderList();
-        Cull(world, list, new RenderList(), ViewAt(Double3.Zero), in Wide, in Wide, in AllCasters);
+        Cull(world, list, new RenderList(), ViewAt(Double3.Zero), in Wide, in AllCasters);
         Assert.Equal(baked, list.Items[0].WorldTransform); // bit-for-bit unchanged
     }
 
@@ -154,10 +154,10 @@ public sealed class WorldSystemsTests
             Matrix4x4.Identity, Vector3.Zero, 0f, 0));
 
         var atOrigin = new RenderList();
-        Cull(near, atOrigin, new RenderList(), ViewAt(Double3.Zero), in Wide, in Wide, in AllCasters);
+        Cull(near, atOrigin, new RenderList(), ViewAt(Double3.Zero), in Wide, in AllCasters);
 
         var atFar = new RenderList();
-        Cull(farAway, atFar, new RenderList(), ViewAt(far), in Wide, in Wide, in AllCasters);
+        Cull(farAway, atFar, new RenderList(), ViewAt(far), in Wide, in AllCasters);
 
         Assert.Equal(atOrigin.Items[0].WorldTransform, atFar.Items[0].WorldTransform);
     }
@@ -239,19 +239,27 @@ public sealed class WorldSystemsTests
     }
 
     [Fact]
-    public void CollectRenderLists_CullsTheRenderListAgainstTheCameraFrustum()
+    public void CollectRenderLists_EmitsEveryDrawableAsACandidateWithItsSphere()
     {
+        // Since P3-M4 the scene is NOT CPU-culled: CollectRenderLists emits EVERY drawable as a candidate, each
+        // carrying its camera-relative sphere, and the GPU compute pass does the frustum cull (the cull logic
+        // itself is covered by FrustumTests; the GPU==CPU count is a headless render gate). So both drawables are
+        // candidates here — front and behind — sorted by key, each with a correct sphere.
         using var world = new GameWorld();
-        world.SpawnImported(Drawable(new Double3(0, 0, -10), 1f, 0)); // ahead of the camera → visible
-        world.SpawnImported(Drawable(new Double3(0, 0, 10), 1f, 1));  // behind the camera → culled
+        world.SpawnImported(Drawable(new Double3(0, 0, -10), 1f, 0)); // ahead of the camera
+        world.SpawnImported(Drawable(new Double3(0, 0, 10), 2f, 1));  // behind the camera
 
         var render = new RenderList();
         var shadow = new RenderList();
-        Cull(world, render, shadow, ViewAt(Double3.Zero), in Camera, in Wide, in AllCasters);
+        Cull(world, render, shadow, ViewAt(Double3.Zero), in Wide, in AllCasters);
 
-        Assert.Equal(1, render.Count);                 // only the one in front
-        Assert.Equal(0ul, render.Items[0].SortKey);    // and it is the front one (order 0)
-        Assert.Equal(2, shadow.Count);                 // Wide light volume keeps both as casters
+        Assert.Equal(2, render.Count);                             // both are candidates now
+        Assert.Equal(0ul, render.Items[0].SortKey);               // sorted: order 0 first
+        // Each candidate carries its camera-relative sphere (w = radius): the front one at z -10 r 1, the back at
+        // z +10 r 2. The eye is at the origin, so camera-relative centre == world position here.
+        Assert.Equal(new Vector4(0, 0, -10, 1), render.Items[0].CameraRelativeSphere);
+        Assert.Equal(new Vector4(0, 0, 10, 2), render.Items[1].CameraRelativeSphere);
+        Assert.Equal(2, shadow.Count);                            // Wide light volume keeps both as casters
     }
 
     [Fact]
@@ -268,10 +276,10 @@ public sealed class WorldSystemsTests
         var extruded = ExtrudedShadowFrustum.FromCameraFrustum(in Camera, new Vector3(0f, 0f, -1f));
         var render = new RenderList();
         var shadow = new RenderList();
-        Cull(world, render, shadow, ViewAt(Double3.Zero), in Camera, in Wide, in extruded);
+        Cull(world, render, shadow, ViewAt(Double3.Zero), in Wide, in extruded);
 
-        Assert.Equal(0, render.Count);  // invisible to the camera
-        Assert.Equal(1, shadow.Count);  // but still a shadow caster (its shadow enters the view)
+        Assert.Equal(1, render.Count);  // a scene candidate (the GPU will cull it — it is behind the camera)
+        Assert.Equal(1, shadow.Count);  // and still a shadow caster (its shadow enters the view)
     }
 
     [Fact]
@@ -287,24 +295,28 @@ public sealed class WorldSystemsTests
         var extruded = ExtrudedShadowFrustum.FromCameraFrustum(in Camera, new Vector3(0f, -1f, 0f));
         var render = new RenderList();
         var shadow = new RenderList();
-        Cull(world, render, shadow, ViewAt(Double3.Zero), in Camera, in Wide, in extruded);
+        Cull(world, render, shadow, ViewAt(Double3.Zero), in Wide, in extruded);
 
-        Assert.Equal(0, render.Count);
+        Assert.Equal(1, render.Count); // a scene candidate (the GPU will cull it — far below the view)
         Assert.Equal(0, shadow.Count); // dropped: its shadow never reaches the view
     }
 
     [Fact]
-    public void CollectRenderLists_RadiusLetsAStraddlingEntitySurvive()
+    public void CollectRenderLists_CandidateSphereIsCameraRelative()
     {
-        // An entity whose centre is just behind the near plane but whose sphere reaches into the frustum is kept
-        // (the cull is conservative — it never drops something partly visible).
+        // The candidate's sphere is narrowed against the frame origin (spec §3.3): the same entity at the origin
+        // and 10 000 km out produces the SAME camera-relative sphere when viewed from the matching eye — which is
+        // what lets the GPU cull run in float without losing metres. Here, viewed from a far origin, the sphere is
+        // the small local offset, not the enormous absolute coordinate.
+        var far = new Double3(1e7, 1e7, 1e7);
         using var world = new GameWorld();
-        world.SpawnImported(Drawable(new Double3(0, 0, 0.5), 2f, 0)); // centre behind the eye, radius reaches ahead
+        world.SpawnImported(Drawable(far + new Double3(0, 0, -10), 2f, 0));
 
         var render = new RenderList();
-        Cull(world, render, new RenderList(), ViewAt(Double3.Zero), in Camera, in Wide, in AllCasters);
+        Cull(world, render, new RenderList(), ViewAt(far), in Wide, in AllCasters);
 
         Assert.Equal(1, render.Count);
+        Assert.Equal(new Vector4(0, 0, -10, 2), render.Items[0].CameraRelativeSphere);
     }
 
     [Fact]
@@ -341,7 +353,7 @@ public sealed class WorldSystemsTests
             world.AnimateDrawables(ref spin);
             world.PropagateTransforms();
             _ = world.AggregateBounds();
-            Cull(world, render, shadow, ViewAt(Double3.Zero), in Wide, in Wide, in AllCasters);
+            Cull(world, render, shadow, ViewAt(Double3.Zero), in Wide, in AllCasters);
         }
 
         var before = GC.GetAllocatedBytesForCurrentThread();
@@ -350,7 +362,7 @@ public sealed class WorldSystemsTests
             world.AnimateDrawables(ref spin); // the W4 path — its zero-alloc must be covered too (audit Med1)
             world.PropagateTransforms();
             _ = world.AggregateBounds();
-            Cull(world, render, shadow, ViewAt(Double3.Zero), in Wide, in Wide, in AllCasters);
+            Cull(world, render, shadow, ViewAt(Double3.Zero), in Wide, in AllCasters);
         }
 
         var allocated = GC.GetAllocatedBytesForCurrentThread() - before;

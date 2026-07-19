@@ -9,4 +9,8 @@ public enum BufferUsage
     Index = 1 << 1,
     Uniform = 1 << 2,
     Storage = 1 << 3,
+
+    /// <summary>Source of <c>vkCmdDrawIndexedIndirect</c> draw commands (P3-M4). Combine with
+    /// <see cref="Storage"/> when a compute shader writes the command's <c>instanceCount</c>.</summary>
+    Indirect = 1 << 4,
 }

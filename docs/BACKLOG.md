@@ -29,21 +29,37 @@ Détail et justification : `AVANCEMENT.md` § P3-M1 et board de session 14.
 - 🟡 **Crash au shutdown GLFW/Silk.NET** reproductible (`AGAPANTHE_UNLOAD_TEST=20`, ~2 runs/10, *après* le rapport
   propre) — upstream, gate CI keyé sur la ligne de rapport et non sur l'exit code.
 
-## 1. Rendu GPU-driven (P3-M2 — la marche suivante)
+## 1. Rendu GPU-driven
 
-P3-M1 a posé le SSBO d'instances, le batching et le cull CPU. La suite :
+- ~~**Cull en compute + draw indirect**~~ ✅ **livré en P3-M4** (session 17) : `vkCmdDrawIndexedIndirect`, `BufferUsage.Indirect`,
+  offset de batch en **push constant** (pas `firstInstance` → pas de dépendance `drawIndirectFirstInstance`, risque
+  `baseInstance` MoltenVK neutralisé), `scene_cull.comp` (frustum-cull + compaction atomics), barrières compute→indirect/vertex.
+  Gate : GPU visible == CPU (2557 @10k AOT), mono bit-identique. **Double audit PASS.** Cull d'ombre resté CPU two-pass (P3-M2).
 
-- **Slots persistants dirty-trackés** : les transforms ne sont plus recopiées par frame, seules les entités qui ont
-  bougé écrivent leur slot. `RenderItem.WorldTransform` (64 des 88 octets) devient mort ; `RenderItem` se réduit à
-  (handles, clé, instanceId), et les deux SSBO (scène + ombre) fusionnent en un buffer + deux plages d'index.
-- **Cull en compute + draw indirect.** ⚠️ **Ce n'est PAS « une ligne de shader »** (erreur inscrite dans la spec P3-M1,
-  corrigée depuis) : l'`instanceCount` d'un batch n'est plus connu côté CPU → il faut `vkCmdDrawIndexedIndirect(Count)`,
-  donc `BufferUsage.Indirect`, `CommandList.DrawIndexedIndirect`, et la feature **`drawIndirectFirstInstance`** (le
-  `firstInstance` d'un draw **direct** est gratuit ; celui d'un draw **indirect** ne l'est pas).
-  → **Piste à trancher tôt** : porter l'offset de batch dans un **push constant** plutôt que dans `firstInstance`. Ça
-  supprime la dépendance à la feature *et* neutralise le risque `baseInstance` sur MoltenVK d'un seul coup.
-- **Clé mesh-major dédiée** pour la liste d'ombre : déjà fait en P3-M1, à conserver si les listes fusionnent.
-- *Ce que ça rembourse* : le cull CPU O(n), ~2 ms AOT à 10 000 entités. *Mord : à 100 000 entités.*
+- 🔴 **Slots persistants dirty-trackés — LE prochain jalon GPU-driven (la partie (C) reportée de P3-M4).** Les transforms
+  ne sont plus recopiées/re-narrow/re-triées par frame ; seules les entités qui ont bougé écrivent leur slot (+ re-narrow
+  global au changement d'origine quantifiée). `RenderItem.WorldTransform` devient mort ; `RenderItem` se réduit à
+  (handles, clé, instanceId, sphère). *Quand ça mord — DEUX raisons (audit P3-M4)* : (a) à ~100 000 entités, le cull CPU
+  historique ; (b) **immédiatement, pour défaire la régression qu'A+B a introduite** : P3-M4 sans (C) fait *strictement
+  plus* de travail CPU qu'avant — il narrow/bake/**trie TOUS** les candidats (10001) et **upload ~960 Ko/frame** là où
+  P3-M1 ne traitait que les visibles. Le mur CPU n'a pas disparu, il a **migré** du cull vers le sort+upload (et à 40k il
+  est probablement plus haut). C'est le prix assumé d'une fondation ; (C) est ce qui le rembourse.
+
+- 🟠 **Buffers GPU-produits en device-local.** L'instance buffer compacté et l'args buffer sont **host-visible** (le
+  compute y écrit / y fait des atomics). Sur GPU discret sans ReBAR (le banc Windows) = trafic PCIe par dispatch, sûrement
+  une part des ~8 ms @10k. Sur MoltenVK (mémoire unifiée, cible portability) = neutre. Les passer en **device-local** une
+  fois la gate `ReadBackSceneVisible` (qui exige host-visible pour `MappedSpan`) **isolée en Debug**. À faire avec (C).
+
+- 🟠 **La compaction atomique est un SECOND verrou sur la transparence** (en plus du `SortKey` sans profondeur, §0) :
+  l'`atomicAdd` **scramble l'ordre intra-batch**, donc trier les candidats arrière→avant ne suffira pas — le futur
+  transparent devra re-trier les survivants (readback CPU, ou sort GPU par batch). Sans effet aujourd'hui (opaque z-testé).
+
+- 🟡 **MultiDrawIndirect** (un seul `vkCmdDrawIndexedIndirect` pour tous les batches, `drawCount = N`) : aujourd'hui un
+  draw + binds **par batch**, y compris les batches entièrement cullés (`instanceCount=0`, no-op qui gonfle `LastSceneDrawCalls`).
+  Repousse `VK_KHR_draw_indirect_count` (hors core 1.2, incertain MoltenVK) tant que le nombre de batches reste connu CPU.
+- 🟡 **Cull d'ombre en compute** : le wedge two-pass P3-M2 reste CPU (subtil) — le déplacer réunifierait le seam de culling
+  (aujourd'hui scène→GPU, ombre→CPU dans le World).
+- *Ce que ça rembourse (avec (C))* : le cull CPU O(n) + le sort/upload O(n) de la fondation. *Mord : dès 40k, et à 100k.*
 
 ## 2. Ombres à l'échelle
 

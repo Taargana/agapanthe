@@ -147,9 +147,10 @@ public sealed class FrameOrchestrator
             var wedge = ExtrudedShadowFrustum.FromCameraFrustum(
                 in cameraFrustum, lightDir, anchorCenter, anchorRadius, o._renderer.ShadowCasterDistance);
 
-            // Pass 1: camera cull → render (final, sorted); wedge cull → shadow casters (superset) + their bounds.
+            // Collect: scene CANDIDATES (all drawables, sorted, sphere-carrying — the camera cull is done on the GPU
+            // now, P3-M4); wedge cull → shadow casters (superset) + their bounds (still CPU two-pass, P3-M2 D3).
             o._world.CollectRenderLists(
-                o._render, o._shadowCasters, in view, in cameraFrustum, in wedge, out var casterBounds);
+                o._render, o._shadowCasters, in view, in wedge, out var casterBounds);
 
             // Fit: footprint on the scene bounds, depth range on the caster bounds (D3.b). The wedge list is a
             // superset of the final list, so fitting on its bounds can only grow the depth range — never clip a
@@ -160,8 +161,10 @@ public sealed class FrameOrchestrator
             // Pass 2: tighten the caster list against the fitted light volume, in place, then sort.
             o._world.CompactShadowCasters(o._shadowCasters, in lightFrustum);
 
+            // The camera frustum crosses into DrawScene, where the compute pass culls the scene candidates against it.
             o._renderer.DrawScene(
-                o._render, o._shadowCasters, o._registry, in view, in lightViewProj, ctx.Cmd, ctx.Frame, ctx.Target);
+                o._render, o._shadowCasters, o._registry, in view, in cameraFrustum, in lightViewProj,
+                ctx.Cmd, ctx.Frame, ctx.Target);
         }
     }
 }

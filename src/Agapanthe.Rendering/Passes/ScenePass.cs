@@ -38,9 +38,11 @@ internal sealed class ScenePass : ReloadablePass
             SetLayouts = [_frameSetLayout, _materialSetLayout],
             PushConstants =
             [
-                // Model matrices now come from the per-instance SSBO (set 0, binding 6); only the fragment
-                // debug-view selector remains a push constant, kept at offset 64 (P3-M1).
-                new PushConstantRange(64, 4, ShaderStages.Fragment), // debug view selector
+                // Vertex: the per-batch instance-SSBO offset (P3-M4 W0), added to gl_InstanceIndex — replaces the
+                // draw's firstInstance so no drawIndirectFirstInstance feature is needed.
+                new PushConstantRange(0, 4, ShaderStages.Vertex),
+                // Fragment: the debug-view selector, kept at offset 64 (P3-M1). Disjoint from the vertex range.
+                new PushConstantRange(64, 4, ShaderStages.Fragment),
             ],
             // Scene renders into the HDR target (decision 2); the tonemap pass owns the sRGB swapchain write.
             ColorFormat = _colorFormat,

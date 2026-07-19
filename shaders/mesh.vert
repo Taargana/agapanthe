@@ -28,15 +28,22 @@ layout(set = 0, binding = 0) uniform CameraUbo {
 } camera;
 
 // Set 0, binding 6 = per-instance model matrices (P3-M1). The renderer compacts the visible entities' baked
-// (camera-relative) matrices into this storage buffer each frame, in sorted order; the draw offsets gl_InstanceIndex
-// via firstInstance so instances.model[gl_InstanceIndex] is this instance's matrix. Read-only in the vertex stage
+// (camera-relative) matrices into this storage buffer each frame, in sorted order. Read-only in the vertex stage
 // (Vulkan-core, no feature). std430: a mat4[] is tightly packed at 64-byte stride, matching the CPU Matrix4x4[].
 layout(std430, set = 0, binding = 6) readonly buffer InstanceTransforms {
     mat4 model[];
 } instances;
 
+// Push constant: the batch's start offset into the instance SSBO (P3-M4). A draw-indirect command cannot carry a
+// firstInstance without the drawIndirectFirstInstance feature (and MoltenVK's baseInstance is unreliable), so the
+// offset is pushed here instead and added to gl_InstanceIndex. The fragment stage reads its own member
+// (debugView) at offset 64 in this same block — disjoint offsets, one push-constant block.
+layout(push_constant) uniform PushConstants {
+    layout(offset = 0) uint batchOffset;
+} push;
+
 void main() {
-    mat4 model = instances.model[gl_InstanceIndex];
+    mat4 model = instances.model[gl_InstanceIndex + push.batchOffset];
     vec4 world = model * vec4(inPosition, 1.0);
     gl_Position = camera.proj * camera.view * world;
     worldPos = world.xyz;

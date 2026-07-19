@@ -55,7 +55,7 @@ public sealed class ShadowCasterCullTests
 
         var render = new RenderList();
         var shadow = new RenderList();
-        world.CollectRenderLists(render, shadow, in view, in cameraFrustum, in wedge, out var casterBounds);
+        world.CollectRenderLists(render, shadow, in view, in wedge, out var casterBounds);
 
         var sceneBounds = world.AggregateBounds(); // huge: it includes B at 1e7
 
@@ -104,7 +104,7 @@ public sealed class ShadowCasterCullTests
 
         var render = new RenderList();
         var shadow = new RenderList();
-        world.CollectRenderLists(render, shadow, in view, in cameraFrustum, in wedge, out var casterBounds);
+        world.CollectRenderLists(render, shadow, in view, in wedge, out var casterBounds);
         Assert.Equal(1, shadow.Count); // in the wedge
 
         var sceneBounds = world.AggregateBounds();
@@ -134,7 +134,7 @@ public sealed class ShadowCasterCullTests
 
         var render = new RenderList();
         var shadow = new RenderList();
-        world.CollectRenderLists(render, shadow, in view, in cameraFrustum, in wedge, out var casterBounds);
+        world.CollectRenderLists(render, shadow, in view, in wedge, out var casterBounds);
 
         var sceneBounds = world.AggregateBounds();
         var lightFrustum = Frustum.FromViewProjection(ShadowFit.ComputeLightViewProj(

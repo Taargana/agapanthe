@@ -44,7 +44,8 @@ internal sealed class ShadowPass : ReloadablePass
             VertexLayout = ShadowVertexLayout,
             // Set 0 = per-instance model matrices (P3-M1); lightViewProj stays a push constant (offset 0, 64 B).
             SetLayouts = [_instanceSetLayout],
-            PushConstants = [new PushConstantRange(0, 64, ShaderStages.Vertex)],
+            // lightViewProj (offset 0, 64 B) + the per-batch instance-SSBO offset (offset 64, 4 B, P3-M4 W0).
+            PushConstants = [new PushConstantRange(0, 68, ShaderStages.Vertex)],
             ColorFormat = PixelFormat.Undefined,
             DepthFormat = _depthFormat,
             DepthTest = true,

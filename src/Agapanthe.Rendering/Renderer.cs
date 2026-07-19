@@ -87,6 +87,44 @@ public sealed class Renderer : IDisposable
     private readonly InstanceBufferRing _sceneTransforms;
     private readonly InstanceBufferRing _shadowTransforms;
 
+    // One indirect-args buffer per frame in flight, per pass (P3-M4 W0): the CPU writes one
+    // DrawIndexedIndirectCommand per batch and the pass issues DrawIndexedIndirect instead of DrawIndexed.
+    private readonly IndirectArgsRing _sceneArgs;
+    private readonly IndirectArgsRing _shadowArgs;
+
+    // Reused per-frame batch scratch (P3-M4 W0): the (mesh, material, run offset, run length) of each draw batch,
+    // and the parallel indirect-command array. Grown on demand, never re-allocated per frame (0-alloc steady state).
+    private Batch[] _sceneBatches = new Batch[64];
+    private Batch[] _shadowBatches = new Batch[64];
+    private DrawIndexedIndirectCommand[] _sceneCommands = new DrawIndexedIndirectCommand[64];
+    private DrawIndexedIndirectCommand[] _shadowCommands = new DrawIndexedIndirectCommand[64];
+
+    // GPU scene cull (P3-M4 W1): the compute pipeline that frustum-culls the scene candidates and compacts the
+    // survivors, plus the per-frame upload rings it reads (candidates in, per-batch base offsets in) and the
+    // reused CPU scratch that fills them. The args ring (compute writes instanceCount) and the instance ring
+    // (compute writes survivors) are the same _sceneArgs / _sceneTransforms the draw then consumes.
+    private ShaderModule? _sceneCullShader;
+    private DescriptorSetLayout? _sceneCullSetLayout;
+    private ComputePipeline? _sceneCullPipeline;
+    private readonly StorageBufferRing<SceneCandidate> _sceneCandidates;
+    private readonly StorageBufferRing<uint> _batchBase;
+    private SceneCandidate[] _candidateScratch = new SceneCandidate[1024];
+    private uint[] _batchBaseScratch = new uint[64];
+
+    // Cull-verification (P3-M4 W1 gate): when VerifyCull is set, CullSceneOnGpu also counts the candidates the CPU
+    // frustum test keeps (the oracle) and remembers this frame's args buffer + batch count so ReadBackSceneVisible
+    // can sum the instanceCounts the GPU wrote. The two must match (visually identical + same visible SET). Off the
+    // hot path — only when the flag is set (the bench).
+    private GpuBuffer? _lastSceneArgs;
+    private int _lastSceneBatchCount;
+
+    /// <summary>P3-M4 W1 gate: enable the CPU-vs-GPU visible-count check (bench/headless only).</summary>
+    public bool VerifyCull { get; set; }
+
+    /// <summary>The number of scene candidates the CPU frustum test keeps this frame (the cull oracle), when
+    /// <see cref="VerifyCull"/> is on. Compare against <see cref="ReadBackSceneVisible"/> after the GPU idles.</summary>
+    public int LastSceneCpuVisible { get; private set; }
+
     /// <summary>Instanced draw calls issued by the last scene / shadow pass (P3-M1 bench diagnostic).</summary>
     public int LastSceneDrawCalls { get; private set; }
 
@@ -196,6 +234,10 @@ public sealed class Renderer : IDisposable
         _device = device;
         _sceneTransforms = new InstanceBufferRing(device);
         _shadowTransforms = new InstanceBufferRing(device);
+        _sceneArgs = new IndirectArgsRing(device);
+        _shadowArgs = new IndirectArgsRing(device);
+        _sceneCandidates = new StorageBufferRing<SceneCandidate>(device);
+        _batchBase = new StorageBufferRing<uint>(device);
 
         try
         {
@@ -295,6 +337,28 @@ public sealed class Renderer : IDisposable
             _skyboxPass = new SkyboxPass(
                 device, shaderDirectory, _shaderCompiler,
                 _skyboxSetLayout, HdrFormat, DepthFormat);
+
+            // --- GPU scene cull compute (P3-M4 W1) ----------------------------------------------------------
+            // Not a graphics pass (not hot-reloadable, like the IBL kernels): compiled once here. Four storage
+            // buffers — candidates in (0), compacted instances out (1), indirect args in/out (2), per-batch base
+            // in (3) — plus a push constant carrying the six frustum planes + the candidate count.
+            var (cullSpirv, _) = _shaderCompiler.CompileFileResolved(
+                Path.Combine(shaderDirectory, "scene_cull.comp"), ShaderStage.Compute);
+            _sceneCullShader = new ShaderModule(device, cullSpirv, ShaderStage.Compute);
+            _sceneCullSetLayout = new DescriptorSetLayout(
+                device,
+                [
+                    new DescriptorBinding(0, DescriptorKind.StorageBuffer, ShaderStages.Compute),
+                    new DescriptorBinding(1, DescriptorKind.StorageBuffer, ShaderStages.Compute),
+                    new DescriptorBinding(2, DescriptorKind.StorageBuffer, ShaderStages.Compute),
+                    new DescriptorBinding(3, DescriptorKind.StorageBuffer, ShaderStages.Compute),
+                ]);
+            _sceneCullPipeline = new ComputePipeline(device, new ComputePipelineDesc
+            {
+                ComputeShader = _sceneCullShader,
+                SetLayouts = [_sceneCullSetLayout],
+                PushConstants = [new PushConstantRange(0, (uint)Unsafe.SizeOf<CullPushConstants>(), ShaderStages.Compute)],
+            });
 
             // --- Shader hot reload (M8-05) ------------------------------------------------------------------
             // Only the four graphics passes are hot-reloadable (the IBL compute kernels are deferred — board).
@@ -705,6 +769,7 @@ public sealed class Renderer : IDisposable
         RenderList shadowCasters,
         ResourceRegistry registry,
         in RenderView view,
+        in Frustum cameraFrustum,
         in Matrix4x4 lightViewProj,
         CommandList cmd,
         FrameContext frame,
@@ -729,7 +794,7 @@ public sealed class Renderer : IDisposable
         // lightViewProj is computed by the caller (before the caster list is culled against the light volume) and
         // shared by the shadow pass (render depth) and the scene pass (pack into the lights UBO for the PCF lookup).
         RecordShadowPass(cmd, frame, shadowCasters, registry, in lightViewProj);
-        RecordScenePass(cmd, frame, renderList, registry, in view, target, in lightViewProj);
+        RecordScenePass(cmd, frame, renderList, registry, in view, in cameraFrustum, target, in lightViewProj);
         RecordTonemapPass(cmd, frame, target);
     }
 
@@ -790,23 +855,35 @@ public sealed class Renderer : IDisposable
         frame.WriteStorageBuffer(shadowSet, 0, instanceBuffer);
         cmd.BindDescriptorSet(pipeline, 0, shadowSet);
 
-        LastShadowDrawCalls = 0;
-        var start = 0;
-        while (start < items.Length)
+        // The depth pass binds no material, so it batches by MESH only (the caster list is mesh-major keyed). Same
+        // draw-indirect conversion as the scene (P3-M4 W0): one DrawIndexedIndirect per mesh run, the run's start
+        // offset in a VERTEX push constant after lightViewProj (offset 64), not firstInstance.
+        var batchCount = BuildShadowBatches(items, ref _shadowBatches);
+        if (_shadowCommands.Length < batchCount)
         {
-            var meshHandle = items[start].Mesh;
-            var end = start + 1;
-            while (end < items.Length && items[end].Mesh == meshHandle)
-            {
-                end++;
-            }
+            System.Array.Resize(ref _shadowCommands, _shadowBatches.Length);
+        }
 
-            var mesh = registry.Resolve(meshHandle);
+        for (var b = 0; b < batchCount; b++)
+        {
+            ref readonly var batch = ref _shadowBatches[b];
+            _shadowCommands[b] = new DrawIndexedIndirectCommand(
+                registry.Resolve(batch.Mesh).IndexCount, batch.Count, 0, 0, 0);
+        }
+
+        var argsBuffer = _shadowArgs.Upload(frame.Slot, _shadowCommands.AsSpan(0, batchCount));
+        var stride = (uint)System.Runtime.CompilerServices.Unsafe.SizeOf<DrawIndexedIndirectCommand>();
+
+        LastShadowDrawCalls = 0;
+        for (var b = 0; b < batchCount; b++)
+        {
+            ref readonly var batch = ref _shadowBatches[b];
+            var mesh = registry.Resolve(batch.Mesh);
+            cmd.PushConstants(pipeline, ShaderStages.Vertex, batch.Offset, offsetBytes: 64); // gl_InstanceIndex base
             cmd.BindVertexBuffer(mesh.VertexBuffer);
             cmd.BindIndexBuffer(mesh.IndexBuffer, mesh.IndexFormat);
-            cmd.DrawIndexed(mesh.IndexCount, (uint)(end - start), firstIndex: 0, vertexOffset: 0, firstInstance: (uint)start);
+            cmd.DrawIndexedIndirect(argsBuffer, (ulong)b * stride, drawCount: 1, stride);
             LastShadowDrawCalls++;
-            start = end;
         }
 
         cmd.EndRendering();
@@ -826,7 +903,7 @@ public sealed class Renderer : IDisposable
     /// </summary>
     private void RecordScenePass(
         CommandList cmd, FrameContext frame, RenderList renderList, ResourceRegistry registry, in RenderView view,
-        SwapchainTarget target, in Matrix4x4 lightViewProj)
+        in Frustum cameraFrustum, SwapchainTarget target, in Matrix4x4 lightViewProj)
     {
         // Capture region for the forward PBR pass; the skybox draw below nests its own "Skybox" sub-label.
         using var _ = cmd.PushDebugLabel(ScenePassLabel);
@@ -848,6 +925,13 @@ public sealed class Renderer : IDisposable
         // loadOp=Clear makes the prior depth contents irrelevant, so a fresh Undefined->attachment transition
         // each frame is correct (its aspect-aware source stage serializes against the previous frame's depth).
         cmd.TransitionImage(depth, ImageLayoutState.Undefined, ImageLayoutState.DepthAttachment);
+
+        // GPU cull (P3-M4 W1) runs BEFORE the render pass — a compute dispatch cannot be recorded inside
+        // BeginRendering/EndRendering. It frustum-culls the scene candidates, compacts the survivors into the
+        // instance buffer, and writes each batch's instanceCount into the indirect-args buffer; two buffer
+        // barriers then hand those to the draw (vertex read + indirect read).
+        var instanceBuffer = CullSceneOnGpu(
+            cmd, frame, renderList, registry, in cameraFrustum, out var sceneBatchCount, out var sceneArgsBuffer);
 
         cmd.BeginRendering(new RenderingAttachments
         {
@@ -895,11 +979,8 @@ public sealed class Renderer : IDisposable
         frame.WriteCombinedImageSampler(frameSet, 4, ibl.Prefiltered, iblSampler);
         frame.WriteCombinedImageSampler(frameSet, 5, ibl.BrdfLut, iblSampler);
 
-        // Compact the visible entities' baked (camera-relative) matrices into this slot's per-instance SSBO, in
-        // sorted order, then point binding 6 at it (P3-M1). This is the one place the GPU-free RenderList meets the
-        // GPU: World stays graphics-free (it filled RenderItem.WorldTransform), the Renderer does the copy.
-        var items = renderList.Items;
-        var instanceBuffer = _sceneTransforms.Compact(frame.Slot, items);
+        // Point binding 6 at the COMPUTE-CULLED instance buffer (P3-M4 W1): the cull dispatch above compacted the
+        // surviving matrices into it, and the vertex shader reads instances.model[gl_InstanceIndex + batchOffset].
         frame.WriteStorageBuffer(frameSet, 6, instanceBuffer);
 
         cmd.BindPipeline(pipeline);
@@ -908,36 +989,30 @@ public sealed class Renderer : IDisposable
         var debugView = DebugView;
         cmd.PushConstants(pipeline, ShaderStages.Fragment, in debugView, offsetBytes: 64);
 
-        // Batch the sorted list into one instanced draw per run of identical (material, mesh): the SortKey groups
-        // them, so a run is contiguous. firstInstance offsets gl_InstanceIndex into the SSBO region above, so no
-        // per-batch rebind of the transform buffer. This collapses ~N draws to one per (material, mesh) pair.
+        // One DrawIndexedIndirect per batch (P3-M4). The batch table (_sceneBatches) and args buffer were built by
+        // the cull; each command's instanceCount was written by the compute shader, so the CPU never learns how many
+        // survived. The batch's start offset into the instance SSBO travels as a VERTEX push constant (batchOffset),
+        // never firstInstance — so no drawIndirectFirstInstance feature is needed.
+        var stride = (uint)System.Runtime.CompilerServices.Unsafe.SizeOf<DrawIndexedIndirectCommand>();
         LastSceneDrawCalls = 0;
-        var start = 0;
         var boundMaterial = MaterialHandle.Invalid;
-        while (start < items.Length)
+        for (var b = 0; b < sceneBatchCount; b++)
         {
-            var material = items[start].Material;
-            var meshHandle = items[start].Mesh;
-            var end = start + 1;
-            while (end < items.Length && items[end].Material == material && items[end].Mesh == meshHandle)
-            {
-                end++;
-            }
-
-            var mesh = registry.Resolve(meshHandle);
+            ref readonly var batch = ref _sceneBatches[b];
+            var mesh = registry.Resolve(batch.Mesh);
             // The key is material-major, so consecutive batches often share one material (same material, several
             // meshes): rebind set 1 only when it actually changes.
-            if (material != boundMaterial)
+            if (batch.Material != boundMaterial)
             {
-                cmd.BindDescriptorSet(pipeline, 1, registry.Resolve(material).DescriptorSet); // set 1: per-material
-                boundMaterial = material;
+                cmd.BindDescriptorSet(pipeline, 1, registry.Resolve(batch.Material).DescriptorSet); // set 1: per-material
+                boundMaterial = batch.Material;
             }
 
+            cmd.PushConstants(pipeline, ShaderStages.Vertex, batch.Offset, offsetBytes: 0); // gl_InstanceIndex base
             cmd.BindVertexBuffer(mesh.VertexBuffer);
             cmd.BindIndexBuffer(mesh.IndexBuffer, mesh.IndexFormat);
-            cmd.DrawIndexed(mesh.IndexCount, (uint)(end - start), firstIndex: 0, vertexOffset: 0, firstInstance: (uint)start);
+            cmd.DrawIndexedIndirect(sceneArgsBuffer, (ulong)b * stride, drawCount: 1, stride);
             LastSceneDrawCalls++;
-            start = end;
         }
 
         // Skybox (M7): fill the background with the environment cubemap inside this same pass, AFTER the meshes
@@ -1038,6 +1113,213 @@ public sealed class Renderer : IDisposable
         _depthImage = new GpuImage(_device, width, height, DepthFormat, ImageUsage.DepthAttachment);
     }
 
+    // The scene-cull push constant (P3-M4 W1): the six camera-frustum planes (inward normals, normalized) plus the
+    // candidate count. std430-compatible: six vec4 at 0..95, a uint at 96 → 100 bytes, within the 128-byte range.
+    [System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Sequential)]
+    private struct CullPushConstants
+    {
+        public Vector4 Plane0;
+        public Vector4 Plane1;
+        public Vector4 Plane2;
+        public Vector4 Plane3;
+        public Vector4 Plane4;
+        public Vector4 Plane5;
+        public uint CandidateCount;
+    }
+
+    // One draw batch (P3-M4 W0): a contiguous run of the sorted render list that shares a (material, mesh) pair —
+    // the scene — or a mesh — the shadow pass. Offset/Count index the compacted instance SSBO.
+    private readonly struct Batch(MeshHandle mesh, MaterialHandle material, uint offset, uint count)
+    {
+        public readonly MeshHandle Mesh = mesh;
+        public readonly MaterialHandle Material = material;
+        public readonly uint Offset = offset;
+        public readonly uint Count = count;
+    }
+
+    // Walks the material-major sorted list into (material, mesh) runs, writing each as a Batch into the reused
+    // scratch (grown, never re-allocated per frame). Returns the batch count.
+    private static int BuildBatches(ReadOnlySpan<RenderItem> items, ref Batch[] batches)
+    {
+        var count = 0;
+        var start = 0;
+        while (start < items.Length)
+        {
+            var material = items[start].Material;
+            var mesh = items[start].Mesh;
+            var end = start + 1;
+            while (end < items.Length && items[end].Material == material && items[end].Mesh == mesh)
+            {
+                end++;
+            }
+
+            EnsureBatchCapacity(ref batches, count + 1);
+            batches[count++] = new Batch(mesh, material, (uint)start, (uint)(end - start));
+            start = end;
+        }
+
+        return count;
+    }
+
+    // Same, keyed by MESH only (the shadow pass binds no material — one contiguous run per mesh).
+    private static int BuildShadowBatches(ReadOnlySpan<RenderItem> items, ref Batch[] batches)
+    {
+        var count = 0;
+        var start = 0;
+        while (start < items.Length)
+        {
+            var mesh = items[start].Mesh;
+            var end = start + 1;
+            while (end < items.Length && items[end].Mesh == mesh)
+            {
+                end++;
+            }
+
+            EnsureBatchCapacity(ref batches, count + 1);
+            batches[count++] = new Batch(mesh, MaterialHandle.Invalid, (uint)start, (uint)(end - start));
+            start = end;
+        }
+
+        return count;
+    }
+
+    private static void EnsureBatchCapacity(ref Batch[] batches, int needed)
+    {
+        if (batches.Length < needed)
+        {
+            System.Array.Resize(ref batches, Math.Max(needed, batches.Length * 2));
+        }
+    }
+
+    /// <summary>
+    /// P3-M4 W1 gate: sums the <c>instanceCount</c>s the compute cull wrote into the last frame's indirect-args
+    /// buffer — the number of candidates the GPU kept. The caller MUST have idled the GPU first (the Sandbox waits
+    /// before its capture). Compare against <see cref="LastSceneCpuVisible"/>: equal ⇒ the GPU cull kept exactly the
+    /// CPU's visible set. Requires <see cref="VerifyCull"/>.
+    /// </summary>
+    public int ReadBackSceneVisible()
+    {
+        if (_lastSceneArgs is null || _lastSceneBatchCount == 0)
+        {
+            return 0;
+        }
+
+        var commands = _lastSceneArgs.MappedSpan<DrawIndexedIndirectCommand>(_lastSceneBatchCount);
+        var total = 0;
+        for (var b = 0; b < _lastSceneBatchCount; b++)
+        {
+            total += (int)commands[b].InstanceCount;
+        }
+
+        return total;
+    }
+
+    // The GPU scene cull (P3-M4 W1). Builds the batch table + candidate/args/batch-base uploads from the SORTED
+    // candidate list, dispatches the frustum-cull compute (which compacts survivors into the instance buffer and
+    // writes each batch's instanceCount), then barriers the results into the draw. Returns the instance buffer to
+    // bind at set-0 binding 6; hands back the batch count and the args buffer through out params.
+    private GpuBuffer CullSceneOnGpu(
+        CommandList cmd, FrameContext frame, RenderList renderList, ResourceRegistry registry,
+        in Frustum cameraFrustum, out int batchCount, out GpuBuffer argsBuffer)
+    {
+        var items = renderList.Items;
+        var candidateCount = items.Length;
+        batchCount = BuildBatches(items, ref _sceneBatches);
+
+        // Grow the reused scratch (never per-frame in steady state).
+        if (_sceneCommands.Length < batchCount)
+        {
+            System.Array.Resize(ref _sceneCommands, _sceneBatches.Length);
+        }
+
+        if (_batchBaseScratch.Length < batchCount)
+        {
+            System.Array.Resize(ref _batchBaseScratch, _sceneBatches.Length);
+        }
+
+        if (_candidateScratch.Length < candidateCount)
+        {
+            System.Array.Resize(ref _candidateScratch, Math.Max(candidateCount, _candidateScratch.Length * 2));
+        }
+
+        // Args: one command per batch, indexCount from the mesh, instanceCount ZERO (the compute fills it via
+        // atomicAdd). Batch base: the run's start offset — also the base of its compacted output region. Candidates:
+        // every item, tagged with its batch id, carrying the camera-relative model matrix + sphere.
+        for (var b = 0; b < batchCount; b++)
+        {
+            ref readonly var batch = ref _sceneBatches[b];
+            _sceneCommands[b] = new DrawIndexedIndirectCommand(registry.Resolve(batch.Mesh).IndexCount, 0, 0, 0, 0);
+            _batchBaseScratch[b] = batch.Offset;
+            var end = batch.Offset + batch.Count;
+            for (var k = batch.Offset; k < end; k++)
+            {
+                _candidateScratch[k] = new SceneCandidate
+                {
+                    Model = items[(int)k].WorldTransform,
+                    Sphere = items[(int)k].CameraRelativeSphere,
+                    BatchId = (uint)b,
+                };
+            }
+        }
+
+        var candidateBuffer = _sceneCandidates.Upload(frame.Slot, _candidateScratch.AsSpan(0, candidateCount));
+        var batchBaseBuffer = _batchBase.Upload(frame.Slot, _batchBaseScratch.AsSpan(0, batchCount));
+        argsBuffer = _sceneArgs.Upload(frame.Slot, _sceneCommands.AsSpan(0, batchCount));
+        var instanceBuffer = _sceneTransforms.EnsureCapacity(frame.Slot, Math.Max(candidateCount, 1));
+
+        // Gate (P3-M4 W1): count what the CPU frustum test would keep — the oracle the GPU cull must match. Remember
+        // this frame's args + batch count so ReadBackSceneVisible can sum the GPU's instanceCounts after it idles.
+        if (VerifyCull)
+        {
+            var visible = 0;
+            for (var k = 0; k < candidateCount; k++)
+            {
+                var s = _candidateScratch[k].Sphere;
+                if (cameraFrustum.Intersects(new Vector3(s.X, s.Y, s.Z), s.W))
+                {
+                    visible++;
+                }
+            }
+
+            LastSceneCpuVisible = visible;
+            _lastSceneArgs = argsBuffer;
+            _lastSceneBatchCount = batchCount;
+        }
+
+        // Empty scene: nothing to cull, and dispatching zero groups + binding empty buffers is needless. The draw
+        // loop runs zero batches anyway.
+        if (candidateCount == 0)
+        {
+            return instanceBuffer;
+        }
+
+        var cullSet = frame.AllocateSet(_sceneCullSetLayout!);
+        frame.WriteStorageBuffer(cullSet, 0, candidateBuffer);
+        frame.WriteStorageBuffer(cullSet, 1, instanceBuffer);
+        frame.WriteStorageBuffer(cullSet, 2, argsBuffer);
+        frame.WriteStorageBuffer(cullSet, 3, batchBaseBuffer);
+
+        cmd.BindPipeline(_sceneCullPipeline!);
+        cmd.BindDescriptorSet(_sceneCullPipeline!, 0, cullSet);
+
+        Span<Vector4> planes = stackalloc Vector4[6];
+        cameraFrustum.CopyPlanes(planes);
+        var pc = new CullPushConstants
+        {
+            Plane0 = planes[0], Plane1 = planes[1], Plane2 = planes[2],
+            Plane3 = planes[3], Plane4 = planes[4], Plane5 = planes[5],
+            CandidateCount = (uint)candidateCount,
+        };
+        cmd.PushConstants(_sceneCullPipeline!, ShaderStages.Compute, in pc);
+        cmd.Dispatch((uint)((candidateCount + 63) / 64)); // local_size_x = 64
+
+        // Hand the compute output to the draw: the args to the indirect stage, the compacted instances to the
+        // vertex stage. Two distinct destination scopes, two barriers.
+        cmd.BufferBarrier(argsBuffer, BufferSync.ComputeWrite, BufferSync.IndirectRead);
+        cmd.BufferBarrier(instanceBuffer, BufferSync.ComputeWrite, BufferSync.VertexStorageRead);
+        return instanceBuffer;
+    }
+
     /// <summary>
     /// Releases the owned objects. Does <b>not</b> wait for the GPU — the caller must
     /// <see cref="FrameRenderer.WaitIdle"/> first (the material allocator destroys its pools synchronously
@@ -1112,6 +1394,16 @@ public sealed class Renderer : IDisposable
 
         _sceneTransforms.Dispose();
         _shadowTransforms.Dispose();
+        _sceneArgs.Dispose();
+        _shadowArgs.Dispose();
+        _sceneCandidates.Dispose();
+        _batchBase.Dispose();
+        _sceneCullPipeline?.Dispose();
+        _sceneCullSetLayout?.Dispose();
+        _sceneCullShader?.Dispose();
+        _sceneCullPipeline = null;
+        _sceneCullSetLayout = null;
+        _sceneCullShader = null;
 
         _shaderCompiler?.Dispose();
 

@@ -1,0 +1,59 @@
+#version 450
+
+// GPU scene frustum cull (P3-M4 W1). One invocation per candidate: test its camera-relative bounding sphere
+// against the six camera-frustum planes; if visible, atomically append its model matrix to its batch's region of
+// the compacted instance buffer and bump that batch's indirect-draw instanceCount. The scene draw then issues one
+// vkCmdDrawIndexedIndirect per batch, reading the instanceCount this pass wrote.
+//
+// The plane test reproduces Agapanthe.Core.Frustum.Intersects: each plane is (normal.xyz, D) with an INWARD,
+// normalized normal, and a sphere is outside a plane iff dot(normal, centre) + D < -radius. The candidate list is
+// already in batch order (sorted by SortKey on the CPU), so batchBase[b] is batch b's start — and, because the
+// output region of a batch is the same size as its input region, survivors compact into [batchBase[b], +count).
+
+layout(local_size_x = 64) in;
+
+struct Candidate {
+    mat4 model;
+    vec4 sphere;   // xyz = camera-relative centre, w = radius
+    uint batchId;
+    uint pad0, pad1, pad2;
+};
+
+// One indirect draw command, matching VkDrawIndexedIndirectCommand / DrawIndexedIndirectCommand.
+struct DrawCmd {
+    uint indexCount;
+    uint instanceCount;
+    uint firstIndex;
+    int  vertexOffset;
+    uint firstInstance;
+};
+
+layout(std430, set = 0, binding = 0) readonly buffer Candidates { Candidate candidates[]; };
+layout(std430, set = 0, binding = 1) writeonly buffer OutInstances { mat4 outModel[]; };
+layout(std430, set = 0, binding = 2) buffer Args { DrawCmd cmds[]; };
+layout(std430, set = 0, binding = 3) readonly buffer BatchBase { uint batchBase[]; };
+
+// The six camera-frustum planes (inward normals, normalized) + the candidate count, pushed each frame. 6*16 + 4
+// = 100 bytes, within the 128-byte guaranteed push-constant range.
+layout(push_constant) uniform PushConstants {
+    vec4 planes[6];
+    uint candidateCount;
+} pc;
+
+void main() {
+    uint i = gl_GlobalInvocationID.x;
+    if (i >= pc.candidateCount) {
+        return;
+    }
+
+    vec4 s = candidates[i].sphere;
+    for (int p = 0; p < 6; p++) {
+        if (dot(pc.planes[p].xyz, s.xyz) + pc.planes[p].w < -s.w) {
+            return; // outside this plane by more than the radius → culled
+        }
+    }
+
+    uint b = candidates[i].batchId;
+    uint slot = atomicAdd(cmds[b].instanceCount, 1u);
+    outModel[batchBase[b] + slot] = candidates[i].model;
+}

@@ -14,7 +14,7 @@ public sealed class RenderList
 
     // Radix-sort scratch, reused across frames (grown only with capacity, like _items) so sorting allocates
     // nothing in steady state. _keys mirrors each item's SortKey; the sort permutes INDICES (4 bytes) between
-    // _indexA/_indexB rather than moving 88-byte RenderItems, then gathers once into _scratchItems.
+    // _indexA/_indexB rather than moving the ~104-byte RenderItems, then gathers once into _scratchItems.
     private ulong[] _keys = [];
     private int[] _indexA = [];
     private int[] _indexB = [];
@@ -74,7 +74,7 @@ public sealed class RenderList
     /// entities. Radix is unconditionally O(n) and order-independent.
     /// </para>
     /// <para>
-    /// <b>Zero-alloc.</b> The passes permute 4-byte indices (not 88-byte items) between two reused scratch
+    /// <b>Zero-alloc.</b> The passes permute 4-byte indices (not the whole items) between two reused scratch
     /// buffers; a single gather then writes the items in order. Every buffer is a field grown only with capacity,
     /// and the per-pass histogram is <c>stackalloc</c> — nothing heap-allocates in steady state. Radix is not
     /// comparison-based, so unlike <c>Span.Sort(comparer)</c> it never boxes a comparer (the ~88 B/call trap this
