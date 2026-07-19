@@ -242,7 +242,12 @@ window.Loaded += () =>
     // Default M5 lighting: a warm directional key (sun) plus a cool rim and a soft fill point
     // light placed from the scene bounds — a classic 3-point setup that reads PBR materials
     // well. HDR intensities (> 1) are expected; the ACES tonemap compresses them.
-    SetupLights(renderer.Lights, in sceneBounds);
+    // On a multi-instance scene (grid) the rig is DROPPED: it is scaled to the scene diagonal
+    // (inflated by the ground plane) → point lights sit hundreds of metres out, and inverse-square
+    // attenuation then paints a brightness gradient across the crowd ("each helmet has its own
+    // light"). The sun + IBL are physically consistent across the whole grid; the studio rig is a
+    // single-model showcase only.
+    SetupLights(renderer.Lights, in sceneBounds, multiInstance: rows * cols > 1);
 
     // The environment (M7): the renderer needs one before it can draw — the ambient and the skybox both sample it.
     // AGAPANTHE_HDRI=<path> always wins. Otherwise: with the ground on, an OUTDOOR sky, generated procedurally; with
@@ -1073,7 +1078,7 @@ static (Double3 Center, float Diagonal) NarrowBounds(in Double3Bounds bounds)
     return (bounds.Min + new Double3(extent * 0.5f), extent.Length());
 }
 
-static void SetupLights(SceneLights lights, in Double3Bounds bounds)
+static void SetupLights(SceneLights lights, in Double3Bounds bounds, bool multiInstance)
 {
     var (center, diagonal) = NarrowBounds(in bounds);
     var reach = MathF.Max(diagonal, 0.001f);
@@ -1087,6 +1092,17 @@ static void SetupLights(SceneLights lights, in Double3Bounds bounds)
         // sub-1 exposure below, which keeps the bright HDRI backdrop from clipping to white.
         Intensity = 12f,
     };
+
+    // Multi-instance scene: sun + IBL only. The point-light rig below scales to the (ground-inflated) diagonal, so
+    // on a grid it places lights hundreds of metres out and inverse-square falloff smears a brightness gradient
+    // across the foule. Keep the rig for the single-model showcase, where the scene is a couple of metres wide.
+    if (multiInstance)
+    {
+        lights.PointCount = 0;
+        lights.Ambient = new Vector3(0.08f, 0.08f, 0.09f);
+        return;
+    }
+
     lights.Points[0] = new PointLight
     {
         Position = center + new Double3(new Vector3(-0.8f, 0.9f, -1.1f) * reach), // rim: behind-left, above
@@ -1154,10 +1170,13 @@ static void FrameCamera(Camera camera, FreeCameraController controller, Renderer
     // a 1-unit helmet). Shift sprints at 3x.
     controller.MoveSpeed = MathF.Max(diagonal * 0.5f, 0.01f);
 
-    // Shadow range scaled to the model as well (a fixed 100 m would be absurd on a 2 m helmet). It is only a cap:
-    // this scene is far smaller than the frustum, so the fit stays on the scene and this changes nothing today —
-    // it starts to matter the moment the world is bigger than what the camera sees (M4).
-    renderer.ShadowDistance = MathF.Max(diagonal * 4f, 1f);
+    // Shadow range scaled to the model (a fixed 100 m would be absurd on a 2 m helmet), then CLAMPED to a modest
+    // absolute ceiling. A single shadow cascade cannot be both sharp and long-range: on a large scene (the grid +
+    // its wide ground plane) diagonal*4 reaches ~500 m, spreading the 4096² map to ~0.12 m/texel and producing
+    // grazing ring aliasing on the flat ground. Capping at 50 m keeps the map tight; distant casters simply stop
+    // projecting into the view, which ShadowCasterDistance (D3) handles without popping. The real fix for
+    // sharp-and-long is CSM (backlog §2). On a 2 m helmet diagonal*4 ≈ 14 m < 50 m, so single-model is unchanged.
+    renderer.ShadowDistance = MathF.Min(MathF.Max(diagonal * 4f, 1f), 50f);
 }
 
 file static class DebugViews
