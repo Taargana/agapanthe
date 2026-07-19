@@ -482,6 +482,11 @@ window.Updated += dt =>
     controller.Update(camera, (float)dt, in input);
 };
 
+// Debug HUD in the title bar (no in-view text rendering exists — that would need a font atlas + overlay pass).
+// Accumulated over ~0.25 s so the fps reading is stable and the OS title update is not spammed every frame.
+var hudElapsed = 0.0;
+var hudFrames = 0;
+
 window.Rendered += dt =>
 {
     if (frameRenderer is null || swapchain is null || orchestrator is null)
@@ -511,6 +516,23 @@ window.Rendered += dt =>
     // Render stage, and skips it when the swapchain is out of date — the simulation must not skip with it.
     orchestrator.Tick((float)dt);
     frameRenderer.DrawFrame(orchestrator.RenderDelegate);
+
+    // Title-bar debug HUD (throttled). GC.GetTotalMemory is the managed heap — the number that matters for the
+    // 0-alloc-per-frame goal: it should sit FLAT while flying around a static scene. renderList.Count is the scene
+    // candidate count (the GPU culls it); draws are the instanced scene+shadow calls.
+    hudElapsed += dt;
+    hudFrames++;
+    if (hudElapsed >= 0.25 && renderer is not null)
+    {
+        var fps = hudFrames / hudElapsed;
+        var msPerFrame = hudElapsed / hudFrames * 1000.0;
+        var managedMb = GC.GetTotalMemory(false) / (1024.0 * 1024.0);
+        window.Title =
+            $"Agapanthe — {fps:F0} fps ({msPerFrame:F1} ms) · draws {renderer.LastSceneDrawCalls}+{renderer.LastShadowDrawCalls} " +
+            $"· candidates {renderList.Count} · GC {managedMb:F1} MB";
+        hudElapsed = 0;
+        hudFrames = 0;
+    }
 
     if (benchMode)
     {

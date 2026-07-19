@@ -83,6 +83,17 @@ public sealed class EngineWindow : IDisposable
     /// <summary>Edge-triggered key press (fires once per physical press, unlike <see cref="IsKeyDown"/> polling).</summary>
     public event Action<Key>? KeyPressed;
 
+    /// <summary>
+    /// The window's title-bar text. Settable at runtime — GLFW updates the OS title bar immediately, so an
+    /// application can use it as a zero-cost debug HUD (fps, memory, draw calls) without any in-view text
+    /// rendering. Cheap enough to set every frame.
+    /// </summary>
+    public string Title
+    {
+        get => _window.Title;
+        set => _window.Title = value;
+    }
+
     /// <summary>Framebuffer size in pixels, the size swapchains must use.</summary>
     public (int Width, int Height) FramebufferSize
     {
