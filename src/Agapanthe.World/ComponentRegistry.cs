@@ -74,6 +74,7 @@ public static class ComponentRegistry
             Root<RenderOrder>();
             Root<Velocity>();
             Root<RigidBody>();
+            Root<NoShadowCast>();
 
             _initialized = true;
         }

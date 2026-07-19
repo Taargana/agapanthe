@@ -12,13 +12,6 @@ namespace Agapanthe.Tests;
 [Collection("World")]
 public sealed class LifecycleTests
 {
-    private static readonly Frustum Wide = Frustum.FromViewProjection(
-        MathHelpers.LookAt(Vector3.Zero, -Vector3.UnitZ, Vector3.UnitY)
-        * MathHelpers.OrthographicVulkan(1000f, 1000f, -500f, 500f));
-
-    private static readonly ExtrudedShadowFrustum AllCasters =
-        ExtrudedShadowFrustum.FromCameraFrustum(in Wide, Vector3.Zero);
-
     private static RenderView ViewAt(Double3 origin)
         => new(origin, Vector3.Zero, Matrix4x4.Identity, Matrix4x4.Identity, 1f, 1f, 0.1f, 1f);
 
@@ -28,8 +21,7 @@ public sealed class LifecycleTests
     private static int DrawableCount(GameWorld world)
     {
         var render = new RenderList();
-        var shadow = new RenderList();
-        world.CollectRenderLists(render, shadow, ViewAt(Double3.Zero), in AllCasters, out _);
+        world.CollectRenderLists(render, ViewAt(Double3.Zero));
         return render.Count;
     }
 

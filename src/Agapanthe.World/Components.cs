@@ -128,6 +128,19 @@ internal struct Velocity
 }
 
 /// <summary>
+/// Tag component (P3-M5 CSM): a drawable carrying it RECEIVES shadows but does not CAST them. The shadow-caster
+/// collection excludes it (a <c>WithNone&lt;NoShadowCast&gt;</c> query), which tightens every cascade's fit and
+/// kills the self-shadow acne of a large flat receiver like the ground plane. A one-byte payload rather than a
+/// zero-size struct, so Arch stores it in a normal chunk array (rooted for AOT like every other component).
+/// </summary>
+[Component]
+[StructLayout(LayoutKind.Sequential)]
+internal struct NoShadowCast
+{
+    public byte Value;
+}
+
+/// <summary>
 /// The rigid-body payload (P3-M3, linear only — no rotation/inertia in v1). <see cref="InverseMass"/> is
 /// <c>1/m</c> so an immovable body is <c>0</c> (division-free in the impulse solver); <see cref="Restitution"/>
 /// is the bounciness in [0,1]; <see cref="Radius"/> is the COLLISION radius in world metres, independent of the

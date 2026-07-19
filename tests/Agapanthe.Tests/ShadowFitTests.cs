@@ -242,4 +242,128 @@ public sealed class ShadowFitTests
 
         Assert.True(float.IsFinite(lightViewProj.M11));
     }
+
+    // --- P3-M5 CSM: ComputeCascades ------------------------------------------------------------------------------
+
+    [Fact]
+    public void Cascades_SplitDepthsAreMonotoneAndSpanTheRange()
+    {
+        var settings = CascadeSettings.Default; // 4 cascades, λ0.5, 200 m
+        var view = View(Double3.Zero, far: 10_000f);
+        Span<Matrix4x4> mats = stackalloc Matrix4x4[settings.Count];
+        Span<float> splits = stackalloc float[settings.Count];
+
+        ShadowFit.ComputeCascades(in view, Sun, in settings, Resolution, mats, splits);
+
+        // Strictly increasing near→far, the last cascade reaching MaxDistance.
+        for (var i = 1; i < settings.Count; i++)
+        {
+            Assert.True(splits[i] > splits[i - 1], $"split {i} ({splits[i]}) must exceed split {i - 1} ({splits[i - 1]})");
+        }
+
+        Assert.Equal(settings.MaxDistance, splits[^1], 2);
+        // The practical split packs the near cascades tighter than a uniform split would: cascade 0 is well under
+        // a quarter of the range (uniform would put it at exactly 50 m for 4 cascades over 200 m).
+        Assert.True(splits[0] < 50f, $"the near cascade ({splits[0]} m) should be tighter than the uniform 50 m");
+    }
+
+    [Fact]
+    public void Cascades_NearCascadeHasFinerTexelsThanTheFar()
+    {
+        // The whole point of CSM: the near slice is tiny, so its 2048² tile gives a far denser texel grid than the
+        // far slice's — sharp shadows at the feet, coarser (but still bounded) far away.
+        var settings = CascadeSettings.Default;
+        var view = View(Double3.Zero, far: 10_000f);
+        Span<Matrix4x4> mats = stackalloc Matrix4x4[settings.Count];
+        Span<float> splits = stackalloc float[settings.Count];
+
+        ShadowFit.ComputeCascades(in view, Sun, in settings, Resolution, mats, splits);
+
+        Assert.True(
+            FittedWidth(mats[0]) < FittedWidth(mats[^1]),
+            $"near cascade width {FittedWidth(mats[0])} must be smaller than far {FittedWidth(mats[^1])}");
+    }
+
+    [Fact]
+    public void Cascades_EachSliceCornersLandInsideItsOwnCascade()
+    {
+        // Every cascade must cover its slice: the eight frustum-slice corners project inside that cascade's clip
+        // box (xy in [-1,1], z in [0,1]). If a corner fell outside, that part of the view would sample no shadow.
+        var settings = CascadeSettings.Default;
+        var view = View(Double3.Zero, far: 10_000f);
+        Span<Matrix4x4> mats = stackalloc Matrix4x4[settings.Count];
+        Span<float> splits = stackalloc float[settings.Count];
+        ShadowFit.ComputeCascades(in view, Sun, in settings, Resolution, mats, splits);
+
+        var sliceNear = view.Near;
+        for (var i = 0; i < settings.Count; i++)
+        {
+            var (center, radius) = ShadowFit.FitSliceSphere(in view, sliceNear, splits[i]);
+            // Sample the sphere's extremes along each axis — a superset of the slice corners.
+            foreach (var axis in stackalloc[] { Vector3.UnitX, -Vector3.UnitX, Vector3.UnitY, -Vector3.UnitY, Vector3.UnitZ, -Vector3.UnitZ })
+            {
+                var p = center + (axis * radius);
+                var clip = Vector4.Transform(new Vector4(p, 1f), mats[i]);
+                var ndc = new Vector3(clip.X, clip.Y, clip.Z) / clip.W;
+                Assert.InRange(ndc.X, -1.0001f, 1.0001f);
+                Assert.InRange(ndc.Y, -1.0001f, 1.0001f);
+                Assert.InRange(ndc.Z, -0.0001f, 1.0001f);
+            }
+
+            sliceNear = splits[i];
+        }
+    }
+
+    [Fact]
+    public void Cascades_UpstreamCasterStaysInsideTheDepthRange()
+    {
+        // A caster well above the near cascade (straight-down light) still throws its shadow into it: the fixed
+        // κ·r setback must clear it, or it would be clipped and stop casting.
+        var sun = Vector3.Normalize(new Vector3(0f, -1f, 0f));
+        var settings = CascadeSettings.Default;
+        var view = View(Double3.Zero, far: 10_000f);
+        Span<Matrix4x4> mats = stackalloc Matrix4x4[settings.Count];
+        Span<float> splits = stackalloc float[settings.Count];
+        ShadowFit.ComputeCascades(in view, sun, in settings, Resolution, mats, splits);
+
+        var (center, radius) = ShadowFit.FitSliceSphere(in view, view.Near, splits[0]);
+        // A caster two radii above the near cascade's centre — upstream of the slice along the downward light.
+        var caster = center + new Vector3(0f, 2f * radius, 0f);
+        var clip = Vector4.Transform(new Vector4(caster, 1f), mats[0]);
+        Assert.InRange(clip.Z / clip.W, 0f, 1f);
+    }
+
+    [Fact]
+    public void Cascades_SnapIsStable_WhenTheCameraCreepsSubTexel()
+    {
+        // The per-cascade snap must kill shimmer exactly as the single-cascade one does: a static point creeps by
+        // sub-texel camera motion and must not drift within its cascade.
+        var settings = CascadeSettings.Default;
+        var worldPoint = new Double3(2, 0, -5); // inside the near cascade
+        var projections = new List<Vector2>();
+        Span<Matrix4x4> mats = stackalloc Matrix4x4[settings.Count];
+        Span<float> splits = stackalloc float[settings.Count];
+
+        for (var frame = 0; frame < 8; frame++)
+        {
+            var eye = new Double3(0, 0, -0.0005 * frame);
+            var view = View(eye, far: 10_000f);
+            ShadowFit.ComputeCascades(in view, Sun, in settings, Resolution, mats, splits);
+            var relative = worldPoint.ToVector3(eye);
+            var clip = Vector4.Transform(new Vector4(relative, 1f), mats[0]);
+            projections.Add(new Vector2(clip.X / clip.W, clip.Y / clip.W));
+        }
+
+        // Whole-texel snapping (the anti-crawl) lets a point APPEAR to jump up to ~1 texel when the grid re-snaps,
+        // so the bound is a small constant (2 texels), NOT zero. The distinction from a drifting (unsnapped) grid is
+        // that the movement stays bounded instead of growing with the camera; a continuous drift over more frames
+        // would blow far past this. The near cascade's texel is fine (~1 cm), so this is a strict test.
+        var texelNdc = 2f / Resolution;
+        foreach (var p in projections)
+        {
+            Assert.True(
+                Vector2.Distance(p, projections[0]) < 2f * texelNdc,
+                $"the static point drifted {Vector2.Distance(p, projections[0]) / texelNdc:F2} texels in cascade 0");
+        }
+    }
 }

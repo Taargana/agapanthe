@@ -39,20 +39,6 @@ public sealed partial class GameWorld : IDisposable
     // allocates nothing (Clear keeps capacity). Depth is tiny (hierarchy chains), a linear scan is cheapest.
     private readonly List<Entity> _walkStack = new(16);
 
-    // Parallel to the shadow-caster RenderList between the two culling passes (P3-M2 D3.c): each entry is a caster's
-    // camera-relative bounding sphere (xyz = centre, w = radius). RenderItem carries no sphere, so pass 2 needs this
-    // to test each caster against the light volume without recomputing it. Reused (Clear keeps capacity → zero-alloc)
-    // and owned by the World: it is per-frame pass-1 state, which is why only ONE RenderView per frame is supported
-    // (a second view would clobber it before pass 2 — CSM will have to lift this out of the World, spec F7).
-    private readonly List<Vector4> _casterSpheres = new();
-
-    // The shadow list the LAST CollectRenderLists filled, so CompactShadowCasters can refuse to compact any other
-    // one (audit F7 guard): _casterSpheres belongs to that one pass-1, and a second CollectRenderLists (a second
-    // view: split-screen, a CSM cascade) overwrites it. Compacting the earlier list against the later view's spheres
-    // would desync silently — no crash, just phantom casters. The project guards this class of contract elsewhere
-    // (AssertOwnerThread), so it guards it here too rather than leaving F7 a comment.
-    private RenderList? _pass1ShadowList;
-
     // Built once: constructing a QueryDescription per frame would defeat the zero-alloc goal.
     private static readonly QueryDescription PropagateDesc =
         new QueryDescription().WithAll<LocalTransform, WorldTransform, WorldPosition>();
@@ -60,6 +46,10 @@ public sealed partial class GameWorld : IDisposable
         new QueryDescription().WithAll<WorldTransform, WorldPosition, Bounds>();
     private static readonly QueryDescription DrawableDesc =
         new QueryDescription().WithAll<WorldTransform, WorldPosition, Bounds, MeshRef, RenderOrder>();
+    // The shadow-caster set (P3-M5 CSM): every drawable EXCEPT those tagged NoShadowCast (the ground plane), so a
+    // large flat receiver does not cast on itself. One iteration buckets these into the per-cascade caster lists.
+    private static readonly QueryDescription CasterDesc =
+        new QueryDescription().WithAll<WorldTransform, WorldPosition, Bounds, MeshRef, RenderOrder>().WithNone<NoShadowCast>();
     // MeshRef is in the WithAll on purpose: GlobalId is now universal (every entity gets one at spawn, P3-M2 D2),
     // so it can no longer be the discriminant for "is a drawable". Animation targets DRAWABLES — the imported,
     // baked entities — never the hierarchical transform nodes, which the propagation system owns.
@@ -156,13 +146,21 @@ public sealed partial class GameWorld : IDisposable
     /// a), the mesh/material handles, its world bounds and its stable render order. It deliberately has NO
     /// <see cref="LocalTransform"/>, so the propagation system never recomputes its transform.
     /// </summary>
-    public void SpawnImported(in ImportedEntitySpec spec)
+    public void SpawnImported(in ImportedEntitySpec spec, bool castsShadow = true)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
         AssertOwnerThread();
         // Immediate on purpose: SpawnImported is the LOAD-time seam (the Sandbox fills the scene before the loop),
         // never called from inside a running system's query. Runtime spawning goes through the deferred Spawn* API.
-        MaterialiseDrawable(_nextGlobalId++, in spec);
+        var entity = MaterialiseDrawable(_nextGlobalId++, in spec);
+
+        // castsShadow: false tags the entity NoShadowCast (P3-M5) — it RECEIVES shadows but never casts. Meant for a
+        // large flat receiver (the ground plane), whose self-shadowing was a real acne source and whose bounds
+        // needlessly inflated every cascade's fit. Added here at spawn, so no archetype move happens later.
+        if (!castsShadow)
+        {
+            entity.Add(new NoShadowCast { Value = 1 });
+        }
     }
 
     // Creates the baked drawable entity NOW and registers it in _live. GlobalId is the unique identity (from the
@@ -484,28 +482,35 @@ public sealed partial class GameWorld : IDisposable
         PropagateTransforms();
         _ = AggregateBounds();
 
-        // ALL THREE systems, so the probe covers exactly what the game runs per frame (audit M2, minor 1):
-        // CollectRenderLists is the only user of GetSpan<MeshRef/RenderOrder/Bounds>() and the camera-relative
-        // narrow, which the smoke would otherwise leave untested under AOT. Since P3-M4 the scene is NOT CPU-culled
-        // (the camera cull is a GPU compute pass), so the candidate list holds EVERY drawable that exists AT THIS
-        // POINT: 8 imported + 2 alive deferred (x 500) = 10. The physics bodies are spawned AFTER this call (they
-        // lift the final raw-query count to 12). The `wide` frustum still drives the shadow wedge + pass 2.
+        // Both collection paths, so the probe covers exactly what the game runs per frame (audit M2, minor 1):
+        // GetSpan<MeshRef/RenderOrder/Bounds>(), the camera-relative narrow, and the per-cascade caster bucketing
+        // would otherwise be untested under AOT. Since P3-M4 the scene is NOT CPU-culled (the camera cull is a GPU
+        // compute pass), so the candidate list holds EVERY drawable that exists AT THIS POINT: 8 imported + 2 alive
+        // deferred (x 500) = 10. The physics bodies are spawned AFTER this call (they lift the raw count to 12).
         var wide = Frustum.FromViewProjection(
             MathHelpers.LookAt(Vector3.Zero, -Vector3.UnitZ, Vector3.UnitY)
             * MathHelpers.OrthographicVulkan(200f, 200f, -100f, 100f));
         var smokeView = new RenderView(
             Double3.Zero, Vector3.Zero, Matrix4x4.Identity, Matrix4x4.Identity, 1f, 1f, 0.1f, 1f);
-        // Extruded shadow frustum (P3-M1/M2): built with the BOUNDED overload so the ILC roots the cut plane too.
-        var wideExtruded = ExtrudedShadowFrustum.FromCameraFrustum(in wide, -Vector3.UnitY, Vector3.Zero, 100f, 1000f);
         var render = new RenderList();
-        var smokeShadow = new RenderList();
-        // BOTH passes of the D3.c shadow cull, so the ILC roots CompactShadowCasters + the parallel-sphere path too.
-        CollectRenderLists(render, smokeShadow, in smokeView, in wideExtruded, out _);
-        CompactShadowCasters(smokeShadow, in wide);
+        CollectRenderLists(render, in smokeView);
         if (render.Count != 10)
         {
             throw new InvalidOperationException(
                 $"AOT smoke: CollectRenderLists produced {render.Count} candidates, expected 10.");
+        }
+
+        // The CSM caster path (P3-M5): two cascades, so the ILC roots the span-of-frusta bucketing and the
+        // WithNone<NoShadowCast> query. Both frusta are the same wide box here — every caster lands in both.
+        Span<Frustum> smokeCascades = stackalloc Frustum[2] { wide, wide };
+        var smokeCasters = new[] { new RenderList(), new RenderList() };
+        CollectShadowCasters(smokeCascades, smokeCasters, in smokeView);
+        // 8, not 10: the two deferred drawables sit at x 500, far outside this frustum, so the per-cascade cull drops
+        // them — which is exactly the path being exercised. Both cascades see the same volume, hence the same count.
+        if (smokeCasters[0].Count != 8 || smokeCasters[1].Count != 8)
+        {
+            throw new InvalidOperationException(
+                $"AOT smoke: cascades collected {smokeCasters[0].Count}/{smokeCasters[1].Count} casters, expected 8/8.");
         }
 
         // AnimateDrawables is generic over a struct animator — the M4 direct-write animation path. Instantiate it
@@ -669,20 +674,14 @@ public sealed partial class GameWorld : IDisposable
     /// refit every frame in a moving world and cost more than the scan below this milestone's entity counts (board D4).
     /// </para>
     /// </summary>
-    public void CollectRenderLists(
-        RenderList render, RenderList shadowCasters, in RenderView view,
-        in ExtrudedShadowFrustum lightExtruded, out Double3Bounds casterBounds)
+    public void CollectRenderLists(RenderList render, in RenderView view)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
         AssertOwnerThread();
         ArgumentNullException.ThrowIfNull(render);
-        ArgumentNullException.ThrowIfNull(shadowCasters);
 
         render.Clear();
-        shadowCasters.Clear();
-        _casterSpheres.Clear();
         var origin = view.Origin;
-        var casters = Double3Bounds.Empty;
 
         foreach (ref var chunk in _world.Query(in DrawableDesc))
         {
@@ -694,96 +693,84 @@ public sealed partial class GameWorld : IDisposable
             var count = chunk.Count;
             for (var i = 0; i < count; i++)
             {
-                // The world bounding sphere, narrowed to camera-relative (in double, then cast) — the same space
-                // the frusta live in. Every drawable is a scene CANDIDATE (P3-M4): the camera-frustum cull moved to
-                // the GPU (a compute pass tests candidates[].sphere against the frustum planes and compacts the
-                // survivors), so the CPU no longer tests inCamera here — it narrows, bakes the model, and uploads.
+                // Every drawable is a scene CANDIDATE (P3-M4): the camera-frustum cull runs on the GPU, so the CPU
+                // narrows the world sphere to camera-relative (in double, then cast), bakes the model, and uploads.
                 WorldSphere(worlds[i].Value, positions[i].Value, bounds[i], out var worldCenter, out var radius);
                 var center = worldCenter.ToVector3(origin);
                 var sphere = new Vector4(center, radius);
-
                 var model = ComposeModel(worlds[i].Value, positions[i].Value, origin);
 
-                // Scene candidate — sorted by (material, mesh) so a run is one batch (P3-M1); it carries its
-                // camera-relative sphere so the GPU cull can test it (P3-M4). The tie-break is the stable RenderOrder
-                // (spec §6 condition b — Arch's chunk order is not stable).
+                // Sorted by (material, mesh) so a run is one batch (P3-M1); carries its camera-relative sphere for
+                // the GPU cull (P3-M4). Tie-break = the stable RenderOrder (spec §6 condition b).
                 var key = RenderItem.ComposeSortKey(
                     meshes[i].Material.Index, meshes[i].Mesh.Index, orders[i].Value);
                 render.Add(new RenderItem(model, meshes[i].Mesh, meshes[i].Material, key, sphere));
+            }
+        }
 
-                // PASS 1 of the two-pass shadow cull (P3-M2 D3.c) — still CPU: a caster is kept iff it is in the
-                // BOUNDED wedge (the camera frustum swept toward the light, cut a finite distance upstream). This is
-                // a SUPERSET of the final caster set; the light-volume test is deferred to pass 2
-                // (CompactShadowCasters). The wedge depends on neither the fit nor the light volume, so it breaks the
-                // circularity. The shadow pass does not GPU-cull — this logic is subtle and stays here (P3-M4).
-                if (lightExtruded.Intersects(center, radius))
+        render.SortByKey(); // into batch order for the GPU cull
+    }
+
+    /// <summary>
+    /// Buckets the shadow casters into the CSM cascades (P3-M5): every drawable NOT tagged <see cref="NoShadowCast"/>
+    /// is tested against each cascade's light frustum and added to the matching <paramref name="cascadeCasters"/>
+    /// list (an entity straddling two cascades is drawn in both). This replaces the P3-M2 two-pass wedge: each
+    /// cascade's fit is camera-only, so its frustum is known here without any caster bounds — no circularity, no
+    /// parallel-sphere state. Each caster list keeps the MESH-major key (P3-M1) for instanced depth draws and is
+    /// sorted here. Zero-alloc: the lists are reused (Clear keeps capacity), iteration is chunk-based, no lambda.
+    /// </summary>
+    public void CollectShadowCasters(
+        ReadOnlySpan<Frustum> cascadeFrusta, RenderList[] cascadeCasters, in RenderView view)
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        AssertOwnerThread();
+        ArgumentNullException.ThrowIfNull(cascadeCasters);
+        var n = cascadeFrusta.Length;
+        if (cascadeCasters.Length < n)
+        {
+            throw new ArgumentException($"cascadeCasters must hold at least {n} lists.", nameof(cascadeCasters));
+        }
+
+        for (var c = 0; c < n; c++)
+        {
+            ArgumentNullException.ThrowIfNull(cascadeCasters[c]);
+            cascadeCasters[c].Clear();
+        }
+
+        var origin = view.Origin;
+        foreach (ref var chunk in _world.Query(in CasterDesc))
+        {
+            var worlds = chunk.GetSpan<WorldTransform>();
+            var positions = chunk.GetSpan<WorldPosition>();
+            var bounds = chunk.GetSpan<Bounds>();
+            var meshes = chunk.GetSpan<MeshRef>();
+            var orders = chunk.GetSpan<RenderOrder>();
+            var count = chunk.Count;
+            for (var i = 0; i < count; i++)
+            {
+                WorldSphere(worlds[i].Value, positions[i].Value, bounds[i], out var worldCenter, out var radius);
+                var center = worldCenter.ToVector3(origin);
+                // The depth pass binds no material → MESH-major key (one instanced run per mesh).
+                var shadowKey = RenderItem.ComposeShadowSortKey(
+                    meshes[i].Mesh.Index, meshes[i].Material.Index, orders[i].Value);
+                Matrix4x4? model = null; // built once, lazily, only if this caster lands in any cascade
+                for (var c = 0; c < n; c++)
                 {
-                    // The depth pass binds no material, so the caster list is keyed MESH-major: one contiguous run
-                    // (= one instanced depth draw) per mesh, even when several materials share it.
-                    var shadowKey = RenderItem.ComposeShadowSortKey(
-                        meshes[i].Mesh.Index, meshes[i].Material.Index, orders[i].Value);
-                    shadowCasters.Add(new RenderItem(model, meshes[i].Mesh, meshes[i].Material, shadowKey));
-                    // The caster's sphere, kept in a parallel array (RenderItem's sphere is the CAMERA-relative one,
-                    // shared here) so pass 2 can test it against the light volume without recomputing it.
-                    _casterSpheres.Add(sphere);
+                    if (!cascadeFrusta[c].Intersects(center, radius))
+                    {
+                        continue;
+                    }
 
-                    // Accumulate the caster AABB in DOUBLE for the depth-range fit (D3.b): the same box AggregateBounds
-                    // builds, but over the casters only.
-                    var r = new Double3(radius, radius, radius);
-                    casters = Double3Bounds.Union(casters, new Double3Bounds(worldCenter - r, worldCenter + r));
+                    model ??= ComposeModel(worlds[i].Value, positions[i].Value, origin);
+                    cascadeCasters[c].Add(new RenderItem(model.Value, meshes[i].Mesh, meshes[i].Material, shadowKey));
                 }
             }
         }
 
-        // The candidate list sorts now (into batch order for the GPU cull); the survivors' order within a batch is
-        // then decided by the compute compaction. The shadow list is NOT sorted here — pass 2 compacts it against
-        // the light volume first, then sorts (sorting now would desync the parallel spheres).
-        render.SortByKey();
-        casterBounds = casters;
-        _pass1ShadowList = shadowCasters; // the only list CompactShadowCasters may now consume (F7 guard)
-    }
-
-    /// <summary>
-    /// PASS 2 of the two-pass shadow cull (P3-M2 D3.c): tightens the wedge-culled caster list against the light
-    /// VOLUME (the fitted shadow frustum, which could only be computed once pass 1 gave its bounds), compacting the
-    /// survivors in place, then sorts. The wedge list is a superset of this one, so this only ever DROPS casters —
-    /// never adds — which is why fitting the depth range on the wedge bounds can never clip a survivor.
-    /// </summary>
-    public void CompactShadowCasters(RenderList shadowCasters, in Frustum lightFrustum)
-    {
-        ObjectDisposedException.ThrowIf(_disposed, this);
-        AssertOwnerThread();
-        ArgumentNullException.ThrowIfNull(shadowCasters);
-        if (!ReferenceEquals(shadowCasters, _pass1ShadowList))
+        for (var c = 0; c < n; c++)
         {
-            // Either no CollectRenderLists ran, or a later one (a second view) overwrote the parallel sphere array
-            // this compaction depends on. Compacting now would test these casters against the WRONG spheres (F7).
-            throw new InvalidOperationException(
-                "CompactShadowCasters must be called with the shadow list from the most recent CollectRenderLists " +
-                "(one RenderView per frame — the caster spheres are per-frame pass-1 state owned by the World).");
+            cascadeCasters[c].SortByKey(); // deterministic mesh-major run order for the instanced depth draw
         }
-
-        _pass1ShadowList = null; // consumed: a repeat compaction (or a stale list) now throws too
-
-        var items = shadowCasters.ItemsMutable;
-        var write = 0;
-        for (var read = 0; read < items.Length; read++)
-        {
-            var sphere = _casterSpheres[read];
-            if (!lightFrustum.Intersects(new Vector3(sphere.X, sphere.Y, sphere.Z), sphere.W))
-            {
-                continue;
-            }
-
-            // Compact both arrays in lock-step (F7): the caster list and its parallel spheres stay aligned until the
-            // sort below, which permutes only the list.
-            items[write] = items[read];
-            _casterSpheres[write] = _casterSpheres[read];
-            write++;
-        }
-
-        shadowCasters.Truncate(write);
-        shadowCasters.SortByKey(); // deterministic run order for the instanced depth draw, AFTER compaction
     }
 
     /// <summary>

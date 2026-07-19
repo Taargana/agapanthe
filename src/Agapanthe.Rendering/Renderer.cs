@@ -40,6 +40,20 @@ namespace Agapanthe.Rendering;
 /// <param name="DepthBiasSlope">Slope-scaled depth-bias factor (<c>depthBiasSlopeFactor</c>).</param>
 public readonly record struct ShadowSettings(uint Resolution, float DepthBiasConstant, float DepthBiasSlope);
 
+/// <summary>
+/// Cascaded-shadow-map tunables (P3-M5). <paramref name="Count"/> cascades split the camera frustum by depth;
+/// <paramref name="Lambda"/> blends the uniform (0) and logarithmic (1) split partitions;
+/// <paramref name="MaxDistance"/> is the far bound of the shadowed range (metres). The 2×2 atlas holds up to 4.
+/// </summary>
+/// <param name="Count">Number of cascades (≤ 4 for the 2×2 atlas).</param>
+/// <param name="Lambda">Uniform↔logarithmic split blend, in [0,1] (0 = uniform, 1 = logarithmic).</param>
+/// <param name="MaxDistance">Far bound of the shadowed range, in metres.</param>
+public readonly record struct CascadeSettings(int Count, float Lambda, float MaxDistance)
+{
+    /// <summary>Four cascades, a balanced split (λ=0.5), shadowing out to 200 m.</summary>
+    public static CascadeSettings Default => new(4, 0.5f, 200f);
+}
+
 public sealed class Renderer : IDisposable
 {
     /// <summary>Depth attachment format the scene pass renders against; the pipeline declares the same.</summary>
@@ -55,6 +69,13 @@ public sealed class Renderer : IDisposable
     /// </para>
     /// </summary>
     public const uint ShadowMapResolution = 4096;
+
+    /// <summary>
+    /// Side of one CSM cascade's tile in the 2×2 shadow atlas (P3-M5): the 4096² map holds four 2048² cascades, so
+    /// the total shadow-map memory is unchanged from the single-cascade era. Each cascade texel-snaps to THIS
+    /// resolution, not to <see cref="ShadowMapResolution"/>.
+    /// </summary>
+    public const uint ShadowTileResolution = ShadowMapResolution / 2;
 
     // Slope-scaled depth bias for the shadow pass, retained from M6 capture tuning (see the type remarks and
     // the M6-03 write-up). Constant fights the flat-surface acne floor; slope handles grazing-angle acne where
@@ -98,6 +119,10 @@ public sealed class Renderer : IDisposable
     private Batch[] _shadowBatches = new Batch[64];
     private DrawIndexedIndirectCommand[] _sceneCommands = new DrawIndexedIndirectCommand[64];
     private DrawIndexedIndirectCommand[] _shadowCommands = new DrawIndexedIndirectCommand[64];
+
+    // The CSM cascades' caster lists concatenated into one array (P3-M5), so all four tiles share a single instance
+    // buffer; cascade c's run starts at its base offset. Grown on demand, never re-allocated per frame.
+    private RenderItem[] _shadowConcat = new RenderItem[256];
 
     // GPU scene cull (P3-M4 W1): the compute pipeline that frustum-culls the scene candidates and compacts the
     // survivors, plus the per-frame upload rings it reads (candidates in, per-batch base offsets in) and the
@@ -423,6 +448,13 @@ public sealed class Renderer : IDisposable
     /// </para>
     /// </summary>
     public float ShadowDistance { get; set; } = 100f;
+
+    /// <summary>
+    /// CSM tunables (P3-M5): cascade count, split blend and shadowed range. The effective far distance is
+    /// <c>min(MaxDistance, <see cref="ShadowDistance"/>)</c>, so the existing per-scene shadow-distance policy still
+    /// caps the cascades. Defaults to four cascades, λ=0.5.
+    /// </summary>
+    public CascadeSettings Cascades { get; set; } = CascadeSettings.Default;
 
     /// <summary>
     /// Shading debug visualization (0 = normal PBR). Values map to the DEBUG_* selector in
@@ -753,30 +785,37 @@ public sealed class Renderer : IDisposable
     /// (<see cref="RenderView.Origin"/>).
     /// </para>
     /// </summary>
-    public Matrix4x4 ComputeLightViewProj(
-        in RenderView view, in Double3Bounds sceneBounds, in Double3Bounds casterBounds)
+    /// <summary>
+    /// Fits the frame's CSM cascades (P3-M5) and reports them: <paramref name="lightViewProj"/> gets one matrix per
+    /// cascade (each fitted to its own frustum slice and texel-snapped to an atlas tile) and
+    /// <paramref name="splitViewDepths"/> the far view-space depth of each. Camera-only — no scene or caster bounds,
+    /// hence no circularity (the P3-M2 two-pass wedge is retired). Call this BEFORE
+    /// <see cref="GameWorld.CollectShadowCasters"/>, whose frusta come from these matrices.
+    /// </summary>
+    public void ComputeCascades(
+        in RenderView view, Span<Matrix4x4> lightViewProj, Span<float> splitViewDepths)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
-        var result = ShadowFit.ComputeLightViewProj(
-            in view, in sceneBounds, in casterBounds, Lights.Directional.Direction,
-            ShadowDistance, ShadowMapResolution, out var eyeDistance);
-        LastEyeDistance = eyeDistance;
-        return result;
+        var settings = Cascades with { MaxDistance = MathF.Min(Cascades.MaxDistance, ShadowDistance) };
+        ShadowFit.ComputeCascades(
+            in view, Lights.Directional.Direction, in settings, ShadowTileResolution,
+            lightViewProj, splitViewDepths);
     }
 
     public void DrawScene(
         RenderList renderList,
-        RenderList shadowCasters,
+        RenderList[] cascadeCasters,
         ResourceRegistry registry,
         in RenderView view,
         in Frustum cameraFrustum,
-        in Matrix4x4 lightViewProj,
+        ReadOnlySpan<Matrix4x4> cascades,
+        Vector4 cascadeSplits,
         CommandList cmd,
         FrameContext frame,
         SwapchainTarget target)
     {
         ArgumentNullException.ThrowIfNull(renderList);
-        ArgumentNullException.ThrowIfNull(shadowCasters);
+        ArgumentNullException.ThrowIfNull(cascadeCasters);
         ArgumentNullException.ThrowIfNull(registry);
         ArgumentNullException.ThrowIfNull(frame);
         ObjectDisposedException.ThrowIf(_disposed, this);
@@ -791,10 +830,12 @@ public sealed class Renderer : IDisposable
         // resolution-invariant and lives outside this.
         EnsureTargets(target.Width, target.Height);
 
-        // lightViewProj is computed by the caller (before the caster list is culled against the light volume) and
-        // shared by the shadow pass (render depth) and the scene pass (pack into the lights UBO for the PCF lookup).
-        RecordShadowPass(cmd, frame, shadowCasters, registry, in lightViewProj);
-        RecordScenePass(cmd, frame, renderList, registry, in view, in cameraFrustum, target, in lightViewProj);
+        // The cascades are computed by the caller (they decide which casters were collected) and shared by the
+        // shadow pass (renders each cascade into its atlas tile) and the scene pass (packs them into the lights UBO
+        // for the PCF lookup).
+        RecordShadowPass(cmd, frame, cascadeCasters, registry, cascades);
+        RecordScenePass(
+            cmd, frame, renderList, registry, in view, in cameraFrustum, target, cascades, cascadeSplits);
         RecordTonemapPass(cmd, frame, target);
     }
 
@@ -808,8 +849,8 @@ public sealed class Renderer : IDisposable
     /// DepthAttachment→ShaderReadOnly barrier hands it over.
     /// </summary>
     private void RecordShadowPass(
-        CommandList cmd, FrameContext frame, RenderList shadowCasters, ResourceRegistry registry,
-        in Matrix4x4 lightViewProj)
+        CommandList cmd, FrameContext frame, RenderList[] cascadeCasters, ResourceRegistry registry,
+        ReadOnlySpan<Matrix4x4> cascades)
     {
         // RenderDoc/Nsight capture region for the whole pass (barriers + draws). No-op when debug utils is
         // off, so it stays on the per-frame path at zero cost; the name is a literal (no per-frame alloc).
@@ -817,6 +858,32 @@ public sealed class Renderer : IDisposable
 
         var pipeline = _shadowPass!.Pipeline;
         var shadow = _shadowMap!;
+        var n = cascades.Length;
+
+        // Concatenate every cascade's casters into ONE instance buffer (an entity straddling two cascades appears in
+        // both, with a different matrix region each time). base[c] is where cascade c's run starts, which is what the
+        // per-batch vertex push constant adds to gl_InstanceIndex.
+        var total = 0;
+        for (var c = 0; c < n; c++)
+        {
+            total += cascadeCasters[c].Count;
+        }
+
+        if (_shadowConcat.Length < total)
+        {
+            System.Array.Resize(ref _shadowConcat, Math.Max(total, _shadowConcat.Length * 2));
+        }
+
+        Span<int> cascadeBase = stackalloc int[n];
+        var write = 0;
+        for (var c = 0; c < n; c++)
+        {
+            cascadeBase[c] = write;
+            cascadeCasters[c].Items.CopyTo(_shadowConcat.AsSpan(write));
+            write += cascadeCasters[c].Count;
+        }
+
+        var instanceBuffer = _shadowTransforms.Compact(frame.Slot, _shadowConcat.AsSpan(0, total));
 
         cmd.TransitionImage(
             shadow,
@@ -824,6 +891,8 @@ public sealed class Renderer : IDisposable
             ImageLayoutState.DepthAttachment);
         _shadowInitialized = true;
 
+        // ONE render pass over the whole atlas: clear all four tiles once, then draw each cascade into its own
+        // viewport. (Reopening a pass per tile would re-clear the map or need LoadOp.Load per tile.)
         cmd.BeginRendering(new RenderingAttachments
         {
             Color = null,
@@ -837,53 +906,72 @@ public sealed class Renderer : IDisposable
             Width = ShadowMapResolution,
             Height = ShadowMapResolution,
         });
-        cmd.SetViewportScissor(ShadowMapResolution, ShadowMapResolution);
 
         cmd.BindPipeline(pipeline);
-        // lightViewProj is constant across the pass: push it once (offset 0). Per-instance models come from the SSBO.
-        cmd.PushConstants(pipeline, ShaderStages.Vertex, in lightViewProj, offsetBytes: 0);
-
-        // The caster list, in its stable sorted order (spec §6 condition b), culled against the LIGHT volume (never
-        // the camera frustum — spec §3.5). Compact its transforms into this slot's shadow SSBO, then point set 0 at
-        // it. The depth pass binds no material, so it batches by MESH only — and the caster list carries a
-        // MESH-major key (RenderItem.ComposeShadowSortKey), so each mesh is one contiguous run even when several
-        // materials share it. firstInstance offsets gl_InstanceIndex into the compacted buffer.
-        var items = shadowCasters.Items;
-        var instanceBuffer = _shadowTransforms.Compact(frame.Slot, items);
-
         var shadowSet = frame.AllocateSet(_shadowSetLayout!);
         frame.WriteStorageBuffer(shadowSet, 0, instanceBuffer);
         cmd.BindDescriptorSet(pipeline, 0, shadowSet);
 
-        // The depth pass binds no material, so it batches by MESH only (the caster list is mesh-major keyed). Same
-        // draw-indirect conversion as the scene (P3-M4 W0): one DrawIndexedIndirect per mesh run, the run's start
-        // offset in a VERTEX push constant after lightViewProj (offset 64), not firstInstance.
-        var batchCount = BuildShadowBatches(items, ref _shadowBatches);
-        if (_shadowCommands.Length < batchCount)
+        var stride = (uint)System.Runtime.CompilerServices.Unsafe.SizeOf<DrawIndexedIndirectCommand>();
+        LastShadowDrawCalls = 0;
+
+        // Build EVERY cascade's batches + commands first, then upload the args ONCE. Uploading per cascade would
+        // overwrite regions that earlier cascades' already-recorded draws still point at — the commands are read at
+        // submit time, not at record time.
+        Span<int> batchStart = stackalloc int[n];
+        Span<int> batchCounts = stackalloc int[n];
+        var totalBatches = 0;
+        for (var c = 0; c < n; c++)
         {
-            System.Array.Resize(ref _shadowCommands, _shadowBatches.Length);
+            batchStart[c] = totalBatches;
+            var added = BuildShadowBatches(cascadeCasters[c].Items, ref _shadowBatches, totalBatches, (uint)cascadeBase[c]);
+            batchCounts[c] = added;
+            totalBatches += added;
         }
 
-        for (var b = 0; b < batchCount; b++)
+        if (_shadowCommands.Length < totalBatches)
+        {
+            System.Array.Resize(ref _shadowCommands, Math.Max(totalBatches, _shadowBatches.Length));
+        }
+
+        for (var b = 0; b < totalBatches; b++)
         {
             ref readonly var batch = ref _shadowBatches[b];
             _shadowCommands[b] = new DrawIndexedIndirectCommand(
                 registry.Resolve(batch.Mesh).IndexCount, batch.Count, 0, 0, 0);
         }
 
-        var argsBuffer = _shadowArgs.Upload(frame.Slot, _shadowCommands.AsSpan(0, batchCount));
-        var stride = (uint)System.Runtime.CompilerServices.Unsafe.SizeOf<DrawIndexedIndirectCommand>();
+        var argsBuffer = _shadowArgs.Upload(frame.Slot, _shadowCommands.AsSpan(0, totalBatches));
 
-        LastShadowDrawCalls = 0;
-        for (var b = 0; b < batchCount; b++)
+        for (var c = 0; c < n; c++)
         {
-            ref readonly var batch = ref _shadowBatches[b];
-            var mesh = registry.Resolve(batch.Mesh);
-            cmd.PushConstants(pipeline, ShaderStages.Vertex, batch.Offset, offsetBytes: 64); // gl_InstanceIndex base
-            cmd.BindVertexBuffer(mesh.VertexBuffer);
-            cmd.BindIndexBuffer(mesh.IndexBuffer, mesh.IndexFormat);
-            cmd.DrawIndexedIndirect(argsBuffer, (ulong)b * stride, drawCount: 1, stride);
-            LastShadowDrawCalls++;
+            if (batchCounts[c] == 0)
+            {
+                continue; // an empty cascade keeps its cleared tile = "nothing occludes here"
+            }
+
+            // Tile (c%2, c/2) of the 2×2 atlas. The viewport+scissor restrict rasterization to that tile, so cascade
+            // c can only ever write its own quadrant of the shared map.
+            cmd.SetViewportScissorRect(
+                ((uint)c % 2) * ShadowTileResolution, ((uint)c / 2) * ShadowTileResolution,
+                ShadowTileResolution, ShadowTileResolution);
+
+            var lightViewProj = cascades[c];
+            cmd.PushConstants(pipeline, ShaderStages.Vertex, in lightViewProj, offsetBytes: 0);
+
+            // Mesh-major batches (the caster list carries ComposeShadowSortKey), one DrawIndexedIndirect per run —
+            // the P3-M4 W0 conversion. The run's start offset into the SHARED instance buffer (cascade base + the
+            // run's own offset, already folded in by BuildShadowBatches) travels as a vertex push constant.
+            for (var b = batchStart[c]; b < batchStart[c] + batchCounts[c]; b++)
+            {
+                ref readonly var batch = ref _shadowBatches[b];
+                var mesh = registry.Resolve(batch.Mesh);
+                cmd.PushConstants(pipeline, ShaderStages.Vertex, batch.Offset, offsetBytes: 64);
+                cmd.BindVertexBuffer(mesh.VertexBuffer);
+                cmd.BindIndexBuffer(mesh.IndexBuffer, mesh.IndexFormat);
+                cmd.DrawIndexedIndirect(argsBuffer, (ulong)b * stride, drawCount: 1, stride);
+                LastShadowDrawCalls++;
+            }
         }
 
         cmd.EndRendering();
@@ -903,7 +991,7 @@ public sealed class Renderer : IDisposable
     /// </summary>
     private void RecordScenePass(
         CommandList cmd, FrameContext frame, RenderList renderList, ResourceRegistry registry, in RenderView view,
-        in Frustum cameraFrustum, SwapchainTarget target, in Matrix4x4 lightViewProj)
+        in Frustum cameraFrustum, SwapchainTarget target, ReadOnlySpan<Matrix4x4> cascades, Vector4 cascadeSplits)
     {
         // Capture region for the forward PBR pass; the skybox draw below nests its own "Skybox" sub-label.
         using var _ = cmd.PushDebugLabel(ScenePassLabel);
@@ -961,7 +1049,7 @@ public sealed class Renderer : IDisposable
         ubo.Write(new ReadOnlySpan<CameraUniforms>(in uniforms));
 
         var lightsUbo = _lightsUbos[frame.Slot]!;
-        var lightsUniforms = new LightsUniforms(Lights, lightViewProj, view.Origin);
+        var lightsUniforms = new LightsUniforms(Lights, cascades, cascadeSplits, view.Origin);
         lightsUbo.Write(new ReadOnlySpan<LightsUniforms>(in lightsUniforms));
 
         var frameSet = frame.AllocateSet(_frameSetLayout!);
@@ -1161,8 +1249,11 @@ public sealed class Renderer : IDisposable
         return count;
     }
 
-    // Same, keyed by MESH only (the shadow pass binds no material — one contiguous run per mesh).
-    private static int BuildShadowBatches(ReadOnlySpan<RenderItem> items, ref Batch[] batches)
+    // Same, keyed by MESH only (the shadow pass binds no material — one contiguous run per mesh). APPENDS at
+    // <paramref name="writeIndex"/> and folds <paramref name="instanceBase"/> into each run's offset, so the N
+    // cascades of the CSM (P3-M5) share one batch array and one instance buffer. Returns how many it appended.
+    private static int BuildShadowBatches(
+        ReadOnlySpan<RenderItem> items, ref Batch[] batches, int writeIndex = 0, uint instanceBase = 0)
     {
         var count = 0;
         var start = 0;
@@ -1175,8 +1266,10 @@ public sealed class Renderer : IDisposable
                 end++;
             }
 
-            EnsureBatchCapacity(ref batches, count + 1);
-            batches[count++] = new Batch(mesh, MaterialHandle.Invalid, (uint)start, (uint)(end - start));
+            EnsureBatchCapacity(ref batches, writeIndex + count + 1);
+            batches[writeIndex + count] = new Batch(
+                mesh, MaterialHandle.Invalid, instanceBase + (uint)start, (uint)(end - start));
+            count++;
             start = end;
         }
 

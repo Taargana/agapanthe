@@ -163,20 +163,29 @@ public readonly struct LightsUniforms
     public readonly Vector4 Point3ColorIntensity;
 
     /// <summary>
-    /// Directional shadow map's light-space view·projection (offset 176, 64 bytes). Maps a world point into
-    /// the light's clip space; the fragment shader derives the shadow-map UV and reference depth from it.
-    /// Computed by the <see cref="Renderer"/> each frame from the scene bounds and the directional light.
+    /// The CSM cascades' light-space view·projections (offset 176, 4×64 = 256 bytes; P3-M5). Cascade <c>i</c> maps a
+    /// camera-relative point into the light clip space of atlas tile <c>i</c>; the fragment shader picks the cascade
+    /// from the fragment's view depth (see <see cref="CascadeSplits"/>), then derives the tile UV and reference depth.
     /// </summary>
-    public readonly Matrix4x4 LightViewProj;
+    public readonly Matrix4x4 LightViewProj0;
+    public readonly Matrix4x4 LightViewProj1;
+    public readonly Matrix4x4 LightViewProj2;
+    public readonly Matrix4x4 LightViewProj3;
 
     /// <summary>
-    /// Packs <paramref name="lights"/> and <paramref name="lightViewProj"/> into the std140 block. The
-    /// directional direction is normalized here (a degenerate zero direction falls back to straight down).
-    /// All four point-light slots are copied from <see cref="SceneLights.Points"/>; the shader ignores slots
-    /// at or beyond <see cref="SceneLights.PointCount"/>. No heap allocation: the result is a value type
-    /// built on the stack.
+    /// The far VIEW-SPACE depth of each cascade (offset 432, 16 bytes; P3-M5), x→cascade 0 … w→cascade 3. The
+    /// fragment shader selects the first cascade whose split depth exceeds the fragment's view depth.
     /// </summary>
-    public LightsUniforms(SceneLights lights, Matrix4x4 lightViewProj, Double3 origin)
+    public readonly Vector4 CascadeSplits;
+
+    /// <summary>
+    /// Packs <paramref name="lights"/>, the CSM <paramref name="cascades"/> and their <paramref name="splits"/> into
+    /// the std140 block. The directional direction is normalized here (a degenerate zero direction falls back to
+    /// straight down). All four point-light slots are copied from <see cref="SceneLights.Points"/>; the shader
+    /// ignores slots at or beyond <see cref="SceneLights.PointCount"/>. No heap allocation: the result is a value
+    /// type built on the stack.
+    /// </summary>
+    public LightsUniforms(SceneLights lights, ReadOnlySpan<Matrix4x4> cascades, Vector4 splits, Double3 origin)
     {
         ArgumentNullException.ThrowIfNull(lights);
 
@@ -199,6 +208,12 @@ public readonly struct LightsUniforms
         Point3PositionRange = new Vector4(p[3].Position.ToVector3(origin), p[3].Range);
         Point3ColorIntensity = new Vector4(p[3].Color, p[3].Intensity);
 
-        LightViewProj = lightViewProj;
+        // Fewer cascades than the atlas holds → the unused slots repeat the last one, so a fragment that somehow
+        // selects them still samples a valid cascade instead of an identity matrix (which would read tile garbage).
+        LightViewProj0 = cascades.Length > 0 ? cascades[0] : Matrix4x4.Identity;
+        LightViewProj1 = cascades.Length > 1 ? cascades[1] : LightViewProj0;
+        LightViewProj2 = cascades.Length > 2 ? cascades[2] : LightViewProj1;
+        LightViewProj3 = cascades.Length > 3 ? cascades[3] : LightViewProj2;
+        CascadeSplits = splits;
     }
 }

@@ -1,3 +1,4 @@
+using System.Numerics;
 using Agapanthe.Core;
 using Agapanthe.Graphics;
 using Agapanthe.Rendering;
@@ -30,7 +31,15 @@ public sealed class FrameOrchestrator
     private readonly ResourceRegistry _registry;
     private readonly Camera _camera;
     private readonly RenderList _render;
-    private readonly RenderList _shadowCasters;
+
+    // CSM per-frame state (P3-M5), allocated once: the four cascade matrices, their split depths, the frusta derived
+    // from them, and one caster list per cascade. Reused every frame (the lists Clear, keeping capacity) so the
+    // shadow path stays zero-alloc.
+    private const int CascadeCount = 4;
+    private readonly Matrix4x4[] _cascades = new Matrix4x4[CascadeCount];
+    private readonly float[] _splits = new float[CascadeCount];
+    private readonly Frustum[] _cascadeFrusta = new Frustum[CascadeCount];
+    private readonly RenderList[] _cascadeCasters;
 
     private readonly SystemScheduler _scheduler;
 
@@ -44,15 +53,21 @@ public sealed class FrameOrchestrator
     private float _dt;
 
     private FrameOrchestrator(
-        GameWorld world, Renderer renderer, ResourceRegistry registry, Camera camera,
-        RenderList render, RenderList shadowCasters)
+        GameWorld world, Renderer renderer, ResourceRegistry registry, Camera camera, RenderList render)
     {
         _world = world;
         _renderer = renderer;
         _registry = registry;
         _camera = camera;
         _render = render;
-        _shadowCasters = shadowCasters;
+
+        // One caster list per cascade, owned here (P3-M5): the application no longer supplies a shadow list, because
+        // how many there are is a property of the CSM, not of the app.
+        _cascadeCasters = new RenderList[CascadeCount];
+        for (var c = 0; c < CascadeCount; c++)
+        {
+            _cascadeCasters[c] = new RenderList();
+        }
 
         // The structural barrier the scheduler runs at the end of every stage IS the world's deferred-change flush
         // (P3-M2 D2): a system enqueues spawns/despawns, the barrier applies them before the next stage iterates.
@@ -71,17 +86,15 @@ public sealed class FrameOrchestrator
     /// (input, gameplay, a bench spinner) with <see cref="Add(Stage, ISystem)"/> BEFORE the first <see cref="Tick"/>.
     /// </summary>
     public static FrameOrchestrator CreateDefault(
-        GameWorld world, Renderer renderer, ResourceRegistry registry, Camera camera,
-        RenderList render, RenderList shadowCasters)
+        GameWorld world, Renderer renderer, ResourceRegistry registry, Camera camera, RenderList render)
     {
         ArgumentNullException.ThrowIfNull(world);
         ArgumentNullException.ThrowIfNull(renderer);
         ArgumentNullException.ThrowIfNull(registry);
         ArgumentNullException.ThrowIfNull(camera);
         ArgumentNullException.ThrowIfNull(render);
-        ArgumentNullException.ThrowIfNull(shadowCasters);
 
-        var o = new FrameOrchestrator(world, renderer, registry, camera, render, shadowCasters);
+        var o = new FrameOrchestrator(world, renderer, registry, camera, render);
         o._scheduler.Add(Stage.PostSimulation, new PropagateSystem(o));
         o._scheduler.Add(Stage.PostSimulation, new AggregateBoundsSystem(o));
         o._scheduler.Add(new SceneViewSystem(o));
@@ -137,33 +150,29 @@ public sealed class FrameOrchestrator
             // uses the same one. The camera carries no dependency on the systems that ran in Tick, so building the
             // view here rather than in Tick changes no pixel.
             var view = o._camera.CreateView();
-            var lightDir = o._renderer.Lights.Directional.Direction;
             var cameraFrustum = Frustum.FromViewProjection(view.View * view.Projection);
 
-            // The wedge is bounded a finite distance upstream (D3.a), anchored on the camera frustum's sphere (the
-            // same sphere the fit uses), so a far-upstream caster can never enter the caster list and blow out the
-            // shadow map's depth range.
-            var (anchorCenter, anchorRadius) = o._renderer.ComputeFrustumSphere(in view);
-            var wedge = ExtrudedShadowFrustum.FromCameraFrustum(
-                in cameraFrustum, lightDir, anchorCenter, anchorRadius, o._renderer.ShadowCasterDistance);
+            // Fit the CSM cascades FIRST (P3-M5): each is fitted to its own frustum slice — camera-only, so it needs
+            // no caster bounds. That is what retires the P3-M2 two-pass wedge: with the fit independent of the
+            // casters, the casters can simply be culled against the finished cascade volumes, in one pass.
+            var cascades = o._cascades.AsSpan();
+            var splits = o._splits.AsSpan();
+            o._renderer.ComputeCascades(in view, cascades, splits);
 
-            // Collect: scene CANDIDATES (all drawables, sorted, sphere-carrying — the camera cull is done on the GPU
-            // now, P3-M4); wedge cull → shadow casters (superset) + their bounds (still CPU two-pass, P3-M2 D3).
-            o._world.CollectRenderLists(
-                o._render, o._shadowCasters, in view, in wedge, out var casterBounds);
+            for (var c = 0; c < cascades.Length; c++)
+            {
+                o._cascadeFrusta[c] = Frustum.FromViewProjection(cascades[c]);
+            }
 
-            // Fit: footprint on the scene bounds, depth range on the caster bounds (D3.b). The wedge list is a
-            // superset of the final list, so fitting on its bounds can only grow the depth range — never clip a
-            // survivor of pass 2.
-            var lightViewProj = o._renderer.ComputeLightViewProj(in view, in o._sceneBounds, in casterBounds);
-            var lightFrustum = Frustum.FromViewProjection(lightViewProj);
-
-            // Pass 2: tighten the caster list against the fitted light volume, in place, then sort.
-            o._world.CompactShadowCasters(o._shadowCasters, in lightFrustum);
+            // Collect: scene CANDIDATES (all drawables, sorted, sphere-carrying — the camera cull runs on the GPU,
+            // P3-M4), then the casters bucketed per cascade (NoShadowCast entities excluded, P3-M5).
+            o._world.CollectRenderLists(o._render, in view);
+            o._world.CollectShadowCasters(o._cascadeFrusta.AsSpan(), o._cascadeCasters, in view);
 
             // The camera frustum crosses into DrawScene, where the compute pass culls the scene candidates against it.
             o._renderer.DrawScene(
-                o._render, o._shadowCasters, o._registry, in view, in cameraFrustum, in lightViewProj,
+                o._render, o._cascadeCasters, o._registry, in view, in cameraFrustum,
+                cascades, new Vector4(splits[0], splits[1], splits[2], splits[3]),
                 ctx.Cmd, ctx.Frame, ctx.Target);
         }
     }

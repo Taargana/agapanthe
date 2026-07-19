@@ -93,6 +93,66 @@ internal static class ShadowFit
     }
 
     /// <summary>
+    /// Fits the N cascades of a CSM (P3-M5): splits the camera frustum into depth slices, fits one texel-snapped
+    /// light-space matrix per slice, and reports the far view-space depth of each slice (for cascade selection in
+    /// the fragment shader). Fills <paramref name="lightViewProj"/> and <paramref name="splitViewDepths"/>, both of
+    /// length <see cref="CascadeSettings.Count"/>.
+    /// <para>
+    /// Each cascade's FOOTPRINT is the bounding sphere of its frustum slice — camera-only, so no caster bounds and
+    /// no circularity (the P3-M2 two-pass wedge is retired). The DEPTH range uses a fixed generous upstream setback
+    /// (<c>eye = centre − dir·κr</c>, far <c>= (κ+1)r</c>) so a caster upstream of the slice is not clipped; the
+    /// per-cascade <c>UpstreamExtent</c> sophistication is deferred (backlog). The snap/quantize (anti-shimmer) are
+    /// reused verbatim, each cascade snapped to its own <paramref name="tileResolution"/> (the atlas tile size).
+    /// </para>
+    /// </summary>
+    public static void ComputeCascades(
+        in RenderView view, Vector3 lightDirection, in CascadeSettings settings, uint tileResolution,
+        Span<Matrix4x4> lightViewProj, Span<float> splitViewDepths)
+    {
+        var n = settings.Count;
+        if (lightViewProj.Length < n || splitViewDepths.Length < n)
+        {
+            throw new ArgumentException($"cascade spans must hold at least {n} entries.");
+        }
+
+        var dir = lightDirection.LengthSquared() > 1e-12f
+            ? Vector3.Normalize(lightDirection)
+            : new Vector3(0f, -1f, 0f);
+
+        var near = MathF.Max(view.Near, 1e-4f);
+        var far = MathF.Max(MathF.Min(view.Far, settings.MaxDistance), near * 1.001f);
+
+        const float kappa = 4f; // upstream setback in radii — leaves (κ−1)r of room for casters behind the slice
+
+        var sliceNear = near;
+        for (var i = 0; i < n; i++)
+        {
+            // Practical split scheme (Zhang et al.): blend the uniform and logarithmic partitions by Lambda. The
+            // log term packs resolution into the near cascades (where texels matter most); the uniform term keeps
+            // the far cascades from collapsing. Lambda ∈ [0,1]; 0 = uniform, 1 = logarithmic.
+            var t = (i + 1) / (float)n;
+            var uniform = near + ((far - near) * t);
+            var logarithmic = near * MathF.Pow(far / near, t);
+            var sliceFar = (settings.Lambda * logarithmic) + ((1f - settings.Lambda) * uniform);
+
+            var (center, rawRadius) = FitSliceSphere(in view, sliceNear, sliceFar);
+            var radius = QuantizeRadius(rawRadius);
+            center = SnapToTexelGrid(center, view.Origin, dir, radius, tileResolution);
+
+            var up = MathF.Abs(dir.Y) > 0.99f ? Vector3.UnitZ : Vector3.UnitY;
+            var eyeDistance = kappa * radius;
+            var eye = center - (dir * eyeDistance);
+            var lightView = MathHelpers.LookAt(eye, center, up);
+            var lightProj = MathHelpers.OrthographicVulkan(
+                2f * radius, 2f * radius, MathF.Max(radius * 0.01f, 1e-4f), eyeDistance + radius);
+            lightViewProj[i] = lightView * lightProj;
+            splitViewDepths[i] = sliceFar; // the far view-space depth this cascade covers (positive, along -Z)
+
+            sliceNear = sliceFar;
+        }
+    }
+
+    /// <summary>
     /// How far the scene extends UPSTREAM of the fitted centre along the light (i.e. on the side the light comes
     /// from), in the frame's camera-relative space. That is the distance the light's eye must clear for every
     /// caster to stay inside the depth range. Lateral casters are NOT covered — the ortho box is exactly the
@@ -130,7 +190,19 @@ internal static class ShadowFit
     {
         var near = MathF.Max(view.Near, 1e-4f);
         var far = shadowDistance > 0f ? MathF.Min(view.Far, shadowDistance) : view.Far;
-        far = MathF.Max(far, near * 1.001f); // a degenerate slice would give a zero-radius sphere
+        return FitSliceSphere(in view, near, far);
+    }
+
+    /// <summary>
+    /// The bounding sphere of the camera frustum SLICE between <paramref name="sliceNear"/> and
+    /// <paramref name="sliceFar"/>, in camera-relative space (P3-M5 CSM). Same eight-corner construction as
+    /// <see cref="FitFrustumSphere"/> but over an arbitrary depth range — one call per cascade. The sphere depends
+    /// only on the camera (not on any caster), which is what keeps the cascade fit free of the P3-M2 circularity.
+    /// </summary>
+    internal static (Vector3 Center, float Radius) FitSliceSphere(in RenderView view, float sliceNear, float sliceFar)
+    {
+        var near = MathF.Max(sliceNear, 1e-4f);
+        var far = MathF.Max(sliceFar, near * 1.001f); // a degenerate slice would give a zero-radius sphere
 
         var tanHalfV = MathF.Tan(view.FovY * 0.5f);
         var tanHalfH = tanHalfV * view.AspectRatio;

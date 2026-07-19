@@ -1,82 +1,73 @@
-# Absolute-Human Board — Agapanthe Session 17 (P3-M4 : GPU-driven render — cull compute + draw indirect)
+# Absolute-Human Board — Agapanthe Session 18 (P3-M5 : CSM — Cascaded Shadow Maps)
 
-**Status**: ✅ **CLOSED (2026-07-19)** — W0→W2 livrés, **double audit PASS**, findings appliqués, **verdict visuel
-humain PASS avec dette d'ombre connue**. Le cull GPU est prouvé correct (GPU visible == CPU, 2557 @10k AOT ;
-mono bit-identique `9790D95D`). Constat visuel humain sur grille (zone rectangulaire + anneaux au sol) **diagnostiqué
-comme préexistant, PAS le cull** : (1) moiré texture d'herbe au rasant (backlog §5) ; (2) empreinte shadow map + acné
-sur sol plat — plafond cascade unique, **le plan de sol de 340 m est caster → `eyeDistance` 248 m** (correctif = CSM
-backlog §2 ; mitigation cheap = ground non-caster) ; (3) « ombres sans casque » = anti-popping P3-M2 (correct).
-Preuve que ce n'est pas le cull : `AGAPANTHE_GROUND=0` supprime tout, mono bit-identique, passe d'ombre non touchée.
-Scope livré : **(A)+(B)** ; **(C) slots persistants → jalon suivant** (backlog §1, rembourse aussi la régression A+B).
+**Status**: 🚧 **OUVERT (2026-07-19)** — correctif du plafond cascade unique constaté à la clôture P3-M4
+(empreinte rectangulaire + acné sur sol plat). [backlog §2].
 
-**But** : sortir l'**émission des draws** et le **frustum cull** de la scène opaque du CPU vers le GPU. Passe de
-« cull CPU O(n) → RenderItem[] trié → Compact/frame → boucle CPU de batches → un DrawIndexed/run » à « buffer
-d'args GPU + `DrawIndexedIndirect` » et « cull+compaction en compute shader ». *Payoff : mord à 100k entités.*
-**Spec** : [docs/plans/2026-07-19-p3m4-gpu-driven-design.md](../docs/plans/2026-07-19-p3m4-gpu-driven-design.md)
-**Baseline de rendu** : `9790D95D` · **Sessions passées** : S1–S16 → `archive/` (S16 = P3-M3 physique, clos).
+**But** : remplacer la carte d'ombre unique par **4 cascades** — découper le frustum caméra en tranches de
+profondeur, une carte texel-snappée par tranche → résolution quasi-constante du pied à l'horizon (net près
+ET loin, plus de texels grossiers / acné sur grand receveur plat).
+**Spec** : [docs/plans/2026-07-19-p3m5-csm-design.md](../docs/plans/2026-07-19-p3m5-csm-design.md)
+**Baseline** : PAS de bit-identique (le CSM change l'ombre exprès) → **nouveau protocole visuel**.
+**Sessions passées** : S1–S17 → `archive/` (S17 = P3-M4 GPU-driven, clos).
 
 ## Décisions verrouillées (détail : spec § Journal des décisions)
 
-- **Scope A+B, C reporté** (décision humaine) : plomberie + cull GPU = la moitié auto-contenue et sensible
-  MoltenVK ; les slots persistants (vrai gain 100k, logique origine-mobile) = jalon distinct.
-- **Offset de batch en push constant, pas `firstInstance`** : tue la dépendance à `drawIndirectFirstInstance` ET
-  le risque `baseInstance` MoltenVK d'un coup. Shaders : `instances.model[gl_InstanceIndex + pc.batchOffset]`.
-- **Gate W0 = bit-identique `9790D95D`** (plomberie, comportement inchangé). **Gate W1 = visuellement identique +
-  compte visible == cull CPU** (test frustum float GPU ≠ CPU aux marges de plan ; ordre intra-batch via atomics
-  sans effet sur l'image opaque z-testée).
-- **Table de batches construite CPU** (évite `VK_KHR_draw_indirect_count`, hors core 1.2 / incertain MoltenVK) :
-  le CPU connaît le nombre de draws, le GPU ne remplit que l'`InstanceCount` de chaque batch.
-- **Cull d'ombre reste CPU** (wedge deux passes P3-M2, subtil) — profite quand même du draw indirect de W0.
+- **Stockage = atlas 2×2** de la carte 4096² existante (2048²/cascade). 1 `BeginRendering`, clear une fois,
+  4 draws viewport-scopés. Garde `sampler2D` + PCF manuel, zéro render-target par-layer, zéro risque array
+  MoltenVK.
+- **Immutable samplers = sans objet** : le moteur fait déjà du PCF manuel exprès pour MoltenVK. CSM le garde.
+- **Cull casters = SIMPLE par cascade** (remplace le wedge two-pass P3-M2) : l'empreinte d'une cascade vient
+  de sa tranche de frustum (caméra seule → **pas de circularité**), casters cullés par test de sphère contre
+  le volume de chaque cascade. `_casterSpheres`/`CompactShadowCasters`/garde F7 **retirés**.
+- **`NoShadowCast` inclus** : le sol reçoit mais ne projette pas → fits resserrés, plus d'auto-ombrage du sol.
 
 ## Critère de sortie
 
-Tests verts · 0 warning · 0 validation · 0 leak · **W0 capture bit-identique `9790D95D`** · **W1 compte visible ==
-cull CPU + visuellement identique** · banc `grid:100x100` draws==2 + 0 alloc/frame · NativeAOT PASS · double audit
-PASS · **verdict visuel humain**.
+Tests verts (`ShadowFit.ComputeCascades`) · 0 warning · 0 validation · 0 leak · banc AOT 0 alloc/frame ·
+mémoire inchangée (4×2048² = 1×4096²) · NativeAOT PASS · double audit PASS · **verdict visuel humain** (net
+près+loin, pas de couture entre cascades, sol sans acné).
 
 ## Vagues
 
 | # | Contenu | Gate |
 |---|---|---|
-| W0 | Graphics : `BufferUsage.Indirect` · `DrawIndexedIndirectCommand` · `CommandList.DrawIndexedIndirect` · `BufferBarrier`/`BufferSync`. Rendu : `IndirectArgsRing` (ring/frame) + `batchOffset` push-constant (scène offset 0, ombre offset 64), shaders indexent `gl_InstanceIndex+batchOffset`. **Cull+batch CPU inchangés.** | ✅ Capture **bit-identique `9790D95D`** (mono + grid + **AOT**) · 321 tests · 0 warning · 0 validation · 0 leak |
-| W1 | `SceneCandidate` (transform cam-relative + sphère + batchId) + `StorageBufferRing<T>` + table de batches CPU · `scene_cull.comp` (frustum-cull reproduisant `Frustum.Intersects` + compaction atomics + écrit `InstanceCount`) · `CommandList.BufferBarrier` compute→indirect/vertex · readback `AGAPANTHE_CULL_VERIFY`. Scène non cullée CPU (candidats) ; ombre reste CPU two-pass. | ✅ **GPU visible == CPU** (110 grid, **2557 @10k AOT** — MATCH) · mono-modèle **bit-identique `9790D95D`** · 0 validation · 0 leak · 321 tests |
-| W2 | Banc `grid:100x100` Release+AOT · draws==2 · 0 alloc/frame · double audit · findings · docs · archive · verdict humain | 🚧 **AOT PASS** · **0 alloc/frame @10k** · draws 2+2 · **double audit PASS** (`csharp-lowlevel` PASS · `engine-architect` PASS with concerns) · findings appliqués · **verdict visuel humain dû** |
+| W1 | `CascadeSettings` + `ShadowFit.ComputeCascades` (split pratique λ≈0.5, `FitSliceSphere`/`QuantizeRadius`/`SnapToTexelGrid` réutilisés par tranche, setback amont fixe κ=4·r) + tests GPU-free. | ✅ **326 tests** (+5 : splits monotones+span, texels near<far, sphères couvrantes, caster amont dans la plage, snap stable) · 0 warning |
+| W2 | Atlas : `RecordShadowPass` 4 viewports (`SetViewportScissorRect`, casters concaténés) · `LightsUniforms` 4 mat4 + `CascadeSplits` (448 o) · `mesh.frag` sélection par profondeur vue + fondu 10% + PCF clampé tuile + `DEBUG_CASCADE` · World `CollectShadowCasters` N listes (wedge two-pass **retiré**) · `NoShadowCast` (composant + registre + sol marqué) | ✅ **330 tests** · 0 warning · **0 validation** · **0 leak** · **zone rectangulaire + anneaux d'acné DISPARUS** (capture rasante) |
+| W3 | Banc AOT `grid:100x100` 0 alloc/frame · protocole visuel (`docs/visual-checks/`) · double audit · docs · archive · verdict humain | ⬜ AOT PASS · audits PASS · verdict humain |
 
-**Double audit P3-M4 (2026-07-19) — PASS, aucun changement de code requis.** `csharp-lowlevel` **PASS** (sync/hazards
-couverts, 0 alloc, 0 leak, compaction sûre, layouts std430 concordants) ; `engine-architect` **PASS with concerns**.
-Findings appliqués : (code) `BufferSync.TransferWrite` mort retiré, commentaires `RenderItem` 88→104 o ; (docs/backlog)
-**§1 réécrit** — honnêteté de la régression A+B @10k (le mur migre cull→sort+upload, (C) le rembourse), buffers
-GPU-produits en device-local (dette), compaction atomique = 2ᵉ verrou transparence, MultiDrawIndirect + cull-ombre-GPU.
-Bonus livré à la demande humaine : **HUD debug barre de titre** (fps/ms/draws/candidates/GC MB, `EngineWindow.Title`).
-
-**Dépendances** : W1 après W0 (le cull GPU écrit dans le buffer d'args que W0 introduit) ; W2 après W1. W0 et W1
-touchent tous deux `Renderer.cs` + les shaders → **séquentiels**.
+**Dépendances** : W2 après W1 (le rendu consomme les matrices de cascade). W2 touche `ShadowFit`/`Renderer`/
+`mesh.frag`/`GameWorld` → séquencé en interne. W3 après W2.
 
 ## Risques
 
-- **F1 — MoltenVK** : `BufferUsageFlags.IndirectBufferBit`, la stage `DrawIndirect`, l'atomic SSBO compute →
-  vérifier chaque feature au **premier VUID** sur MoltenVK (non testable ici : pas de machine macOS — dette P3-M0).
-  L'offset en push constant neutralise déjà `drawIndirectFirstInstance`/`baseInstance`.
-- **F2 — Bit-exact W0** : déplacer l'offset de `firstInstance` vers un push constant ne doit changer aucun vertex
-  → capture `9790D95D`. Si diff, c'est un bug d'indexation, pas une tolérance.
-- **F3 — Aléa de synchro** : compute-write → indirect-read ET vertex-read = deux barrières (stages différents). Un
-  oubli = message de validation (gate bloquant) ou corruption silencieuse. Zéro-init des `InstanceCount` avant le
-  dispatch, sinon accumulation entre frames.
-- **F4 — Alloc/frame** : buffer d'args + buffer de candidats = rings réutilisés (doublement, 0 alloc régime établi),
-  comme `InstanceBufferRing`.
-- **F5 — Compte W1** : le readback debug du compte visible ne doit pas être sur le hot path (Debug-only / banc).
+- **F1 — Bleed de tuile atlas** : le PCF 5×5 près d'un bord de tuile échantillonne la cascade voisine →
+  **clamper l'UV du kernel dans la tuile** (ou gutter 1-2 texels). Correctness, pas optionnel.
+- **F2 — Couture entre cascades** : saut visible à une frontière de split → **bande de fondu** (lerp cascade
+  i/i+1 sur une marge).
+- **F3 — Setback fixe** : un caster loin en amont d'une tranche pourrait être clippé (pas d'`UpstreamExtent`
+  par-cascade en v1). Acceptable à 4 cascades ; sophistication → backlog. À surveiller au protocole visuel.
+- **F4 — std140** : `LightViewProj[4]` (mat4[4]) + `CascadeSplits` — recaler l'offset (176→432→448) et le
+  déclarer identique CPU↔`mesh.frag`.
+- **F5 — Circularité fit/casters** : évitée par construction (empreinte = tranche de frustum, indépendante
+  des casters) — ne PAS réintroduire une dépendance caster→fit.
 
 ## Dette restante à la clôture (prévision)
 
-(C) slots persistants dirty-trackés (backlog §1, prochain jalon) · MultiDrawIndirect (un seul draw) · cull compute
-de l'ombre · verdict visuel P3-M1 toujours dû · Linux/macOS jamais validés (P3-M0, MoltenVK non prouvé) · CSM/PCSS
-(backlog §2) · dette physique P3-M3 (backlog §4).
+PCSS (backlog §2.1bis) · GPU shadow cull (backlog §1) · `UpstreamExtent` par-cascade (setback fixe en v1) ·
+slots persistants (C) reportés de P3-M4 · moiré d'herbe (backlog §5) · Linux/macOS jamais validés (P3-M0).
+
+## Calibration (constat humain post-W2)
+
+**Le plafond `ShadowDistance = 50 m` de la session 16 bridait le CSM.** Ce cap avait été posé *parce qu'*une
+cascade unique ne peut être nette ET longue portée (on sacrifiait la portée) — la justification même que le CSM
+supprime. `Renderer.ComputeCascades` fait `MaxDistance = min(Cascades.MaxDistance, ShadowDistance)`, donc les 4
+cascades se serraient dans 50 m et **rien n'était ombré au-delà** (constat humain : « la shadow map n'apparaît que
+très près »). **Corrigé** : `FrameCamera` pose désormais `ShadowDistance = max(diagonal*4, Cascades.MaxDistance)`.
+La portée d'ombre est maintenant pilotée par **`Renderer.Cascades.MaxDistance`** (200 m par défaut) — le seul
+bouton à tourner. *Leçon : un workaround doit mourir avec la contrainte qui l'a justifié.*
 
 ## Log
 
-- 2026-07-19: **Session 17 ouverte — P3-M4 GPU-driven.** Fork tranché (humain) : scope A+B (C reporté) ; gate W1 =
-  compte+visuel (W0 bit-identique). Plan approuvé, spec écrite.
-- 2026-07-19: **W0→W2 livrés.** W0 draw-indirect bit-identique `9790D95D` (AOT) ; W1 cull compute (GPU==CPU 2557 @10k) ;
-  W2 banc 0 alloc/frame @10k AOT, draws 2+2. **Double audit PASS** (findings docs/backlog appliqués). HUD barre de titre
-  livré (voie A). **Verdict visuel PASS** — artefacts sol diagnostiqués préexistants (shadow/texture), pas le cull.
-  **P3-M4 CLOS.** Reste : commit (sur demande) + choix du prochain jalon.
+- 2026-07-19: **Session 18 ouverte — P3-M5 CSM.** Forks tranchés (humain) : cull simple par cascade, fix
+  sol non-caster inclus. Découvertes : PCF manuel déjà en place (immutable samplers sans objet) ; atlas 2×2 ;
+  fit par-cascade décochonne la circularité P3-M2. Plan approuvé, spec écrite. W1 à suivre.

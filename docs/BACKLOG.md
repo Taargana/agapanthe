@@ -89,6 +89,35 @@ Une planète éclairée par un soleil quasi ponctuel : la nuit, c'est `dot(N, L)
 à toute échelle, sans une seule texture. Les **éclipses** (lune → planète) : intersection rayon/sphère et cône d'ombre,
 formule fermée. **Ne jamais rasteriser une shadow map à l'échelle d'un système solaire** — mauvais outil.
 
+### 2.2bis Ombres LOINTAINES — au-delà de la portée du CSM *(question ouverte, instruite session 18)*
+
+**Le constat** (humain, session 18, après le CSM) : un CSM a une **portée finie** (`Renderer.Cascades.MaxDistance`,
+200 m par défaut). Au-delà, plus d'ombre. Monter la portée dilue la dernière cascade ; le problème se déplace, il ne
+disparaît pas. Un **fondu sur les derniers 20 %** est en place (session 18) : il supprime l'« horizon d'ombre »
+(la ligne franche au sol, qui *lisait* comme un bug) mais ne crée évidemment pas d'ombres lointaines.
+
+**⚠️ Contrainte dure — pas de ray tracing matériel via MoltenVK.** macOS/Apple silicon a bien du RT (Metal 3,
+matériel sur M3+), mais **MoltenVK n'expose pas** `VK_KHR_ray_query`/`ray_tracing_pipeline` : `VK_KHR_acceleration_structure`
+n'est pas implémenté ([MoltenVK #1956](https://github.com/KhronosGroup/MoltenVK/issues/1956), [#1953](https://github.com/KhronosGroup/MoltenVK/issues/1953),
+[#427](https://github.com/KhronosGroup/MoltenVK/issues/427)). Et ce n'est pas qu'un retard : Khronos note que
+certaines exigences du RT (**device addresses**) rendent l'implémentation *en couche* au-dessus d'une autre API
+structurellement très difficile ([Ray Tracing in Vulkan](https://www.khronos.org/blog/ray-tracing-in-vulkan)).
+Atteindre le RT de Metal imposerait un **backend Metal natif** → contredit la décision verrouillée « couche GPU
+mince **mono-backend** » (CLAUDE.md). *À revérifier avant toute décision : cet état peut bouger.*
+
+**Les trois options, toutes légitimes :**
+1. 🟠 **Plus de cascades** (atlas 3×3, ou texture-array) — étend la portée **à netteté constante**. La suite naturelle
+   du CSM, sans nouvelle extension. *Mord : dès qu'on veut > 200 m net.*
+2. 🟡 **RT optionnel hors macOS** (`ray_query` détecté au runtime, fallback CSM). Reste dans Vulkan, ne casse pas le
+   mono-backend — mais **deux chemins d'ombre** à maintenir et valider, et le Mac garde le problème.
+3. 🟢 **Ray marching / analytique** (§2.2, §2.3) — **la réponse préférée**, cohérente avec le fil conducteur du
+   projet (*« on ne photographie que ce qui a une surface et qui est proche »*). Marche partout, sans extension.
+   *Prérequis : un vrai terrain* (le sol est un quad plat — §5), car c'est le relief qui porte l'occlusion lointaine.
+
+**Note de cadrage** : à 300 m, un casque de 2 m fait quelques pixels — son ombre n'apporte presque rien. Ce que l'œil
+réclame au loin, c'est l'occlusion **grande échelle** (relief, gros bâtiments). D'où la préférence pour (3), et
+l'intérêt limité du RT pour *repousser un horizon* (le RT brille sur les **contacts nets en champ proche**).
+
 ### 2.3 Relief au soleil rasant
 Une shadow map dégénère quand les rayons sont quasi horizontaux (texels étirés à l'infini). Solutions :
 **ray marching sur la heightmap** accéléré par un **max-mipmap** (chaque mip stocke l'altitude max d'un bloc → gros

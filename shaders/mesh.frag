@@ -40,7 +40,8 @@ layout(set = 0, binding = 1) uniform LightsUbo {
     vec4 dirColorIntensity;
     vec4 ambientPointCount;
     vec4 pointData[8];
-    mat4 lightViewProj;
+    mat4 cascadeViewProj[4]; // offset 176 — one per CSM cascade (P3-M5), each mapping into its atlas tile
+    vec4 cascadeSplits;      // offset 432 — far VIEW-space depth of cascades 0..3
 } lights;
 
 // Set 0, binding 2 = the directional shadow map (M6). A PLAIN sampler2D, not a sampler2DShadow: MoltenVK's
@@ -89,6 +90,7 @@ const int DEBUG_OCCLUSION = 6;
 const int DEBUG_TANGENT = 7;          // xyz 0.5+0.5, handedness = green/red tint on w
 const int DEBUG_KEY_NDOTL = 8;        // NdotL of the directional light (final N)
 const int DEBUG_SHADOW = 9;           // directional shadow factor in greyscale (1 = lit, 0 = shadowed)
+const int DEBUG_CASCADE = 10;         // CSM cascade selection, tinted red/green/blue/yellow near->far (P3-M5)
 
 // --- BRDF terms ---------------------------------------------------------------------------------------
 
@@ -160,26 +162,30 @@ vec3 shade(vec3 L, vec3 radiance, vec3 N, vec3 V, float NdotV,
 // slope-scaled bias (a rasterizer state, applied when the shadow map was rendered), so no extra shader bias
 // is needed. (A hardware sampler2DShadow comparator would do this test in-sampler, but MoltenVK forbids
 // comparison samplers here — see the binding-2 declaration.)
-float directionalShadow(vec3 wp) {
-    // lightViewProj bakes the Vulkan Y-flip and Z[0,1] (OrthographicVulkan). Ortho w is 1, but the perspective
+// Samples ONE cascade of the 2x2 shadow atlas (P3-M5). `wp` is camera-relative; `c` picks the cascade matrix and
+// the atlas tile. Returns 1 = lit, 0 = fully shadowed.
+float sampleCascade(vec3 wp, int c) {
+    // cascadeViewProj bakes the Vulkan Y-flip and Z[0,1] (OrthographicVulkan). Ortho w is 1, but the perspective
     // divide is kept so this stays correct if a perspective light frustum is ever substituted.
-    vec4 clip = lights.lightViewProj * vec4(wp, 1.0);
+    vec4 clip = lights.cascadeViewProj[c] * vec4(wp, 1.0);
     vec3 ndc = clip.xyz / clip.w;
 
-    // Outside the light's depth range: nothing was rendered there, so treat as unshadowed (lit).
+    // Outside this cascade's depth range: nothing was rendered there, so treat as unshadowed (lit).
     if (ndc.z < 0.0 || ndc.z > 1.0) {
         return 1.0;
     }
 
-    // NDC xy in [-1,1] (Vulkan y-down) -> shadow-map UV in [0,1]. The y-down clip space already matches the
+    // NDC xy in [-1,1] (Vulkan y-down) -> tile-local UV in [0,1]. The y-down clip space already matches the
     // top-left texel origin, so v = ndc.y*0.5+0.5 directly, WITHOUT a 1-v flip (the ortho baked the flip).
-    vec2 uv = ndc.xy * 0.5 + 0.5;
+    vec2 uvTile = ndc.xy * 0.5 + 0.5;
 
-    // Outside the light frustum in XY: unshadowed. The plain sampler's border is opaque black (depth 0), which
-    // would read as a spurious occluder, so reject here rather than leaning on the border color.
-    if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) {
+    // Outside this cascade in XY: let the caller fall through to the next cascade rather than inventing a value.
+    if (uvTile.x < 0.0 || uvTile.x > 1.0 || uvTile.y < 0.0 || uvTile.y > 1.0) {
         return 1.0;
     }
+
+    // Tile (c%2, c/2) of the 2x2 atlas: the tile-local UV maps into one quadrant of the shared map.
+    vec2 tileOrigin = vec2(float(c % 2), float(c / 2)) * 0.5;
 
     float reference = ndc.z;
     vec2 texel = 1.0 / vec2(textureSize(shadowMap, 0));
@@ -189,9 +195,15 @@ float directionalShadow(vec3 wp) {
     // sample point (rather than averaging 25 equal binary results) makes the transition continuous as the shadow
     // slides across a texel — a nearest-sampled binary compare cannot be smoothed any other way, because the
     // sampler must not blend raw depths before the comparison.
-    vec2 texelPos = uv / texel - 0.5;
+    vec2 uvAtlas = tileOrigin + uvTile * 0.5;
+    vec2 texelPos = uvAtlas / texel - 0.5;
     vec2 frac = fract(texelPos);
     vec2 base = (floor(texelPos) + 0.5) * texel;
+
+    // The kernel must never bleed into a NEIGHBOURING tile (it holds a different cascade, so a tap there is pure
+    // garbage): clamp every tap to this tile's interior, half a texel in from its edges.
+    vec2 tileMin = tileOrigin + texel * 0.5;
+    vec2 tileMax = tileOrigin + vec2(0.5) - texel * 0.5;
 
     float sum = 0.0;
     float weightSum = 0.0;
@@ -201,13 +213,72 @@ float directionalShadow(vec3 wp) {
             // Bilinear coverage of this tap: 1 at the sample point, falling to 0 one texel away.
             vec2 w = max(vec2(0.0), 1.0 - abs(offset - frac));
             float weight = w.x * w.y + 0.25; // + a flat floor so the outer taps still soften the edge
-            float stored = texture(shadowMap, base + offset * texel).r;
+            float stored = texture(shadowMap, clamp(base + offset * texel, tileMin, tileMax)).r;
             sum += weight * (reference <= stored ? 1.0 : 0.0);
             weightSum += weight;
         }
     }
 
     return sum / weightSum;
+}
+
+// Picks the cascade from the fragment's VIEW-space depth and samples it, cross-fading into the next cascade over a
+// band before each split so the resolution change does not show up as a hard seam.
+float directionalShadow(vec3 wp) {
+    // View-space depth along -Z (positive in front of the eye) — the quantity the splits are expressed in.
+    float viewDepth = -(camera.view * vec4(wp, 1.0)).z;
+    float maxDistance = lights.cascadeSplits[3]; // far edge of the last cascade = the shadowed range
+
+    // First cascade whose far split covers this fragment. Past the last split there is no shadow map: lit (and the
+    // distance fade below has already brought the shadow to 1.0 by then, so nothing pops here).
+    int c = 0;
+    while (c < 4 && viewDepth > lights.cascadeSplits[c]) {
+        ++c;
+    }
+
+    if (c >= 4) {
+        return 1.0;
+    }
+
+    float shadow = sampleCascade(wp, c);
+
+    // Blend band: over the last 10% of this cascade's range, fade into the next one. Without it the texel-density
+    // change at a split reads as a visible line across the ground.
+    float nearSplit = c == 0 ? 0.0 : lights.cascadeSplits[c - 1];
+    float farSplit = lights.cascadeSplits[c];
+    float band = (farSplit - nearSplit) * 0.1;
+    if (c + 1 < 4 && band > 0.0 && viewDepth > farSplit - band) {
+        float t = clamp((viewDepth - (farSplit - band)) / band, 0.0, 1.0);
+        shadow = mix(shadow, sampleCascade(wp, c + 1), t);
+    }
+
+    // DISTANCE FADE-OUT (session 18, human visual finding). A CSM has a finite range, and stopping at it abruptly
+    // draws a hard "shadow horizon" line across the ground — the artefact reads as a bug even though the shadows
+    // themselves are correct. Fading to lit over the last 20% of the range trades a visible edge for a gradual
+    // loss of shadowing, which the eye accepts. This does NOT create distant shadows: extending the range is
+    // Cascades.MaxDistance, and true long-range occlusion is ray marching / analytic (backlog §2).
+    float fadeStart = maxDistance * 0.8;
+    if (viewDepth > fadeStart && maxDistance > fadeStart) {
+        float t = clamp((viewDepth - fadeStart) / (maxDistance - fadeStart), 0.0, 1.0);
+        shadow = mix(shadow, 1.0, t);
+    }
+
+    return shadow;
+}
+
+// Debug: a distinct tint per cascade, so the split placement and the selection logic can be SEEN.
+vec3 cascadeDebugColor(vec3 wp) {
+    float viewDepth = -(camera.view * vec4(wp, 1.0)).z;
+    int c = 0;
+    while (c < 4 && viewDepth > lights.cascadeSplits[c]) {
+        ++c;
+    }
+
+    if (c == 0) return vec3(1.0, 0.3, 0.3); // red   — nearest, finest texels
+    if (c == 1) return vec3(0.3, 1.0, 0.3); // green
+    if (c == 2) return vec3(0.3, 0.5, 1.0); // blue
+    if (c == 3) return vec3(1.0, 1.0, 0.3); // yellow — farthest
+    return vec3(0.2);                        // beyond the last cascade: unshadowed
 }
 
 void main() {
@@ -325,7 +396,8 @@ void main() {
           : push.debugView == DEBUG_OCCLUSION        ? vec3(ao)
           : push.debugView == DEBUG_TANGENT          ? mix(vec3(1, 0, 0), vec3(0, 1, 0), step(0.0, worldTangent.w)) * (T * 0.5 + 0.5)
           : push.debugView == DEBUG_KEY_NDOTL        ? vec3(max(dot(N, -normalize(lights.dirDirection.xyz)), 0.0))
-          : /* DEBUG_SHADOW */                         vec3(shadow);
+          : push.debugView == DEBUG_SHADOW           ? vec3(shadow)
+          : /* DEBUG_CASCADE */                        cascadeDebugColor(worldPos) * mix(0.35, 1.0, shadow);
         outColor = vec4(debug, 1.0);
         return;
     }

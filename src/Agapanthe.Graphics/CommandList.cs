@@ -320,10 +320,17 @@ public readonly unsafe struct CommandList
     /// viewport Y-flip: the Vulkan clip-space convention (Y down, Z [0,1]) is handled in the projection
     /// matrix, so the viewport stays top-left origin with depth [0,1].
     /// </summary>
-    public void SetViewportScissor(uint width, uint height)
+    public void SetViewportScissor(uint width, uint height) => SetViewportScissorRect(0, 0, width, height);
+
+    /// <summary>
+    /// Sets a viewport and scissor covering the rectangle at (<paramref name="x"/>, <paramref name="y"/>) — for
+    /// rendering into one tile of an atlas (P3-M5: the four CSM cascades share one 4096² depth map as a 2×2 atlas).
+    /// The scissor matches the viewport, so a draw physically cannot touch another tile.
+    /// </summary>
+    public void SetViewportScissorRect(uint x, uint y, uint width, uint height)
     {
-        var viewport = new Viewport { X = 0, Y = 0, Width = width, Height = height, MinDepth = 0, MaxDepth = 1 };
-        var scissor = new Rect2D(default, new Extent2D(width, height));
+        var viewport = new Viewport { X = x, Y = y, Width = width, Height = height, MinDepth = 0, MaxDepth = 1 };
+        var scissor = new Rect2D(new Offset2D((int)x, (int)y), new Extent2D(width, height));
         _device.Api.CmdSetViewport(_buffer, 0, 1, &viewport);
         _device.Api.CmdSetScissor(_buffer, 0, 1, &scissor);
     }

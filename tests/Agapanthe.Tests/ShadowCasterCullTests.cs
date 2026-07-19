@@ -6,19 +6,22 @@ using Agapanthe.World;
 namespace Agapanthe.Tests;
 
 /// <summary>
-/// The two-pass shadow-caster cull (P3-M2 D3): the bounded wedge (pass 1) breaks the circularity between the light
-/// fit and the caster cull, and its upstream cut plane is what stops a far-away entity from wrecking the shadow
-/// map's depth precision. These are the assertions that decide whether D3 fixed the latent bug or merely moved it.
+/// The per-cascade shadow-caster cull (P3-M5). It replaced the P3-M2 two-pass bounded wedge: because each cascade is
+/// fitted to its own frustum SLICE (camera-only), the fit no longer depends on the casters, so there is no
+/// circularity left to break — casters are simply tested against each finished cascade volume. These assertions
+/// cover what the wedge used to guarantee: a far-away entity cannot wreck the shadow map's depth precision, an
+/// off-screen caster still casts, and each cascade's list stays mesh-major for the instanced depth draw.
 /// </summary>
 [Collection("World")]
 public sealed class ShadowCasterCullTests
 {
-    private const uint Resolution = 4096;
+    private const uint TileResolution = 2048;
     private const float ShadowDistance = 100f;
-    private const float ShadowCasterDistance = 100f;
 
     // Sun straight down, so "upstream" (toward the source) is +Y — an easy axis to place a pathological caster on.
     private static readonly Vector3 Sun = new(0f, -1f, 0f);
+
+    private static readonly CascadeSettings Cascades = new(4, 0.5f, ShadowDistance);
 
     private static RenderView ViewAtOrigin()
     {
@@ -30,124 +33,148 @@ public sealed class ShadowCasterCullTests
     private static ImportedEntitySpec Caster(Double3 position, uint order, int mesh = 0)
         => new(new MeshHandle(mesh, 1), new MaterialHandle(0, 1), position, Matrix4x4.Identity, Vector3.Zero, 1f, order);
 
-    // The bounded wedge the engine builds each frame (D3.a), anchored on the frustum sphere the fit uses.
-    private static ExtrudedShadowFrustum Wedge(in RenderView view, in Frustum cameraFrustum)
+    // Fits the cascades and collects the casters exactly as the engine's frame seam does.
+    private static (Matrix4x4[] Cascades, float[] Splits, RenderList[] Casters) Collect(GameWorld world, in RenderView view)
     {
-        var (anchorCenter, anchorRadius) = ShadowFit.FitFrustumSphere(in view, ShadowDistance);
-        return ExtrudedShadowFrustum.FromCameraFrustum(
-            in cameraFrustum, Sun, anchorCenter, anchorRadius, ShadowCasterDistance);
+        var mats = new Matrix4x4[Cascades.Count];
+        var splits = new float[Cascades.Count];
+        ShadowFit.ComputeCascades(in view, Sun, in Cascades, TileResolution, mats, splits);
+
+        var frusta = new Frustum[Cascades.Count];
+        for (var c = 0; c < mats.Length; c++)
+        {
+            frusta[c] = Frustum.FromViewProjection(mats[c]);
+        }
+
+        var lists = new RenderList[Cascades.Count];
+        for (var c = 0; c < lists.Length; c++)
+        {
+            lists[c] = new RenderList();
+        }
+
+        world.CollectShadowCasters(frusta, lists, in view);
+        return (mats, splits, lists);
     }
 
+    // The extent of the fitted ortho box, recovered from the matrix — the quantity that sets shadow texel density.
+    private static float FittedWidth(Matrix4x4 m)
+        => 2f / new Vector3(m.M11, m.M21, m.M31).Length();
+
     [Fact]
-    public void FarUpstreamCaster_DoesNotBlowOutTheDepthRange_AndIsCulled()
+    public void FarUpstreamCaster_CannotAffectAnyCascadeFit()
     {
-        // THE test (spec §5, D3.a). A caster 10 000 km upstream of the sun sits inside the UNBOUNDED wedge and, left
-        // there, would drive UpstreamExtent — and thus the shadow map's depth range — to ~1e7 m, collapsing its
-        // precision. The bounded wedge must (i) keep the depth range finite despite that entity being in the scene
-        // bounds, and (ii) drop the entity from the caster list. Its lost shadow is the WANTED behaviour.
+        // THE test the bounded wedge used to own (P3-M2 D3.a), now free by construction. An entity 10 000 km
+        // upstream of the sun used to drive UpstreamExtent — and thus the depth range — to ~1e7 m. Since P3-M5 the
+        // fit is camera-only, so that entity CANNOT touch any cascade's extent, and it is culled from every caster
+        // list because it lies far outside every cascade volume. Its lost shadow is the WANTED behaviour.
         using var world = new GameWorld();
         world.SpawnImported(Caster(new Double3(0, 0, -10), 0));        // A: a normal caster, in view
         world.SpawnImported(Caster(new Double3(0, 10_000_000, 0), 1)); // B: 10 000 km straight up = far upstream
 
         var view = ViewAtOrigin();
-        var cameraFrustum = Frustum.FromViewProjection(view.View * view.Projection);
-        var wedge = Wedge(in view, in cameraFrustum);
+        var (mats, _, casters) = Collect(world, in view);
 
-        var render = new RenderList();
-        var shadow = new RenderList();
-        world.CollectRenderLists(render, shadow, in view, in wedge, out var casterBounds);
+        // Same scene WITHOUT the pathological entity: the fits must be identical, proving B had no influence.
+        using var clean = new GameWorld();
+        clean.SpawnImported(Caster(new Double3(0, 0, -10), 0));
+        var (cleanMats, _, _) = Collect(clean, in view);
 
-        var sceneBounds = world.AggregateBounds(); // huge: it includes B at 1e7
+        for (var c = 0; c < mats.Length; c++)
+        {
+            Assert.Equal(FittedWidth(cleanMats[c]), FittedWidth(mats[c]), 3);
+        }
 
-        // (i) The depth range is fitted to the CASTER bounds (D3.b), which the wedge cut kept small — NOT to the
-        // scene bounds, which B blew up to 1e7. The contrast is the whole point: same scene, two orders of magnitude.
-        _ = ShadowFit.ComputeLightViewProj(
-            in view, in sceneBounds, in casterBounds, Sun, ShadowDistance, Resolution, out var eyeDistance);
-        _ = ShadowFit.ComputeLightViewProj(
-            in view, in sceneBounds, in sceneBounds, Sun, ShadowDistance, Resolution, out var eyeDistanceIfUnbounded);
+        // And B is in no cascade's caster list (A may be in several — the near ones).
+        var total = 0;
+        foreach (var list in casters)
+        {
+            total += list.Count;
+            foreach (var item in list.Items.ToArray())
+            {
+                Assert.True(item.WorldTransform.M42 < 1e6f, "the far-upstream caster must not be in any cascade list");
+            }
+        }
 
-        Assert.True(eyeDistanceIfUnbounded > 1e6f,
-            $"the old behaviour (fit on scene bounds) should blow up; got {eyeDistanceIfUnbounded}");
-        // Bound tied to the MECHANISM, not an arbitrary factor: with B excluded from the caster bounds, the depth
-        // range is driven by the footprint (≈ the frustum sphere) plus the upstream a caster within the shadow-caster
-        // distance can add — never by B at 1e7. eyeDistance = max(2·footprint, upstream+footprint); the footprint is
-        // the quantized frustum radius, so 2·anchorRadius bounds that term and ShadowCasterDistance bounds the other.
-        var (_, anchorRadius) = ShadowFit.FitFrustumSphere(in view, ShadowDistance);
-        // 3·anchorRadius covers the 2·(quantized footprint) term with room for the radius rung; + ShadowCasterDistance
-        // covers the upstream a legitimate caster can add. Orders of magnitude below the 1e7 a blown-up range would give.
-        var bound = ShadowCasterDistance + (3f * anchorRadius);
-        Assert.True(eyeDistance <= bound,
-            $"the depth range must stay in the caster-distance + footprint regime; got {eyeDistance}, bound {bound}");
-        Assert.True(eyeDistance < eyeDistanceIfUnbounded * 1e-3f,
-            $"the fix must collapse the depth range by >1000x vs fitting on scene bounds; got {eyeDistance} vs {eyeDistanceIfUnbounded}");
-
-        // (ii) B is absent from the final caster list; A survives both passes.
-        var lightFrustum = Frustum.FromViewProjection(ShadowFit.ComputeLightViewProj(
-            in view, in sceneBounds, in casterBounds, Sun, ShadowDistance, Resolution, out _));
-        world.CompactShadowCasters(shadow, in lightFrustum);
-
-        Assert.All(shadow.Items.ToArray(), item =>
-            Assert.True(item.WorldTransform.M42 < 1e6f, "the far-upstream caster must not be in the final shadow list"));
-        Assert.True(shadow.Count >= 1, "the in-view caster must remain a shadow caster");
+        Assert.True(total >= 1, "the in-view caster must be a caster in at least one cascade");
     }
 
     [Fact]
-    public void InViewCaster_SurvivesBothPasses()
+    public void NearCaster_LandsInTheNearCascade()
     {
-        // The complement of the test above: a normal caster is NOT dropped by the two-pass cull (no false negative).
+        // A caster a few metres ahead belongs to cascade 0 (the tightest slice) — that is what buys the sharp
+        // contact shadow the CSM exists for.
         using var world = new GameWorld();
-        world.SpawnImported(Caster(new Double3(0, 0, -10), 0));
+        world.SpawnImported(Caster(new Double3(0, 0, -3), 0));
 
         var view = ViewAtOrigin();
-        var cameraFrustum = Frustum.FromViewProjection(view.View * view.Projection);
-        var wedge = Wedge(in view, in cameraFrustum);
+        var (_, _, casters) = Collect(world, in view);
 
-        var render = new RenderList();
-        var shadow = new RenderList();
-        world.CollectRenderLists(render, shadow, in view, in wedge, out var casterBounds);
-        Assert.Equal(1, shadow.Count); // in the wedge
-
-        var sceneBounds = world.AggregateBounds();
-        var lightFrustum = Frustum.FromViewProjection(ShadowFit.ComputeLightViewProj(
-            in view, in sceneBounds, in casterBounds, Sun, ShadowDistance, Resolution, out _));
-        world.CompactShadowCasters(shadow, in lightFrustum);
-
-        Assert.Equal(1, shadow.Count); // still there after the light-volume compaction
+        Assert.Equal(1, casters[0].Count);
     }
 
     [Fact]
-    public void FinalCasterList_IsSortedMeshMajor_SoInstancedRunsAreContiguous()
+    public void CasterStraddlingTwoCascades_IsDrawnInBoth()
     {
-        // D3.c: the compaction (pass 2) happens BEFORE the sort, so the mesh-major run order the instanced depth
-        // draw relies on (P3-M1) survives. Interleave two meshes at spawn; the final list must come out grouped.
+        // Cascades overlap in space (each covers a sphere around its slice), so an entity near a split boundary
+        // belongs to both lists — it must be drawn into both tiles or its shadow would vanish on one side of the
+        // blend band.
+        using var world = new GameWorld();
+        var view = ViewAtOrigin();
+        var mats = new Matrix4x4[Cascades.Count];
+        var splits = new float[Cascades.Count];
+        ShadowFit.ComputeCascades(in view, Sun, in Cascades, TileResolution, mats, splits);
+
+        // Right at the first split: inside cascade 0's sphere and cascade 1's.
+        world.SpawnImported(Caster(new Double3(0, 0, -splits[0]), 0));
+        var (_, _, casters) = Collect(world, in view);
+
+        Assert.Equal(1, casters[0].Count);
+        Assert.Equal(1, casters[1].Count);
+    }
+
+    [Fact]
+    public void EachCascadeListIsMeshMajor()
+    {
+        // The depth pass binds no material, so each cascade's list must be MESH-major: one contiguous run per mesh
+        // = one instanced draw. Meshes are interleaved at spawn so a mesh-major sort has real work to do.
         using var world = new GameWorld();
         for (var i = 0u; i < 8; i++)
         {
-            // A tight cluster safely inside the frustum, meshes interleaved 0,1,0,1… at spawn so a mesh-major sort
-            // has real work to do.
             world.SpawnImported(Caster(new Double3((i * 0.4) - 1.4, 0, -6), order: i, mesh: (int)(i % 2)));
         }
 
         var view = ViewAtOrigin();
-        var cameraFrustum = Frustum.FromViewProjection(view.View * view.Projection);
-        var wedge = Wedge(in view, in cameraFrustum);
+        var (_, _, casters) = Collect(world, in view);
 
-        var render = new RenderList();
-        var shadow = new RenderList();
-        world.CollectRenderLists(render, shadow, in view, in wedge, out var casterBounds);
-
-        var sceneBounds = world.AggregateBounds();
-        var lightFrustum = Frustum.FromViewProjection(ShadowFit.ComputeLightViewProj(
-            in view, in sceneBounds, in casterBounds, Sun, ShadowDistance, Resolution, out _));
-        world.CompactShadowCasters(shadow, in lightFrustum);
-
-        // Mesh index is non-decreasing across the sorted list: all of mesh 0, then all of mesh 1 (one run each).
-        var items = shadow.Items;
+        var items = casters[0].Items;
         Assert.Equal(8, items.Length);
         for (var i = 1; i < items.Length; i++)
         {
-            Assert.True(items[i].Mesh.Index >= items[i - 1].Mesh.Index,
-                "the shadow list must be mesh-major (contiguous instanced runs) after pass 2's sort");
+            Assert.True(
+                items[i].Mesh.Index >= items[i - 1].Mesh.Index,
+                "each cascade's caster list must be mesh-major (contiguous instanced runs)");
+        }
+    }
+
+    [Fact]
+    public void NoShadowCastEntities_AreExcludedFromEveryCascade()
+    {
+        // The ground plane (P3-M5): it receives but never casts, so it appears in NO cascade list — which is what
+        // stops a large flat receiver from self-shadowing into acne.
+        using var world = new GameWorld();
+        world.SpawnImported(Caster(new Double3(0, 0, -5), 0));
+        world.SpawnImported(Caster(new Double3(0, -1, -5), 1), castsShadow: false);
+
+        var view = ViewAtOrigin();
+        var (_, _, casters) = Collect(world, in view);
+
+        foreach (var list in casters)
+        {
+            foreach (var item in list.Items.ToArray())
+            {
+                // Only the y=0 caster may appear; the y=-1 "ground" never does.
+                Assert.True(item.WorldTransform.M42 > -0.5f, "a NoShadowCast entity must not be in any cascade list");
+            }
         }
     }
 }

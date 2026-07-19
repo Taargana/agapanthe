@@ -55,7 +55,6 @@ FrameRenderer? frameRenderer = null;
 
 // Render lists, owned by the app and reused every frame (Clear keeps capacity → zero alloc per frame).
 var renderList = new RenderList();
-var shadowCasters = new RenderList();
 var sceneBounds = Double3Bounds.Empty;
 
 var camera = new Camera();
@@ -244,7 +243,9 @@ window.Loaded += () =>
             device, BuildGroundModel(groundSize), renderer.MaterialSetLayout, groundOrigin);
         foreach (var spec in groundSpecs)
         {
-            world.SpawnImported(in spec);
+            // The ground RECEIVES shadows but must not CAST them (P3-M5): a large flat receiver self-shadows into
+            // acne, and its huge bounds needlessly inflate every cascade's fit.
+            world.SpawnImported(in spec, castsShadow: false);
         }
 
         // The ground IS part of the scene from here on: the light placement and the shadow fit must see it.
@@ -311,7 +312,7 @@ window.Loaded += () =>
     // P3-M4 W1: AGAPANTHE_CULL_VERIFY=1 turns on the GPU-vs-CPU visible-count check, logged after the capture.
     renderer!.VerifyCull = Environment.GetEnvironmentVariable("AGAPANTHE_CULL_VERIFY") is "1";
 
-    orchestrator = FrameOrchestrator.CreateDefault(world!, renderer!, registry!, camera, renderList, shadowCasters);
+    orchestrator = FrameOrchestrator.CreateDefault(world!, renderer!, registry!, camera, renderList);
     if (benchMode)
     {
         // The spin (animate every drawable + drift the yaw, deterministic by frame count) was the first thing the
@@ -411,7 +412,7 @@ window.KeyPressed += key =>
             break;
         // N: cycle the shading debug views (PBR -> normals -> basecolor -> ... , see mesh.frag).
         case Key.N when renderer is not null:
-            renderer.DebugView = (renderer.DebugView + 1) % 10;
+            renderer.DebugView = (renderer.DebugView + 1) % 11;
             Log.Info($"Debug view: {renderer.DebugView} ({DebugViews.Names[renderer.DebugView]})");
             break;
         // L: swing the key light around the vertical axis (lighting debug).
@@ -543,9 +544,9 @@ window.Rendered += dt =>
             var avgMs = System.Diagnostics.Stopwatch.GetElapsedTime(0, benchTicks).TotalMilliseconds / BenchLogEvery;
             // renderList.Count is the scene CANDIDATE count now (P3-M4): every drawable, uploaded for the GPU cull.
             // The frustum cull runs on the GPU, so the CPU no longer holds a "visible" count (AGAPANTHE_CULL_VERIFY
-            // reads the GPU's back). shadowCasters is still the CPU wedge-culled caster count.
+            // reads the GPU's back). The shadow casters now live per-cascade inside the orchestrator (P3-M5).
             Log.Info(
-                $"Sandbox: [cull-stats] frame {benchFrame} — candidates {renderList.Count} + shadow {shadowCasters.Count}, " +
+                $"Sandbox: [cull-stats] frame {benchFrame} — candidates {renderList.Count}, " +
                 $"draws {renderer!.LastSceneDrawCalls}+{renderer.LastShadowDrawCalls} (instanced), " +
                 $"tick+draw avg {avgMs:F3} ms/frame, per-frame alloc {alloc} B.");
             benchTicks = 0;
@@ -1315,13 +1316,16 @@ static void FrameCamera(Camera camera, FreeCameraController controller, Renderer
     // a 1-unit helmet). Shift sprints at 3x.
     controller.MoveSpeed = MathF.Max(diagonal * 0.5f, 0.01f);
 
-    // Shadow range scaled to the model (a fixed 100 m would be absurd on a 2 m helmet), then CLAMPED to a modest
-    // absolute ceiling. A single shadow cascade cannot be both sharp and long-range: on a large scene (the grid +
-    // its wide ground plane) diagonal*4 reaches ~500 m, spreading the 4096² map to ~0.12 m/texel and producing
-    // grazing ring aliasing on the flat ground. Capping at 50 m keeps the map tight; distant casters simply stop
-    // projecting into the view, which ShadowCasterDistance (D3) handles without popping. The real fix for
-    // sharp-and-long is CSM (backlog §2). On a 2 m helmet diagonal*4 ≈ 14 m < 50 m, so single-model is unchanged.
-    renderer.ShadowDistance = MathF.Min(MathF.Max(diagonal * 4f, 1f), 50f);
+    // Shadow range scaled to the model (a fixed 100 m would be absurd on a 2 m helmet), floored at the cascade
+    // range so distant geometry still gets shadows.
+    // <para>
+    // This used to be CLAMPED to 50 m (session 16), because a SINGLE cascade cannot be both sharp and long-range:
+    // stretched over a large scene it gave ~0.12 m/texel and grazing ring acne, so the range was sacrificed. P3-M5
+    // makes that trade obsolete — four texel-snapped cascades stay sharp near AND far — so the cap is lifted and
+    // the range now follows the cascades (Renderer.Cascades.MaxDistance), which is what puts shadows back under
+    // distant helmets. Keeping the old 50 m would silently brake the CSM at a quarter of its range.
+    // </para>
+    renderer.ShadowDistance = MathF.Max(MathF.Max(diagonal * 4f, 1f), renderer.Cascades.MaxDistance);
 }
 
 file static class DebugViews
@@ -1329,7 +1333,7 @@ file static class DebugViews
     public static readonly string[] Names =
     [
         "PBR", "shaded normal", "geometric normal", "base color", "metallic",
-        "roughness", "occlusion", "tangent (+handedness)", "key NdotL", "shadow factor",
+        "roughness", "occlusion", "tangent (+handedness)", "key NdotL", "shadow factor", "CSM cascade",
     ];
 }
 
