@@ -212,6 +212,47 @@ quantifiée (P2-M3/M4). Tenir en orbite à 400 km sans que les pixels tremblent,
 - **Sérialisation** source-gen (partage le générateur du rooting AOT ; parallélisable).
 - **Audio** : en dernier, opportuniste.
 
+## 4bis. Scène de test « planète / système solaire à l'échelle 1/2 » *(demande humaine, session 18)*
+
+**L'idée** : une **seconde scène de référence** à côté de la grille de casques — une planète dans un système
+solaire à l'échelle 1/2. Ce n'est pas un caprice de démo : c'est **le banc qui met enfin à l'épreuve ce pour quoi
+les fondations `double` + camera-relative + origine quantifiée ont été construites**, et que rien n'a testé.
+
+**Ce que l'échelle donne (chiffré)** — Terre 6 371 km → **3 186 km** de rayon ; Terre-Soleil 149,6 M km →
+**74,8 M km** = `7,5e10 m`.
+- ✅ **La précision `double` tient largement** : ULP à `7,5e10` ≈ **17 µm**. (Rappel des mesures P2-M3 : `1e7` m
+  parfait, `1e15` visiblement cassé à 0,125 m d'ULP.) Le snap d'origine à 1024 m est sans effet à cette échelle.
+  **La fondation est bonne — c'est le reste qui va craquer.**
+- 🔴 **Le depth buffer, lui, ne tient pas.** Rendre une surface à 1 m *et* une planète à `1e11` m dans un seul
+  frustum est impossible : near/far ≈ `1e11`. Il faudra du **reversed-Z** (gratuit, on est déjà en Z[0,1]), du
+  **depth logarithmique**, ou des **passes multi-frustum** (proche / orbital / stellaire). **C'est le premier vrai
+  blocage, et il est structurel** — à trancher avant d'écrire la scène.
+- 🔴 **Le CSM devient le mauvais outil** — exactement ce que la table de décision §2 énonce déjà : à l'échelle
+  planétaire, la nuit c'est `dot(N, L) < 0`, et les éclipses sont une intersection rayon/sphère. → **§2.2 ombres
+  analytiques**, pas de shadow map.
+- 🟠 **La planète a besoin d'une surface** : une sphère de 3 186 km avec du détail au sol = **LOD sphérique**
+  (quadtree chunké, morphing). Sous-système à part entière → dépend du **terrain (§5)**.
+- 🟠 **Les orbites doivent être analytiques (Kepler), pas intégrées.** La physique P3-M3 est un Euler semi-implicite
+  à dt fixe : intégrer une orbite d'un an dériverait catastrophiquement (et coûterait des millions de pas). Les
+  corps célestes se propagent par **éléments orbitaux évalués au temps t** — l'intégrateur ne touche qu'aux objets
+  *locaux*. Deux régimes distincts à assumer explicitement.
+- 🟠 **Atmosphère + terminateur** (§3) : c'est ce qui fait qu'une planète *ressemble* à une planète. Sans ça, une
+  sphère texturée reste une balle.
+
+**⚠️ Décision de design à trancher AVANT de coder** : « échelle 1/2 » appliqué **uniformément** ne change rien
+qualitativement (on reste à `1e10`–`1e11` m) — et à vraie échelle, **la planète est un point pendant l'essentiel du
+trajet**, ce qui ne fait pas une scène de test agréable. La plupart des jeux spatiaux **compressent les distances
+bien plus que les tailles** (rapport distinct pour les rayons et pour les orbites). À clarifier avec l'humain :
+*un seul facteur 1/2, ou tailles et distances à des facteurs différents ?*
+
+**Découpage réaliste** (ce n'est pas un jalon, c'est une petite phase) :
+1. **Sphère planétaire nue à l'échelle** + fix du **depth range** (reversed-Z / multi-frustum) + jour/nuit
+   analytique. *Prouve la précision et le depth à `1e11` m — l'essentiel du risque, sans terrain.* ⇦ **commencer ici**
+2. Orbites képlériennes + échelle temporelle (le système bouge).
+3. LOD sphérique (dépend du terrain §5) + atmosphère (§3).
+
+*Mord : c'est la scène qui valide — ou infirme — la thèse « fondations pour un univers persistant » de la Phase 2.*
+
 ## 5. Confort / qualité d'image (opportuniste)
 
 - **Anti-aliasing** (aucun aujourd'hui : les bords de géométrie crénellent). TAA si la reprojection temporelle arrive

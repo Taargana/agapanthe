@@ -274,9 +274,43 @@ Spec : [2026-07-14-p3m2-scheduler-lifecycle-design.md](plans/2026-07-14-p3m2-sch
    les 10k candidats par frame). *Mord : déjà au banc, et à 40k il domine.*
 3. 🟠 **Terrain** ([backlog §5](BACKLOG.md)) — le sol est un quad plat. Prérequis de **beaucoup** : ray marching
    pour les ombres lointaines (§2.3, la piste retenue avec l'humain), relief au soleil rasant, scènes crédibles.
-4. 🟡 **PCSS** ([backlog §2.1bis](BACKLOG.md)) — pénombre à largeur variable, partage la sélection de cascade
+4. 🟠 **Scène de test « planète / système solaire à l'échelle 1/2 »** ([backlog §4bis](BACKLOG.md), demande humaine
+   S18) — la **seconde scène de référence**, à côté de la grille de casques. C'est le banc qui met enfin à l'épreuve
+   ce pour quoi les fondations `double` + camera-relative ont été construites. **Premier pas isolable et payant** :
+   sphère planétaire nue à l'échelle + **fix du depth range** (reversed-Z / multi-frustum — `near/far ≈ 1e11` ne
+   passe pas en une passe) + jour/nuit analytique. Le LOD sphérique et l'atmosphère viennent après (dépendent du
+   terrain). *Attention : la précision `double` tient (ULP ≈ 17 µm à `7,5e10` m) — c'est le **depth buffer** qui
+   casse en premier.*
+5. 🟡 **PCSS** ([backlog §2.1bis](BACKLOG.md)) — pénombre à largeur variable, partage la sélection de cascade
    avec le CSM tout juste livré. Qualité pure, pas de dette remboursée.
-5. 🟡 **Sérialisation source-gen** (partage le générateur du rooting AOT ; parallélisable). **Audio** en dernier.
+6. 🟡 **Sérialisation source-gen** (partage le générateur du rooting AOT ; parallélisable). **Audio** en dernier.
+
+## Reprise — recommandations immédiates (écrit 2026-07-20, fin session 18)
+
+**Où on en est** : arbre propre, tout commité (`9aa8b3f`), 334 tests verts, 0 warning / 0 validation / 0 leak.
+Rien n'est en cours, aucun jalon ouvert. Le board S18 est archivé.
+
+**Les trois candidats, avec ce qu'ils coûtent vraiment :**
+
+- **A. GPU-driven shadow cull + slots persistants** ([backlog §1](BACKLOG.md) + [§2.0bis](BACKLOG.md)) —
+  **le meilleur rapport valeur/effort**, et le seul qui rembourse **deux dettes d'un coup** : le cull par cascade
+  quasi inopératoire de P3-M5 (~4× les casters rasterisés) et la régression sort/upload O(n) de P3-M4. Les deux
+  mordent **déjà** au banc (part des 11,4 ms) et dominent à 40k. *Terrain connu, risque faible, gain mesurable.*
+- **B. Premier pas planétaire** ([backlog §4bis](BACKLOG.md)) — le plus **excitant** et le plus **révélateur** :
+  il valide (ou infirme) la thèse « fondations pour un univers persistant ». Mais il ouvre un problème
+  **structurel non résolu** (le depth range) → prévoir une vraie phase d'instruction avant de coder.
+  ⚠️ **Question à trancher avec l'humain avant tout code** : « échelle 1/2 » = un facteur unique, ou tailles et
+  distances à des facteurs différents ? (À vraie échelle la planète est un point pendant l'essentiel du trajet.)
+- **C. Terrain** ([backlog §5](BACKLOG.md)) — prérequis de B (LOD sphérique) *et* du ray marching pour les ombres
+  lointaines (§2.3). Le plus gros morceau des trois.
+
+**Ma recommandation si on reprend à froid** : **A d'abord** (court, referme deux dettes fraîches, laisse le moteur
+plus propre qu'on ne l'a trouvé), **puis B** en commençant par le pas 1 isolé. Faire B avant A revient à empiler
+une nouvelle échelle de problèmes sur un chemin de rendu dont on sait déjà qu'il gaspille 4× le travail d'ombre.
+
+**Avant d'ouvrir quoi que ce soit** : relire [backlog §2.0bis](BACKLOG.md) (dette fraîche P3-M5, dont ~200 lignes
+mortes à supprimer ou documenter) et la note « **ne pas ajouter de bias par cascade** » — c'est un piège dans lequel
+il serait naturel de tomber en retouchant les ombres.
 
 **Dette transverse à ne pas perdre de vue** : rotation/friction physique ([§4](BACKLOG.md)) · transparence
 **doublement verrouillée** (`SortKey` sans profondeur **+** compaction atomique qui scramble l'ordre) ·
