@@ -41,10 +41,10 @@ internal static class ShadowFit
     /// </summary>
     public static void ComputeCascades(
         in RenderView view, Vector3 lightDirection, in CascadeSettings settings, uint tileResolution,
-        Span<Matrix4x4> lightViewProj, Span<float> splitViewDepths)
+        Span<Matrix4x4> lightViewProj, Span<float> splitViewDepths, Span<Vector4> nearCutPlanes)
     {
         var n = settings.Count;
-        if (lightViewProj.Length < n || splitViewDepths.Length < n)
+        if (lightViewProj.Length < n || splitViewDepths.Length < n || nearCutPlanes.Length < n)
         {
             throw new ArgumentException($"cascade spans must hold at least {n} entries.");
         }
@@ -57,6 +57,17 @@ internal static class ShadowFit
         var far = MathF.Max(MathF.Min(view.Far, settings.MaxDistance), near * 1.001f);
 
         const float kappa = 4f; // upstream setback in radii — leaves (κ−1)r of room for casters behind the slice
+
+        // Camera forward + eye in camera-relative space, for the per-cascade near-side depth cut (P3-M7 W3). The
+        // view matrix is rotation+eye-translation; its inverse maps view axes to camera-relative world.
+        if (!Matrix4x4.Invert(view.View, out var inverseView))
+        {
+            inverseView = Matrix4x4.Identity;
+        }
+
+        var forward = Vector3.Normalize(Vector3.TransformNormal(-Vector3.UnitZ, inverseView));
+        var eye = view.EyeRelative;
+        var eyeDepth = Vector3.Dot(forward, eye);
 
         var sliceNear = near;
         for (var i = 0; i < n; i++)
@@ -75,12 +86,30 @@ internal static class ShadowFit
 
             var up = MathF.Abs(dir.Y) > 0.99f ? Vector3.UnitZ : Vector3.UnitY;
             var eyeDistance = kappa * radius;
-            var eye = center - (dir * eyeDistance);
-            var lightView = MathHelpers.LookAt(eye, center, up);
+            var lightEye = center - (dir * eyeDistance);
+            var lightView = MathHelpers.LookAt(lightEye, center, up);
             var lightProj = MathHelpers.OrthographicVulkan(
                 2f * radius, 2f * radius, MathF.Max(radius * 0.01f, 1e-4f), eyeDistance + radius);
             lightViewProj[i] = lightView * lightProj;
             splitViewDepths[i] = sliceFar; // the far view-space depth this cascade covers (positive, along -Z)
+
+            // NEAR-side view-depth cut plane (P3-M7 W3): the far cascades' ortho boxes swallow the near field, so a
+            // caster enters ~4 cascades (backlog §2.0bis, 4× raster). This plane rejects, from cascade i, casters
+            // whose view depth is well BEFORE the slice starts — they belong to a nearer cascade. Cascade 0 is
+            // EXEMPT (an all-keeping plane): cutting its near side would drop behind-camera casters whose shadow
+            // still reaches the view (the P3-M6 anti-popping guarantee). The upstream (light-direction) margin κ is
+            // untouched — this cuts only the view-depth overlap, not a caster's height above its slice.
+            // Kept iff viewDepth(centre) >= sliceNear - margin - r, with viewDepth(p) = dot(forward, p) - eyeDepth.
+            if (i == 0)
+            {
+                nearCutPlanes[i] = new Vector4(0f, 0f, 0f, 1f); // dot(0,c)+1 = 1 ≥ -r always → never cuts
+            }
+            else
+            {
+                var margin = (sliceFar - sliceNear) * 0.25f; // a quarter-slice cushion for straddlers + the fade band
+                var nearLimit = sliceNear - margin;
+                nearCutPlanes[i] = new Vector4(forward, -(eyeDepth + nearLimit));
+            }
 
             sliceNear = sliceFar;
         }

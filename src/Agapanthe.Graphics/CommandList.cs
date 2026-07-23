@@ -176,8 +176,56 @@ public readonly unsafe struct CommandList
         BufferSync.ComputeRead => (PipelineStageFlags2.ComputeShaderBit, AccessFlags2.ShaderReadBit),
         BufferSync.IndirectRead => (PipelineStageFlags2.DrawIndirectBit, AccessFlags2.IndirectCommandReadBit),
         BufferSync.VertexStorageRead => (PipelineStageFlags2.VertexShaderBit, AccessFlags2.ShaderReadBit),
+        BufferSync.TransferWrite => (PipelineStageFlags2.CopyBit, AccessFlags2.TransferWriteBit),
+        BufferSync.TransferRead => (PipelineStageFlags2.CopyBit, AccessFlags2.TransferReadBit),
         _ => throw new ArgumentOutOfRangeException(nameof(sync), sync, null),
     };
+
+    /// <summary>
+    /// Records an <b>asynchronous</b> buffer→buffer copy on the frame command buffer (P3-M7): the copy executes
+    /// on the GPU timeline like any other command, unlike <see cref="GpuUploader"/> which submits and waits a
+    /// fence (load-time only). Used to feed a device-local buffer from a host-visible staging buffer each frame —
+    /// one region for a full rewrite, or one per dirty range. Pair with <see cref="BufferBarrier"/>
+    /// (<see cref="BufferSync.TransferWrite"/> → the consuming stage) before the destination is read.
+    /// </summary>
+    public void CopyBuffer(GpuBuffer source, GpuBuffer destination, ReadOnlySpan<BufferCopyRegion> regions)
+    {
+        ArgumentNullException.ThrowIfNull(source);
+        ArgumentNullException.ThrowIfNull(destination);
+        if (regions.IsEmpty)
+        {
+            return;
+        }
+
+        // Core 1.0 vkCmdCopyBuffer (VkBufferCopy, no sType), NOT CmdCopyBuffer2: the latter is KHR_copy_commands2 /
+        // core 1.3, which the baseline (Vulkan 1.2 + dynamic_rendering + synchronization2, the MoltenVK path) does
+        // not guarantee — its entry point could be null and crash. The core function is universally available and
+        // does the same thing (mono-backend portability, CLAUDE.md).
+        //
+        // Translate in fixed-size stack batches: a moderate dirty set (many small regions) must not heap-allocate on
+        // the per-frame path, and an unbounded stackalloc could overflow. A large region count should anyway have
+        // been collapsed to one full-range copy by the caller (spec §3.4 fallback); batching keeps this 0-alloc.
+        const int batch = 32;
+        Span<BufferCopy> copies = stackalloc BufferCopy[batch];
+        for (var start = 0; start < regions.Length; start += batch)
+        {
+            var n = Math.Min(batch, regions.Length - start);
+            for (var i = 0; i < n; i++)
+            {
+                copies[i] = new BufferCopy
+                {
+                    SrcOffset = regions[start + i].SourceOffset,
+                    DstOffset = regions[start + i].DestinationOffset,
+                    Size = regions[start + i].Size,
+                };
+            }
+
+            fixed (BufferCopy* pCopies = copies)
+            {
+                _device.Api.CmdCopyBuffer(_buffer, source.Handle, destination.Handle, (uint)n, pCopies);
+            }
+        }
+    }
 
     /// <summary>
     /// Opens a dynamic-rendering scope for <paramref name="attachments"/> (color + optional depth). Routes

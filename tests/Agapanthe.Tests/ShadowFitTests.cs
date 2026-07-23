@@ -40,8 +40,9 @@ public sealed class ShadowFitTests
         var view = View(Double3.Zero, far: 10_000f);
         Span<Matrix4x4> mats = stackalloc Matrix4x4[settings.Count];
         Span<float> splits = stackalloc float[settings.Count];
+        Span<Vector4> cuts = stackalloc Vector4[settings.Count];
 
-        ShadowFit.ComputeCascades(in view, Sun, in settings, Resolution, mats, splits);
+        ShadowFit.ComputeCascades(in view, Sun, in settings, Resolution, mats, splits, cuts);
 
         // Strictly increasing near→far, the last cascade reaching MaxDistance.
         for (var i = 1; i < settings.Count; i++)
@@ -66,8 +67,9 @@ public sealed class ShadowFitTests
         var view = View(Double3.Zero, far: 10_000f);
         Span<Matrix4x4> mats = stackalloc Matrix4x4[settings.Count];
         Span<float> splits = stackalloc float[settings.Count];
+        Span<Vector4> cuts = stackalloc Vector4[settings.Count];
 
-        ShadowFit.ComputeCascades(in view, Sun, in settings, Resolution, mats, splits);
+        ShadowFit.ComputeCascades(in view, Sun, in settings, Resolution, mats, splits, cuts);
 
         Assert.True(
             FittedWidth(mats[0]) < FittedWidth(mats[^1]),
@@ -83,7 +85,8 @@ public sealed class ShadowFitTests
         var view = View(Double3.Zero, far: 10_000f);
         Span<Matrix4x4> mats = stackalloc Matrix4x4[settings.Count];
         Span<float> splits = stackalloc float[settings.Count];
-        ShadowFit.ComputeCascades(in view, Sun, in settings, Resolution, mats, splits);
+        Span<Vector4> cuts = stackalloc Vector4[settings.Count];
+        ShadowFit.ComputeCascades(in view, Sun, in settings, Resolution, mats, splits, cuts);
 
         var sliceNear = view.Near;
         for (var i = 0; i < settings.Count; i++)
@@ -114,7 +117,8 @@ public sealed class ShadowFitTests
         var view = View(Double3.Zero, far: 10_000f);
         Span<Matrix4x4> mats = stackalloc Matrix4x4[settings.Count];
         Span<float> splits = stackalloc float[settings.Count];
-        ShadowFit.ComputeCascades(in view, sun, in settings, Resolution, mats, splits);
+        Span<Vector4> cuts = stackalloc Vector4[settings.Count];
+        ShadowFit.ComputeCascades(in view, sun, in settings, Resolution, mats, splits, cuts);
 
         var (center, radius) = ShadowFit.FitSliceSphere(in view, view.Near, splits[0]);
         // A caster two radii above the near cascade's centre — upstream of the slice along the downward light.
@@ -133,12 +137,13 @@ public sealed class ShadowFitTests
         var projections = new List<Vector2>();
         Span<Matrix4x4> mats = stackalloc Matrix4x4[settings.Count];
         Span<float> splits = stackalloc float[settings.Count];
+        Span<Vector4> cuts = stackalloc Vector4[settings.Count];
 
         for (var frame = 0; frame < 8; frame++)
         {
             var eye = new Double3(0, 0, -0.0005 * frame);
             var view = View(eye, far: 10_000f);
-            ShadowFit.ComputeCascades(in view, Sun, in settings, Resolution, mats, splits);
+            ShadowFit.ComputeCascades(in view, Sun, in settings, Resolution, mats, splits, cuts);
             var relative = worldPoint.ToVector3(eye);
             var clip = Vector4.Transform(new Vector4(relative, 1f), mats[0]);
             projections.Add(new Vector2(clip.X / clip.W, clip.Y / clip.W));
@@ -154,6 +159,48 @@ public sealed class ShadowFitTests
             Assert.True(
                 Vector2.Distance(p, projections[0]) < 2f * texelNdc,
                 $"the static point drifted {Vector2.Distance(p, projections[0]) / texelNdc:F2} texels in cascade 0");
+        }
+    }
+
+    [Fact]
+    public void Cascades_NearCutPlane_RejectsNearCastersFromFarCascadesButNeverFromCascade0()
+    {
+        // The P3-M7 W3 near-side view-depth cut: it rejects, from a FAR cascade, casters well before that cascade's
+        // slice starts (they belong to a nearer cascade) — this is what stops the far cascades from swallowing the
+        // near field (raster 4× → ~1×). Cascade 0 must NEVER cut (an all-keeping tautology): cutting its near side
+        // would drop behind-camera casters whose shadow still reaches the view (the P3-M6 anti-popping guarantee).
+        var settings = CascadeSettings.Default;
+        var view = View(Double3.Zero, far: 10_000f);
+        Span<Matrix4x4> mats = stackalloc Matrix4x4[settings.Count];
+        Span<float> splits = stackalloc float[settings.Count];
+        Span<Vector4> cuts = stackalloc Vector4[settings.Count];
+        ShadowFit.ComputeCascades(in view, Sun, in settings, Resolution, mats, splits, cuts);
+
+        // A sphere is INSIDE a plane (n, w) iff dot(n, centre) + w >= -radius (the engine's inward-plane convention,
+        // matching Frustum.Intersects and the cull shaders).
+        static bool Inside(Vector4 plane, Vector3 centre, float radius)
+            => (Vector3.Dot(new Vector3(plane.X, plane.Y, plane.Z), centre) + plane.W) >= -radius;
+
+        // Cascade 0's plane is the tautology (0,0,0,1): every sphere is inside it, including one at/behind the eye.
+        Assert.Equal(new Vector4(0f, 0f, 0f, 1f), cuts[0]);
+        Assert.True(Inside(cuts[0], Vector3.Zero, 0.5f));
+        Assert.True(Inside(cuts[0], new Vector3(0, 0, 100), 0.5f)); // "behind the camera" in view depth — still kept
+
+        // Camera forward in camera-relative space (same derivation ComputeCascades uses).
+        Matrix4x4.Invert(view.View, out var inv);
+        var forward = Vector3.Normalize(Vector3.TransformNormal(-Vector3.UnitZ, inv));
+
+        for (var i = 1; i < settings.Count; i++)
+        {
+            var sliceNear = i == 0 ? view.Near : splits[i - 1];
+            var sliceMid = (sliceNear + splits[i]) * 0.5f;
+
+            // A caster at the eye (view depth 0) is far before any far cascade's slice → REJECTED by that cascade.
+            Assert.False(Inside(cuts[i], Vector3.Zero, 0.5f), $"cascade {i} should cut a caster at the camera");
+
+            // A caster deep inside the slice (at its mid view depth) is KEPT.
+            var inSlice = forward * sliceMid;
+            Assert.True(Inside(cuts[i], inSlice, 0.5f), $"cascade {i} must keep a caster inside its own slice");
         }
     }
 }

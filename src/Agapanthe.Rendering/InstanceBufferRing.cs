@@ -1,16 +1,15 @@
 using System.Numerics;
 using System.Runtime.CompilerServices;
-using Agapanthe.Core;
 using Agapanthe.Graphics;
+using Agapanthe.Graphics.Memory;
 
 namespace Agapanthe.Rendering;
 
 /// <summary>
-/// One per-instance transform SSBO per frame in flight, plus the compaction that fills it (P3-M1). This is the one
-/// place a GPU-free <see cref="RenderList"/> meets the GPU: the World bakes each visible entity's camera-relative
-/// matrix into <see cref="RenderItem.WorldTransform"/>, and the pass copies that run of matrices, in sorted order,
-/// into the slot's host-visible buffer. The vertex stage then reads <c>transforms[gl_InstanceIndex]</c>, with
-/// <c>firstInstance</c> offsetting into the compacted region — so a batch needs no rebind.
+/// One per-instance transform SSBO per frame in flight (P3-M1; device-local since P3-M7). The compute cull writes
+/// the surviving instances into it and the vertex stage reads <c>transforms[gl_InstanceIndex + batchOffset]</c> —
+/// both on the GPU, no host access — so the buffer is <b>device-local</b> (GPU-local memory, no PCIe round-trip on
+/// a discrete GPU). It is never mapped or written by the CPU; <see cref="EnsureCapacity"/> only sizes it.
 /// <para>
 /// <b>Sizing.</b> Grows by doubling; shrinks by halving only after the list has stayed below a quarter of capacity
 /// for <see cref="ShrinkGraceFrames"/> consecutive frames, so a transient spike (a teleport into a dense region)
@@ -36,25 +35,8 @@ internal sealed class InstanceBufferRing : IDisposable
     public InstanceBufferRing(GraphicsDevice device) => _device = device;
 
     /// <summary>
-    /// Copies the items' world transforms into this slot's buffer (resizing it if needed) and returns the buffer to
-    /// bind. The copy is a straight write into mapped, host-coherent memory: no scratch, no allocation.
-    /// </summary>
-    public GpuBuffer Compact(int slot, ReadOnlySpan<RenderItem> items)
-    {
-        var buffer = Ensure(slot, items.Length);
-        var dst = buffer.MappedSpan<Matrix4x4>(items.Length);
-        for (var i = 0; i < items.Length; i++)
-        {
-            dst[i] = items[i].WorldTransform;
-        }
-
-        return buffer;
-    }
-
-    /// <summary>
     /// Sizes this slot's buffer to at least <paramref name="count"/> matrices and returns it WITHOUT writing —
-    /// for P3-M4 W1, where the compute cull (not the CPU) fills the buffer with the surviving instances. Same
-    /// grow/shrink discipline as <see cref="Compact"/>.
+    /// the compute cull (not the CPU) fills it with the surviving instances (P3-M4 W1). Device-local (P3-M7).
     /// </summary>
     public GpuBuffer EnsureCapacity(int slot, int count) => Ensure(slot, count);
 
@@ -107,7 +89,9 @@ internal sealed class InstanceBufferRing : IDisposable
         }
 
         existing?.Dispose(); // deferred N+2 by the deletion queue
-        var buffer = new GpuBuffer(_device, (ulong)newCapacity * stride, BufferUsage.Storage);
+        // Device-local (P3-M7): the compute cull writes it and the vertex stage reads it — no host access, so no
+        // staging and no host-visible PCIe surface. On MoltenVK (unified memory) this is identical to host-visible.
+        var buffer = new GpuBuffer(_device, (ulong)newCapacity * stride, BufferUsage.Storage, MemoryDomain.DeviceLocal);
         _buffers[slot] = buffer;
         return buffer;
     }

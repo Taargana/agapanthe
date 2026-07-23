@@ -46,14 +46,14 @@ Détail et justification : `AVANCEMENT.md` § P3-M1 et board de session 14.
   reste vivant (véhicule du gather au rebuild). *Reste : à 100 000 entités le rebuild structurel O(n log n) redevient le mur
   — mais il n'est payé qu'aux changements structurels, pas par frame.*
 
-- 🟠 **Buffers GPU-produits en device-local.** L'instance buffer compacté et l'args buffer sont **host-visible** (le
-  compute y écrit / y fait des atomics). Sur GPU discret sans ReBAR (le banc Windows) = trafic PCIe par dispatch, sûrement
-  une part des ms @10k. Sur MoltenVK (mémoire unifiée, cible portability) = neutre. Les passer en **device-local** une
-  fois la gate `ReadBackSceneVisible` (qui exige host-visible pour `MappedSpan`) **isolée en Debug**. **Amplifié par
-  P3-M6** : le cull d'ombre GPU fait aussi des atomics + écritures dispersées dans un buffer d'instances host-visible
-  (`4×totalCasters`), et le buffer de candidats persistant reste host-visible (déféré exprès : le dirty-tracking a réduit
-  le trafic à ce qui bouge, mais un banc animé à 10k écrit encore beaucoup). **C'est le principal levier perf restant** —
-  candidat au prochain jalon GPU-driven, avec le raster ombre 4× (§2.0bis).
+- ~~🟠 **Buffers GPU-produits en device-local.**~~ ✅ **livré en P3-M7** (session 20). Les **buffers d'instances**
+  (scène + ombre) passent device-local sans staging (le compute écrit, le vertex lit — aucun accès host). Le **buffer
+  de candidats persistant** garde un **staging host-visible = miroir** (P3-M6 §5) et copie les ranges dirty vers un
+  **device-local** via un nouveau `CommandList.CopyBuffer` **async** intra-frame (core `vkCmdCopyBuffer`, pas
+  `CmdCopyBuffer2` = KHR/1.3, risque MoltenVK). Les **args restent host-visible** (host-lus par `ReadBackSceneVisible` —
+  choix assumé, taille négligeable). Gain mesuré (avec la réduction raster §2.0bis) : **~15,3 → ~8,0 ms @10k AOT**.
+  *Reste : chemin device-local/transfer **non exécuté sur MoltenVK** (dette P3-M0) ; coalescing avancé des régions dirty
+  déféré (fallback copie pleine si dirty > count/2 en place).*
 
 - 🟠 **La compaction atomique est un SECOND verrou sur la transparence** (en plus du `SortKey` sans profondeur, §0) :
   l'`atomicAdd` **scramble l'ordre intra-batch**, donc trier les candidats arrière→avant ne suffira pas — le futur
@@ -63,9 +63,9 @@ Détail et justification : `AVANCEMENT.md` § P3-M1 et board de session 14.
   draw + binds **par batch**, y compris les batches entièrement cullés (`instanceCount=0`, no-op qui gonfle `LastSceneDrawCalls`).
   Repousse `VK_KHR_draw_indirect_count` (hors core 1.2, incertain MoltenVK) tant que le nombre de batches reste connu CPU.
 - ~~🟡 **Cull d'ombre en compute**~~ ✅ **livré en P3-M6** : le seam de culling est réunifié (scène ET ombre en compute,
-  lisant le même buffer de candidats persistant). Reste asymétrique côté **gate** : la scène a `ReadBackSceneVisible`
-  (GPU==CPU auto) ; l'ombre n'a pas d'équivalent → correction couverte par test unitaire de région + capture bit-identical
-  + verdict humain. *À ajouter : un readback de comptage par région d'ombre (petit, symétrique à la scène).*
+  lisant le même buffer de candidats persistant). ~~Reste asymétrique côté **gate** (l'ombre n'a pas de readback)~~
+  ✅ **soldé en P3-M7** : `ReadBackShadowVisible` somme l'`instanceCount` par région/cascade, symétrique à
+  `ReadBackSceneVisible`.
 
 ## 2. Ombres à l'échelle
 
@@ -104,10 +104,12 @@ formule fermée. **Ne jamais rasteriser une shadow map à l'échelle d'un systè
   - ✅ **Volet CPU soldé en P3-M6** (session 19) : le cull d'ombre est passé **en compute** (`shadow_cull.comp`,
     une passe par candidat × 4 cascades, compaction atomique par région (cascade, mesh-batch)). Le scan CPU O(n×4)
     et les **4 `RenderList` managées (~12 Mo)** disparaissent ; `CollectShadowCasters` est retiré.
-  - 🟠 **Reste : le raster ~4×** (le buffer d'instances d'ombre garde `4×totalCasters`, un caster multi-cascade est
-    rasterisé dans chaque). *Correctif restant* : borner la tranche **en profondeur** (plan aval) + `UpstreamExtent`
-    par cascade (ci-dessous), ce qui touche la **correction d'ombre** → gardé hors P3-M6 (risque gate visuel). *Mord :
-    coût GPU au banc, et à 40k.*
+  - ~~🟠 **Reste : le raster ~4×**~~ ✅ **soldé en P3-M7** (session 20) : un **7ᵉ plan de coupe near-side en
+    profondeur-vue** par cascade fait **tuiler** les cascades au lieu de s'emboîter → chaque caster tombe dans
+    ~1 cascade (**cascade 0 exemptée**, anti-popping P3-M6 préservé ; marge 25% de tranche > bande de fondu 10%).
+    Mesuré : shadow-verify **total ≈ 1×/caster** (vs ~4× avant), part du gain **~11 → ~8 ms**. Double audit + verdict
+    visuel humain PASS (incl. cas soleil bas). *Reste déféré : `UpstreamExtent` par cascade complet (ci-dessous) — la
+    marge est calée sur l'épaisseur de tranche, pas la longueur d'ombre ; un soleil **très** rasant reste le cas limite.*
 - 🟠 **Setback amont fixe κ=4·r** (spec, decision log) : la marge est **proportionnelle au rayon de la cascade**,
   donc la **cascade 0 est la plus exposée**. Un contenu vertical dépassant `4r₀` au-dessus de la tranche proche
   perd son ombre **dans la cascade proche seulement** et la garde au loin → l'ombre d'une tour **disparaît quand on

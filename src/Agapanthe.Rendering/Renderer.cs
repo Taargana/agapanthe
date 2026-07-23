@@ -152,7 +152,7 @@ public sealed class Renderer : IDisposable
     private ComputePipeline? _shadowCullPipeline;
     private readonly StorageBufferRing<Vector4> _shadowCullPlanes;
     private readonly StorageBufferRing<uint> _shadowMeshBase;
-    private Vector4[] _shadowPlaneScratch = new Vector4[24];
+    private Vector4[] _shadowPlaneScratch = new Vector4[4 * ShadowCullPlanesPerCascade]; // 4 cascades × 7 planes
     private uint[] _shadowMeshBaseScratch = new uint[16];
 
     // Cull-verification (P3-M4 W1 gate): when VerifyCull is set, CullSceneOnGpu also counts the candidates the CPU
@@ -161,6 +161,14 @@ public sealed class Renderer : IDisposable
     // hot path — only when the flag is set (the bench).
     private GpuBuffer? _lastSceneArgs;
     private int _lastSceneBatchCount;
+
+    // Shadow-cull region-count readback (P3-M7 W3): remembers the last frame's shadow args buffer + its region
+    // layout so ReadBackShadowVisible can sum the instanceCounts the shadow cull wrote, per cascade. Measures the
+    // 4×→~1× raster drop from the near-cut plane, AND closes the P3-M6 debt of the shadow cull having no readback
+    // gate (symmetric to ReadBackSceneVisible). Set on every frame the shadow cull dispatches (VerifyCull-gated).
+    private GpuBuffer? _lastShadowArgs;
+    private int _lastShadowBatchCount;
+    private int _lastShadowCascadeCount;
 
     /// <summary>P3-M4 W1 gate: enable the CPU-vs-GPU visible-count check (bench/headless only).</summary>
     public bool VerifyCull { get; set; }
@@ -795,18 +803,19 @@ public sealed class Renderer : IDisposable
     /// cascade frusta and the shadow raster (P3-M6).
     /// </summary>
     public void ComputeCascades(
-        in RenderView view, Span<Matrix4x4> lightViewProj, Span<float> splitViewDepths)
+        in RenderView view, Span<Matrix4x4> lightViewProj, Span<float> splitViewDepths, Span<Vector4> nearCutPlanes)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
         var settings = Cascades with { MaxDistance = MathF.Min(Cascades.MaxDistance, ShadowDistance) };
         ShadowFit.ComputeCascades(
             in view, Lights.Directional.Direction, in settings, ShadowTileResolution,
-            lightViewProj, splitViewDepths);
+            lightViewProj, splitViewDepths, nearCutPlanes);
     }
 
     public void DrawScene(
         SceneCandidateSet sceneCandidates,
         ReadOnlySpan<Frustum> cascadeFrusta,
+        ReadOnlySpan<Vector4> cascadeNearCutPlanes,
         ResourceRegistry registry,
         in RenderView view,
         in Frustum cameraFrustum,
@@ -838,14 +847,16 @@ public sealed class Renderer : IDisposable
         // resolution-invariant and lives outside this.
         EnsureTargets(target.Width, target.Height);
 
-        // Sync the persistent candidate buffer to the mirror ONCE (spec §5): both the shadow cull and the scene cull
-        // read the same buffer read-only, so it must be brought up to date before either dispatch (the shadow pass
-        // runs first, before RecordScenePass would otherwise have synced it — P3-M6).
-        var candidateBuffer = _sceneCandidates.Sync(sceneCandidates, frame.Slot);
+        // Sync the persistent candidate buffer ONCE (spec §5): both culls read the same device-local buffer
+        // read-only, so it is brought up to date before either dispatch. Sync writes the host-visible staging (the
+        // mirror), records the staging→device-local copy + a transfer→compute barrier on cmd, and returns the
+        // device-local buffer to bind (P3-M7).
+        var candidateBuffer = _sceneCandidates.Sync(cmd, sceneCandidates, frame.Slot);
 
         // Cascades computed by the caller; shared by the shadow pass (renders each into its atlas tile, culling the
         // candidates against cascadeFrusta on the GPU) and the scene pass (packs them into the lights UBO for PCF).
-        RecordShadowPass(cmd, frame, sceneCandidates, candidateBuffer, cascadeFrusta, registry, cascades);
+        RecordShadowPass(
+            cmd, frame, sceneCandidates, candidateBuffer, cascadeFrusta, cascadeNearCutPlanes, registry, cascades);
         RecordScenePass(
             cmd, frame, sceneCandidates, candidateBuffer, registry, in view, in cameraFrustum, target, cascades,
             cascadeSplits);
@@ -863,7 +874,8 @@ public sealed class Renderer : IDisposable
     /// </summary>
     private void RecordShadowPass(
         CommandList cmd, FrameContext frame, SceneCandidateSet set, GpuBuffer candidateBuffer,
-        ReadOnlySpan<Frustum> cascadeFrusta, ResourceRegistry registry, ReadOnlySpan<Matrix4x4> cascades)
+        ReadOnlySpan<Frustum> cascadeFrusta, ReadOnlySpan<Vector4> cascadeNearCutPlanes, ResourceRegistry registry,
+        ReadOnlySpan<Matrix4x4> cascades)
     {
         // RenderDoc/Nsight capture region for the whole pass (barriers + draws). No-op when debug utils is
         // off, so it stays on the per-frame path at zero cost; the name is a literal (no per-frame alloc).
@@ -889,7 +901,7 @@ public sealed class Renderer : IDisposable
         if (regionCount > 0)
         {
             argsBuffer = DispatchShadowCull(
-                cmd, frame, candidateBuffer, instanceBuffer, set, cascadeFrusta, registry,
+                cmd, frame, candidateBuffer, instanceBuffer, set, cascadeFrusta, cascadeNearCutPlanes, registry,
                 n, shadowBatchCount, totalCasters, candidateCount, regionCount);
         }
 
@@ -962,10 +974,13 @@ public sealed class Renderer : IDisposable
     // mesh, instanceCount ZERO — the compute fills it via atomics), the mesh-batch bases, and the flat cascade planes,
     // binds the shared persistent candidate buffer, dispatches one invocation per candidate, then barriers the args
     // and compacted instances into the draw. Returns the args buffer to issue the indirect draws from.
+    // Planes per cascade handed to shadow_cull.comp: the 6 ortho-frustum planes + 1 near-side view-depth cut (P3-M7).
+    private const int ShadowCullPlanesPerCascade = 7;
+
     private GpuBuffer DispatchShadowCull(
         CommandList cmd, FrameContext frame, GpuBuffer candidateBuffer, GpuBuffer instanceBuffer,
-        SceneCandidateSet set, ReadOnlySpan<Frustum> cascadeFrusta, ResourceRegistry registry,
-        int n, int shadowBatchCount, int totalCasters, int candidateCount, int regionCount)
+        SceneCandidateSet set, ReadOnlySpan<Frustum> cascadeFrusta, ReadOnlySpan<Vector4> cascadeNearCutPlanes,
+        ResourceRegistry registry, int n, int shadowBatchCount, int totalCasters, int candidateCount, int regionCount)
     {
         var shadowBatches = set.ShadowBatches;
 
@@ -979,7 +994,7 @@ public sealed class Renderer : IDisposable
             System.Array.Resize(ref _shadowMeshBaseScratch, Math.Max(shadowBatchCount, _shadowMeshBaseScratch.Length * 2));
         }
 
-        var planeCount = n * 6;
+        var planeCount = n * ShadowCullPlanesPerCascade;
         if (_shadowPlaneScratch.Length < planeCount)
         {
             System.Array.Resize(ref _shadowPlaneScratch, Math.Max(planeCount, _shadowPlaneScratch.Length * 2));
@@ -1003,12 +1018,23 @@ public sealed class Renderer : IDisposable
 
         for (var c = 0; c < n; c++)
         {
-            cascadeFrusta[c].CopyPlanes(_shadowPlaneScratch.AsSpan(c * 6, 6));
+            var block = c * ShadowCullPlanesPerCascade;
+            cascadeFrusta[c].CopyPlanes(_shadowPlaneScratch.AsSpan(block, 6));  // the 6 ortho-frustum planes
+            _shadowPlaneScratch[block + 6] = cascadeNearCutPlanes[c];           // + the near-side view-depth cut (P3-M7)
         }
 
         var argsBuffer = _shadowArgs.Upload(frame.Slot, _shadowCommands.AsSpan(0, regionCount));
         var meshBaseBuffer = _shadowMeshBase.Upload(frame.Slot, _shadowMeshBaseScratch.AsSpan(0, shadowBatchCount));
         var planesBuffer = _shadowCullPlanes.Upload(frame.Slot, _shadowPlaneScratch.AsSpan(0, planeCount));
+
+        if (VerifyCull)
+        {
+            // Remember this frame's shadow args + region layout so ReadBackShadowVisible can sum the per-cascade
+            // instanceCounts the cull wrote (P3-M7 W3 diagnostic + shadow-cull gate).
+            _lastShadowArgs = argsBuffer;
+            _lastShadowBatchCount = shadowBatchCount;
+            _lastShadowCascadeCount = n;
+        }
 
         var cullSet = frame.AllocateSet(_shadowCullSetLayout!);
         frame.WriteStorageBuffer(cullSet, 0, candidateBuffer);
@@ -1309,6 +1335,41 @@ public sealed class Renderer : IDisposable
         for (var b = 0; b < _lastSceneBatchCount; b++)
         {
             total += (int)commands[b].InstanceCount;
+        }
+
+        return total;
+    }
+
+    /// <summary>
+    /// P3-M7 W3 diagnostic + shadow-cull gate: sums the shadow cull's <c>instanceCount</c>s per cascade (region
+    /// <c>c·shadowBatchCount + m</c>) into <paramref name="perCascade"/> and returns the grand total. Measures the
+    /// near-cut plane's 4×→~1× raster drop, and — unlike P3-M6, which had no shadow readback — gives the shadow cull
+    /// a numeric gate. The caller MUST have idled the GPU first. Requires <see cref="VerifyCull"/>.
+    /// </summary>
+    public int ReadBackShadowVisible(Span<int> perCascade)
+    {
+        if (_lastShadowArgs is null || _lastShadowBatchCount == 0 || _lastShadowCascadeCount == 0)
+        {
+            return 0;
+        }
+
+        var regionCount = _lastShadowCascadeCount * _lastShadowBatchCount;
+        var commands = _lastShadowArgs.MappedSpan<DrawIndexedIndirectCommand>(regionCount);
+        var total = 0;
+        for (var c = 0; c < _lastShadowCascadeCount; c++)
+        {
+            var cascadeTotal = 0;
+            for (var m = 0; m < _lastShadowBatchCount; m++)
+            {
+                cascadeTotal += (int)commands[(c * _lastShadowBatchCount) + m].InstanceCount;
+            }
+
+            if (c < perCascade.Length)
+            {
+                perCascade[c] = cascadeTotal;
+            }
+
+            total += cascadeTotal;
         }
 
         return total;

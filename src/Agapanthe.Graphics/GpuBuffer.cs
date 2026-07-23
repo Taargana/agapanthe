@@ -274,6 +274,11 @@ public sealed unsafe class GpuBuffer : IDisposable
             flags |= BufferUsageFlags.IndirectBufferBit;
         }
 
+        if ((usage & BufferUsage.TransferSrc) != 0)
+        {
+            flags |= BufferUsageFlags.TransferSrcBit;
+        }
+
         if (flags == BufferUsageFlags.None)
         {
             throw new GraphicsException("BufferUsage must specify at least one usage.");

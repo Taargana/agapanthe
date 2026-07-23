@@ -44,6 +44,9 @@ public sealed class FrameOrchestrator
     private readonly Matrix4x4[] _cascades = new Matrix4x4[CascadeCount];
     private readonly float[] _splits = new float[CascadeCount];
     private readonly Frustum[] _cascadeFrusta = new Frustum[CascadeCount];
+    // The per-cascade near-side view-depth cut plane (P3-M7 W3): appended to each cascade's shadow-cull planes so the
+    // far cascades stop swallowing the near field (raster 4× → ~1×). Cascade 0's is an all-keeping tautology.
+    private readonly Vector4[] _cascadeNearCutPlanes = new Vector4[CascadeCount];
 
     private readonly SystemScheduler _scheduler;
 
@@ -158,7 +161,8 @@ public sealed class FrameOrchestrator
             var count = Math.Clamp(o._renderer.Cascades.Count, 1, CascadeCount);
             var cascades = o._cascades.AsSpan(0, count);
             var splits = o._splits.AsSpan(0, count);
-            o._renderer.ComputeCascades(in view, cascades, splits);
+            var nearCuts = o._cascadeNearCutPlanes.AsSpan(0, count);
+            o._renderer.ComputeCascades(in view, cascades, splits, nearCuts);
 
             for (var c = 0; c < count; c++)
             {
@@ -183,7 +187,7 @@ public sealed class FrameOrchestrator
             // Both the camera frustum (scene cull) and the cascade frusta (shadow cull) cross into DrawScene, which
             // runs both GPU culls against the persistent candidate buffer.
             o._renderer.DrawScene(
-                o._persistent, o._cascadeFrusta.AsSpan(0, count), o._registry, in view, in cameraFrustum,
+                o._persistent, o._cascadeFrusta.AsSpan(0, count), nearCuts, o._registry, in view, in cameraFrustum,
                 cascades, splitVec, ctx.Cmd, ctx.Frame, ctx.Target);
         }
     }

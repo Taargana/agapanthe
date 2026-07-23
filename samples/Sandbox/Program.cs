@@ -577,6 +577,14 @@ window.Rendered += dt =>
                 var gpu = renderer.ReadBackSceneVisible();
                 var cpu = renderer.LastSceneCpuVisible;
                 Log.Info($"Sandbox: [cull-verify] GPU visible {gpu} vs CPU visible {cpu} — {(gpu == cpu ? "MATCH" : "MISMATCH")}.");
+
+                // P3-M7 W3: shadow raster measured per cascade. Without the near-cut plane a caster enters ~4
+                // cascades (4× raster); with it, each lands in ~1. The total / cascade-0 ratio shows the drop.
+                Span<int> shadowPerCascade = stackalloc int[4];
+                var shadowTotal = renderer.ReadBackShadowVisible(shadowPerCascade);
+                Log.Info(
+                    $"Sandbox: [shadow-verify] shadow instances total {shadowTotal} — per cascade " +
+                    $"[{shadowPerCascade[0]}, {shadowPerCascade[1]}, {shadowPerCascade[2]}, {shadowPerCascade[3]}].");
             }
         }
 
@@ -1234,9 +1242,25 @@ static void SetupLights(SceneLights lights, in Double3Bounds bounds, bool multiI
     var (center, diagonal) = NarrowBounds(in bounds);
     var reach = MathF.Max(diagonal, 0.001f);
 
+    // AGAPANTHE_SUN="x,y,z" overrides the sun's propagation direction (debug: the P3-M7 shadow-cull near-cut is
+    // margin-tuned to slice thickness, not shadow length, so a LOW sun — small |y| — is the case the visual gate
+    // must exercise for light leaks). Default is a fairly steep warm key.
+    var sunDir = new Vector3(0.4f, -0.7f, -0.6f); // down, slightly right, toward the model front
+    if (Environment.GetEnvironmentVariable("AGAPANTHE_SUN") is { } sunSpec)
+    {
+        var parts = sunSpec.Split(',');
+        if (parts.Length == 3
+            && float.TryParse(parts[0], System.Globalization.CultureInfo.InvariantCulture, out var sx)
+            && float.TryParse(parts[1], System.Globalization.CultureInfo.InvariantCulture, out var sy)
+            && float.TryParse(parts[2], System.Globalization.CultureInfo.InvariantCulture, out var sz))
+        {
+            sunDir = Vector3.Normalize(new Vector3(sx, sy, sz));
+        }
+    }
+
     lights.Directional = new DirectionalLight
     {
-        Direction = new Vector3(0.4f, -0.7f, -0.6f), // down, slightly right, toward the model front
+        Direction = sunDir,
         Color = new Vector3(1f, 0.96f, 0.9f),        // warm sun
         // The sun must DOMINATE the studio HDRI's ambient, or its shadow is a faint smudge on the ground and the
         // whole shadow path (fit, crawl, caster cull) is unreadable — at intensity 3 it was. Paired with the

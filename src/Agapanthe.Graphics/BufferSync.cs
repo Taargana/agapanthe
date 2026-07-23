@@ -19,4 +19,17 @@ public enum BufferSync
 
     /// <summary>The vertex shader reads the buffer as a storage buffer (per-instance transforms).</summary>
     VertexStorageRead,
+
+    /// <summary>A transfer/copy writes the buffer (P3-M7: staging → device-local per-frame copy).</summary>
+    TransferWrite,
+
+    /// <summary>A transfer/copy reads the buffer as the copy source (P3-M7).</summary>
+    TransferRead,
 }
+
+/// <summary>
+/// One region of a <see cref="CommandList.CopyBuffer"/> (P3-M7): copy <see cref="Size"/> bytes from
+/// <see cref="SourceOffset"/> in the source buffer to <see cref="DestinationOffset"/> in the destination. A full
+/// rewrite is one region spanning the whole payload; a dirty-slot replay is one region per changed slot.
+/// </summary>
+public readonly record struct BufferCopyRegion(ulong SourceOffset, ulong DestinationOffset, ulong Size);

@@ -1,6 +1,6 @@
 # Agapanthe — Plan complet & état d'avancement
 
-**Mis à jour** : 2026-07-23 (session 19 — **P3-M6 CLOS** : slots persistants dirty-trackés + cull d'ombre GPU ; double audit PASS, verdict visuel PASS ; voir « Point de reprise ») · 2026-07-14 (session 14 — **vérifs humaines de la Phase 2 soldées** : banc M4 PASS with concerns [perf → P3-M1], précision M3 PASS, hot reload M1 PASS) · 2026-07-13 (session 13 — **PHASE 2 CLOSE** — frustum culling + montée en charge : 10 000 entités cullées à 10 000 km, 0 alloc/frame, en NativeAOT ; double audit signe la clôture) · **Machines de dev** : macOS (Apple M3, MoltenVK) + Windows 11 (RTX 5070 Ti, Vulkan 1.3 core) · **Cibles** : Windows / Linux / macOS
+**Mis à jour** : 2026-07-23 (session 20 — **P3-M7 CLOS** : buffers device-local + réduction du raster d'ombre 4×→~1× ; double audit PASS, verdict visuel PASS incl. soleil bas ; A+B ~15,3 → ~8,0 ms ≈ ×2) · 2026-07-23 (session 19 — **P3-M6 CLOS** : slots persistants dirty-trackés + cull d'ombre GPU ; double audit PASS, verdict visuel PASS ; voir « Point de reprise ») · 2026-07-14 (session 14 — **vérifs humaines de la Phase 2 soldées** : banc M4 PASS with concerns [perf → P3-M1], précision M3 PASS, hot reload M1 PASS) · 2026-07-13 (session 13 — **PHASE 2 CLOSE** — frustum culling + montée en charge : 10 000 entités cullées à 10 000 km, 0 alloc/frame, en NativeAOT ; double audit signe la clôture) · **Machines de dev** : macOS (Apple M3, MoltenVK) + Windows 11 (RTX 5070 Ti, Vulkan 1.3 core) · **Cibles** : Windows / Linux / macOS
 
 ## Vision
 
@@ -239,7 +239,27 @@ Spec : [2026-07-14-p3m2-scheduler-lifecycle-design.md](plans/2026-07-14-p3m2-sch
 > physique) : **[BACKLOG.md](BACKLOG.md)** — chaque item dit *ce qui casse sans lui* et *à quelle échelle il devient
 > obligatoire*.
 
-**Point de reprise (2026-07-23, session 19)** : **P3-M6 slots persistants + cull d'ombre GPU — CLOS.** Double audit
+**Point de reprise (2026-07-23, session 20)** : **P3-M7 buffers device-local + réduction du raster d'ombre 4× — CLOS.**
+Double audit PASS (`csharp-lowlevel` PASS · `graphics-3d` PASS with concerns ; 0 🔴/🟠, findings 🟡 appliqués),
+**verdict visuel humain PASS** (incl. le cas **soleil bas**, exigé par l'audit). Referme les **deux dettes perf
+déférées de P3-M6**. **(A) device-local** : nouveau `CommandList.CopyBuffer` async intra-frame (core `vkCmdCopyBuffer`,
+pas `CmdCopyBuffer2` = KHR/1.3, risque MoltenVK) ; le buffer de candidats persistant garde un **staging host-visible
+= miroir** et copie les ranges dirty vers un **device-local** ; les buffers d'instances (scène+ombre) passent
+device-local sans staging (GPU write+read). **(B) raster d'ombre** : un **7ᵉ plan de coupe near-side en profondeur-vue**
+par cascade fait **tuiler** les cascades au lieu de s'emboîter → chaque caster dans ~1 cascade au lieu de ~4
+(**cascade 0 exemptée** pour préserver l'anti-popping P3-M6 ; marge 25% de tranche > bande de fondu 10%). **Bonus** :
+`ReadBackShadowVisible` (comptage d'ombre par cascade) ferme la dette de gate GPU==CPU de l'ombre de P3-M6.
+Métriques (AOT `grid:100x100`) : **A+B ~15,3 → ~8,0 ms (≈ ×2)** · shadow-verify **total ≈ 1×/caster** (par cascade
+`[28,123,701,4092]`, vs ~4× avant) · draws **2+4** · **0 alloc/frame** · GPU scène == CPU (`2576 MATCH`) · mono
+**bit-identical `4848F93F`** · 0 leak · 0 validation · **325 tests** · NativeAOT PASS.
+Spec : [2026-07-23-p3m7-device-local-shadow-raster-design.md](plans/2026-07-23-p3m7-device-local-shadow-raster-design.md) ·
+protocole visuel : [visual-checks/2026-07-23-p3m7-device-local-shadow-raster.md](visual-checks/2026-07-23-p3m7-device-local-shadow-raster.md).
+Env var nouvelle : `AGAPANTHE_SUN="x,y,z"` (direction du soleil ; petit `|y|` = soleil rasant, pour le test de light leak).
+**Dette léguée** : `UpstreamExtent` par cascade complet reste déféré ([backlog §2.0bis](BACKLOG.md)) — la marge du
+near-cut est calée sur l'épaisseur de tranche, pas la longueur d'ombre ; un soleil **très** rasant reste le cas
+limite (jugé PASS au protocole). Chemin device-local/transfer **non exécuté sur MoltenVK** (dette P3-M0).
+
+**Point de reprise antérieur (2026-07-23, session 19)** : **P3-M6 slots persistants + cull d'ombre GPU — CLOS.** Double audit
 PASS (`graphics-3d` PASS · `csharp-lowlevel` PASS with concerns ; 0 🔴/🟠, findings 🟡 appliqués), **verdict visuel
 humain PASS**. Referme **deux dettes fraîches** : (1) la régression sort/upload O(n) de P3-M4 ([backlog §1](BACKLOG.md)) —
 le buffer de candidats est désormais **persistant** (`PersistentInstanceBuffer`, F copies host-visible + miroir CPU
@@ -281,6 +301,7 @@ le cull d'ombre n'a pas de readback GPU==CPU (asymétrie avec la scène, dette d
 | P3-M4 | Rendu GPU-driven (cull compute + draw indirect) | S17 | Le cull quitte le CPU ; GPU visible == CPU (2557 @10k) |
 | P3-M5 | **CSM** (4 cascades, atlas 2×2, `NoShadowCast`) | S18 | Ombres nettes près **et** loin ; les 4 artefacts du constat P3-M4 corrigés |
 | P3-M6 | **Slots persistants dirty-trackés + cull d'ombre GPU** | S19 | Le CPU ne re-trie/re-upload plus tout (chemin incrémental O(dirty)) ; le cull d'ombre quitte le CPU (12 Mo managés disparus) — double audit PASS, verdict visuel PASS |
+| P3-M7 | **Buffers device-local + réduction raster d'ombre 4×** | S20 | Les buffers GPU quittent l'host-visible (PCIe) ; le raster d'ombre passe de ~4× à ~1×/caster — A+B ~15,3 → ~8,0 ms (≈ ×2), double audit PASS, verdict visuel PASS (incl. soleil bas) |
 
 **Ouverts, par ordre de recommandation** (chaque ligne dit *ce qui casse sans lui*) :
 
