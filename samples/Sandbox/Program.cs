@@ -328,9 +328,9 @@ window.Loaded += () =>
     }
 
     // AGAPANTHE_PHYSICS=1 drives the drop:N bodies (P3-M3): a fixed-step rigid-body integration in the Simulation
-    // stage, so PostSimulation re-derives world transforms and bounds from the fallen positions and the two-pass
-    // shadow cull sees the casters MOVE (which is what makes ShadowFit.UpstreamExtent finally bite). Opt-in, and
-    // only meaningful with a drop scene (it needs a ground Y); a grid or the lone model just ignores it.
+    // stage, so PostSimulation re-derives world transforms and bounds from the fallen positions and the GPU shadow
+    // cull sees the casters MOVE. Opt-in, and only meaningful with a drop scene (it needs a ground Y); a grid or the
+    // lone model just ignores it.
     if (physicsGroundY is { } physGroundY && Environment.GetEnvironmentVariable("AGAPANTHE_PHYSICS") is "1")
     {
         var settings = PhysicsSettings.Default((float)physGroundY);

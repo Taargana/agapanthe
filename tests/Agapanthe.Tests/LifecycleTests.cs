@@ -21,7 +21,7 @@ public sealed class LifecycleTests
     private static int DrawableCount(GameWorld world)
     {
         var render = new RenderList();
-        world.CollectRenderLists(render, ViewAt(Double3.Zero));
+        world.CollectRenderLists(render, new SceneCandidateSet(), ViewAt(Double3.Zero));
         return render.Count;
     }
 

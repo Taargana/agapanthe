@@ -36,19 +36,24 @@ Détail et justification : `AVANCEMENT.md` § P3-M1 et board de session 14.
   `baseInstance` MoltenVK neutralisé), `scene_cull.comp` (frustum-cull + compaction atomics), barrières compute→indirect/vertex.
   Gate : GPU visible == CPU (2557 @10k AOT), mono bit-identique. **Double audit PASS.** Cull d'ombre resté CPU two-pass (P3-M2).
 
-- 🔴 **Slots persistants dirty-trackés — LE prochain jalon GPU-driven (la partie (C) reportée de P3-M4).** Les transforms
-  ne sont plus recopiées/re-narrow/re-triées par frame ; seules les entités qui ont bougé écrivent leur slot (+ re-narrow
-  global au changement d'origine quantifiée). `RenderItem.WorldTransform` devient mort ; `RenderItem` se réduit à
-  (handles, clé, instanceId, sphère). *Quand ça mord — DEUX raisons (audit P3-M4)* : (a) à ~100 000 entités, le cull CPU
-  historique ; (b) **immédiatement, pour défaire la régression qu'A+B a introduite** : P3-M4 sans (C) fait *strictement
-  plus* de travail CPU qu'avant — il narrow/bake/**trie TOUS** les candidats (10001) et **upload ~960 Ko/frame** là où
-  P3-M1 ne traitait que les visibles. Le mur CPU n'a pas disparu, il a **migré** du cull vers le sort+upload (et à 40k il
-  est probablement plus haut). C'est le prix assumé d'une fondation ; (C) est ce qui le rembourse.
+- ~~🔴 **Slots persistants dirty-trackés (partie (C) reportée de P3-M4)**~~ ✅ **livré en P3-M6** (session 19,
+  *double audit + verdict visuel en attente*). Buffer de candidats **persistant host-visible** (`PersistentInstanceBuffer`,
+  F copies + miroir CPU autoritatif + sync-before-use §5) ; le gather + radix sort ne tournent qu'au **rebuild structurel**
+  (spawn/despawn/edit mesh-matériau/re-snap d'origine), et une frame ordinaire ne patche que les slots **dirty** (O(dirty),
+  marqués aux 3 surfaces de mutation du World : animation, physique, propagation). Le re-upload O(n) de ~960 Ko/frame est
+  supprimé (scène statique → dirty vide → upload ≈ 0). Slot stable = index trié material-major ; **casse le jour où la
+  profondeur entre dans `SortKey`** (§0) — condition de validité inscrite dans `InstanceSlot`. `RenderItem.WorldTransform`
+  reste vivant (véhicule du gather au rebuild). *Reste : à 100 000 entités le rebuild structurel O(n log n) redevient le mur
+  — mais il n'est payé qu'aux changements structurels, pas par frame.*
 
 - 🟠 **Buffers GPU-produits en device-local.** L'instance buffer compacté et l'args buffer sont **host-visible** (le
   compute y écrit / y fait des atomics). Sur GPU discret sans ReBAR (le banc Windows) = trafic PCIe par dispatch, sûrement
-  une part des ~8 ms @10k. Sur MoltenVK (mémoire unifiée, cible portability) = neutre. Les passer en **device-local** une
-  fois la gate `ReadBackSceneVisible` (qui exige host-visible pour `MappedSpan`) **isolée en Debug**. À faire avec (C).
+  une part des ms @10k. Sur MoltenVK (mémoire unifiée, cible portability) = neutre. Les passer en **device-local** une
+  fois la gate `ReadBackSceneVisible` (qui exige host-visible pour `MappedSpan`) **isolée en Debug**. **Amplifié par
+  P3-M6** : le cull d'ombre GPU fait aussi des atomics + écritures dispersées dans un buffer d'instances host-visible
+  (`4×totalCasters`), et le buffer de candidats persistant reste host-visible (déféré exprès : le dirty-tracking a réduit
+  le trafic à ce qui bouge, mais un banc animé à 10k écrit encore beaucoup). **C'est le principal levier perf restant** —
+  candidat au prochain jalon GPU-driven, avec le raster ombre 4× (§2.0bis).
 
 - 🟠 **La compaction atomique est un SECOND verrou sur la transparence** (en plus du `SortKey` sans profondeur, §0) :
   l'`atomicAdd` **scramble l'ordre intra-batch**, donc trier les candidats arrière→avant ne suffira pas — le futur
@@ -57,9 +62,10 @@ Détail et justification : `AVANCEMENT.md` § P3-M1 et board de session 14.
 - 🟡 **MultiDrawIndirect** (un seul `vkCmdDrawIndexedIndirect` pour tous les batches, `drawCount = N`) : aujourd'hui un
   draw + binds **par batch**, y compris les batches entièrement cullés (`instanceCount=0`, no-op qui gonfle `LastSceneDrawCalls`).
   Repousse `VK_KHR_draw_indirect_count` (hors core 1.2, incertain MoltenVK) tant que le nombre de batches reste connu CPU.
-- 🟡 **Cull d'ombre en compute** : le wedge two-pass P3-M2 reste CPU (subtil) — le déplacer réunifierait le seam de culling
-  (aujourd'hui scène→GPU, ombre→CPU dans le World).
-- *Ce que ça rembourse (avec (C))* : le cull CPU O(n) + le sort/upload O(n) de la fondation. *Mord : dès 40k, et à 100k.*
+- ~~🟡 **Cull d'ombre en compute**~~ ✅ **livré en P3-M6** : le seam de culling est réunifié (scène ET ombre en compute,
+  lisant le même buffer de candidats persistant). Reste asymétrique côté **gate** : la scène a `ReadBackSceneVisible`
+  (GPU==CPU auto) ; l'ombre n'a pas d'équivalent → correction couverte par test unitaire de région + capture bit-identical
+  + verdict humain. *À ajouter : un readback de comptage par région d'ombre (petit, symétrique à la scène).*
 
 ## 2. Ombres à l'échelle
 
@@ -94,22 +100,24 @@ formule fermée. **Ne jamais rasteriser une shadow map à l'échelle d'un systè
 - 🟠 **Le cull par cascade est quasi inopérant** (audit graphics MINEUR-1) : les volumes ortho viennent de sphères
   englobantes de tranches, donc ils **se recouvrent massivement** — celui de la cascade 3 contient presque tout le
   champ proche (et déborde ~97 m *derrière* la caméra). Presque chaque caster entre dans les 4 listes →
-  **~4× la géométrie rasterisée** dans la passe d'ombre, et 4× le buffer d'instances. Image juste, coût GPU réel.
-  *Ça mord : au banc `grid:100x100` (part des 11,4 ms).* Correctif : borner aussi la tranche **en profondeur**
-  (plan aval), ou passer le cull d'ombre en compute → **backlog §1 (GPU-driven shadow cull)**.
+  **~4× la géométrie rasterisée** dans la passe d'ombre, et 4× le buffer d'instances.
+  - ✅ **Volet CPU soldé en P3-M6** (session 19) : le cull d'ombre est passé **en compute** (`shadow_cull.comp`,
+    une passe par candidat × 4 cascades, compaction atomique par région (cascade, mesh-batch)). Le scan CPU O(n×4)
+    et les **4 `RenderList` managées (~12 Mo)** disparaissent ; `CollectShadowCasters` est retiré.
+  - 🟠 **Reste : le raster ~4×** (le buffer d'instances d'ombre garde `4×totalCasters`, un caster multi-cascade est
+    rasterisé dans chaque). *Correctif restant* : borner la tranche **en profondeur** (plan aval) + `UpstreamExtent`
+    par cascade (ci-dessous), ce qui touche la **correction d'ombre** → gardé hors P3-M6 (risque gate visuel). *Mord :
+    coût GPU au banc, et à 40k.*
 - 🟠 **Setback amont fixe κ=4·r** (spec, decision log) : la marge est **proportionnelle au rayon de la cascade**,
   donc la **cascade 0 est la plus exposée**. Un contenu vertical dépassant `4r₀` au-dessus de la tranche proche
   perd son ombre **dans la cascade proche seulement** et la garde au loin → l'ombre d'une tour **disparaît quand on
   s'en approche**. Mode de défaillance vicieux (incohérence sous déplacement caméra) mais hors d'atteinte pour du
   contenu de 2 m. *Mord : premier bâtiment/falaise/grue.* Correctif : `UpstreamExtent` par cascade.
-- 🟡 **Code mort du wedge retiré** : `ShadowFit.ComputeLightViewProj`, `ExtrudedShadowFrustum` (+ ses tests),
-  `Renderer.ComputeFrustumSphere`, `ShadowCasterDistance` — ~200 lignes de production que **seuls les tests
-  exercent** encore. Décider : supprimer, ou documenter comme conservé. (Le retrait du wedge lui-même est propre :
-  aucun invariant orphelin, la dette P3-M2 « sortir `_casterSpheres` du World » est **soldée**.)
-- 🟡 **Empreinte mémoire des listes de casters** : 4 `RenderList` à ~10k casters ≈ 12 Mo de tableaux managés au banc
-  (conséquence directe du recouvrement ci-dessus). Pas un leak ; disparaît avec le vrai cull.
-- 🟡 **Doc XML obsolète** : bloc `<summary>` résiduel de `ComputeLightViewProj` (`Renderer.cs`) et doc de
-  `CollectRenderLists` (`GameWorld.cs`) décrivant encore le wedge + un `<see cref="CompactShadowCasters"/>` mort.
+- ~~🟡 **Code mort du wedge**~~ ✅ **retiré en P3-M6** : `ShadowFit.ComputeLightViewProj`, `ExtrudedShadowFrustum`
+  (+ tests), `Renderer.ComputeFrustumSphere`/`ShadowCasterDistance`, `GameWorld.CollectShadowCasters` (+ tests),
+  `Renderer.Batch`/`BuildShadowBatches` et les crefs/commentaires obsolètes — supprimés (~200 lignes).
+- ~~🟡 **Empreinte mémoire des listes de casters** (~12 Mo)~~ ✅ **disparue en P3-M6** (le cull d'ombre GPU ne
+  construit plus de `RenderList` de casters).
 - 🟡 **`textureLod` / flot divergent** ✅ **soldé** (session 18) · **bias par cascade** : **NE PAS FAIRE** — l'audit
   graphique a montré que le bias slope-scaled est **invariant par cascade** (taille de texel et plage de profondeur
   varient toutes deux linéairement en `r` et se compensent). Ajouter un bias par cascade casserait cette propriété.

@@ -14,9 +14,11 @@ layout(local_size_x = 64) in;
 
 struct Candidate {
     mat4 model;
-    vec4 sphere;   // xyz = camera-relative centre, w = radius
-    uint batchId;
-    uint pad0, pad1, pad2;
+    vec4 sphere;        // xyz = origin-relative centre, w = radius
+    uint sceneBatchId;  // material-major batch index (this pass)
+    uint shadowBatchId; // mesh-major batch index (shadow_cull.comp, unused here)
+    uint flags;         // bit 0 = casts shadow (shadow_cull.comp, unused here)
+    uint pad0;
 };
 
 // One indirect draw command, matching VkDrawIndexedIndirectCommand / DrawIndexedIndirectCommand.
@@ -53,7 +55,7 @@ void main() {
         }
     }
 
-    uint b = candidates[i].batchId;
+    uint b = candidates[i].sceneBatchId;
     uint slot = atomicAdd(cmds[b].instanceCount, 1u);
     outModel[batchBase[b] + slot] = candidates[i].model;
 }

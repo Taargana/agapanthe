@@ -64,8 +64,10 @@ public sealed partial class GameWorld
             new Bounds { Center = spec.BoundsCenter, Radius = spec.BoundsRadius },
             new RenderOrder { Value = spec.Order },
             new Velocity { Linear = velocity },
-            new RigidBody { InverseMass = inverseMass, Restitution = restitution, Radius = radius });
+            new RigidBody { InverseMass = inverseMass, Restitution = restitution, Radius = radius },
+            new InstanceSlot { Value = -1 }); // -1 = unassigned; the next structural rebuild sets it
         _live[id] = entity;
+        _structuralDirty = true; // a new body is a new drawable → force a persistent rebuild (P3-M6)
         return new EntityRef(id);
     }
 
@@ -161,6 +163,7 @@ public sealed partial class GameWorld
 
             _pEntity[k].Set(new WorldPosition { Value = _pPos[k] });
             _pEntity[k].Set(new Velocity { Linear = _pVel[k] });
+            MarkDirty(_pEntity[k].Get<InstanceSlot>().Value); // the body moved → queue its slot for a patch (P3-M6)
         }
     }
 

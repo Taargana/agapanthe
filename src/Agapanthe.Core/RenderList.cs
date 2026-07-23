@@ -81,10 +81,24 @@ public sealed class RenderList
     /// type has always avoided).
     /// </para>
     /// </summary>
-    public void SortByKey()
+    public void SortByKey() => SortByKey(default);
+
+    /// <summary>
+    /// Same sort, but also writes the resulting permutation into <paramref name="permutation"/> (P3-M6): after the
+    /// call, <c>permutation[i]</c> is the ORIGINAL (pre-sort) index of the item now at position <c>i</c>. The World
+    /// uses it to recover which entity landed in each persistent slot (slot = sorted index), so it can stamp the
+    /// entity's <c>InstanceSlot</c> without carrying the (World-only) entity handle through this Core type. Pass
+    /// <c>default</c> to skip it. The span, when non-empty, must hold at least <see cref="Count"/> entries.
+    /// </summary>
+    public void SortByKey(Span<int> permutation)
     {
         if (_count < 2)
         {
+            if (!permutation.IsEmpty && _count == 1)
+            {
+                permutation[0] = 0;
+            }
+
             return;
         }
 
@@ -131,6 +145,10 @@ public sealed class RenderList
         for (var i = 0; i < _count; i++)
         {
             _scratchItems[i] = _items[src[i]];
+            if (!permutation.IsEmpty)
+            {
+                permutation[i] = src[i];
+            }
         }
 
         (_items, _scratchItems) = (_scratchItems, _items);

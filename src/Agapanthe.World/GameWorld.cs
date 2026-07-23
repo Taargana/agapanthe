@@ -44,17 +44,17 @@ public sealed partial class GameWorld : IDisposable
         new QueryDescription().WithAll<LocalTransform, WorldTransform, WorldPosition>();
     private static readonly QueryDescription BoundsDesc =
         new QueryDescription().WithAll<WorldTransform, WorldPosition, Bounds>();
+    // InstanceSlot is in the WithAll (P3-M6, audit 🟡): RebuildPersistent stamps every gathered drawable's slot, so
+    // the query must only ever see entities that carry the component. Every drawable path (MaterialiseDrawable,
+    // SpawnBody) adds it at creation; listing it here makes that coupling explicit and fail-safe (a future drawable
+    // path that forgot it is excluded from the gather rather than crashing the Set).
     private static readonly QueryDescription DrawableDesc =
-        new QueryDescription().WithAll<WorldTransform, WorldPosition, Bounds, MeshRef, RenderOrder>();
-    // The shadow-caster set (P3-M5 CSM): every drawable EXCEPT those tagged NoShadowCast (the ground plane), so a
-    // large flat receiver does not cast on itself. One iteration buckets these into the per-cascade caster lists.
-    private static readonly QueryDescription CasterDesc =
-        new QueryDescription().WithAll<WorldTransform, WorldPosition, Bounds, MeshRef, RenderOrder>().WithNone<NoShadowCast>();
+        new QueryDescription().WithAll<WorldTransform, WorldPosition, Bounds, MeshRef, RenderOrder, InstanceSlot>();
     // MeshRef is in the WithAll on purpose: GlobalId is now universal (every entity gets one at spawn, P3-M2 D2),
     // so it can no longer be the discriminant for "is a drawable". Animation targets DRAWABLES — the imported,
     // baked entities — never the hierarchical transform nodes, which the propagation system owns.
     private static readonly QueryDescription AnimateDesc =
-        new QueryDescription().WithAll<GlobalId, WorldPosition, WorldTransform, MeshRef>();
+        new QueryDescription().WithAll<GlobalId, WorldPosition, WorldTransform, MeshRef, InstanceSlot>();
     // Cascade despawn (D2.a): the parent link is child->parent only, so destroying a subtree means scanning every
     // Parent-carrying entity to a fixed point. Built once (a per-flush QueryDescription would defeat zero-alloc).
     private static readonly QueryDescription ParentScanDesc =
@@ -95,6 +95,37 @@ public sealed partial class GameWorld : IDisposable
     // Reused scratch for the cascade: the set of real entities to destroy this flush (seeded from _pendingDead,
     // grown to a fixed point by the Parent scan). A HashSet, not a list, so the fixed-point membership test is O(1).
     private readonly HashSet<Entity> _destroyScratch = new();
+
+    // --- P3-M6 persistent slots + dirty tracking -----------------------------------------------------------------
+    // A drawable's persistent slot = its index in the sorted candidate buffer, stamped into InstanceSlot at each
+    // structural rebuild. Between rebuilds only MOVED drawables re-emit their slot (the incremental path); a rebuild
+    // is forced by any spawn/despawn (_structuralDirty) or by the frame origin re-snapping (_lastRebuildOrigin).
+    private bool _structuralDirty = true;             // the first collect must rebuild (no slots assigned yet)
+    private Double3 _lastRebuildOrigin;
+    private int _slotCount;
+    private Entity[] _slotEntity = [];                 // slot -> entity, rebuilt on every structural rebuild
+    private bool[] _slotDirty = [];                    // slot -> already queued for a patch this frame (dedup)
+    private readonly List<int> _dirtySlots = new(64);  // the slots a mutator touched this frame (drained at collect)
+    private Entity[] _gatherEntities = [];             // gather-order entities, parallel to the pre-sort render list
+    private int[] _sortPerm = [];                      // sorted position -> gather index (from RenderList.SortByKey)
+
+    // Marks a drawable's slot for an incremental patch (P3-M6). Called by the three mutation surfaces (animation,
+    // physics writeback, hierarchy propagation). A negative slot is an unassigned drawable (spawned but not yet
+    // through a structural rebuild) — ignored, because that rebuild will emit it in full anyway.
+    private void MarkDirty(int slot)
+    {
+        if (slot < 0)
+        {
+            return;
+        }
+
+        EnsureSlotDirtyCapacity(slot + 1);
+        if (!_slotDirty[slot])
+        {
+            _slotDirty[slot] = true;
+            _dirtySlots.Add(slot);
+        }
+    }
 
     private enum CommandKind : byte
     {
@@ -174,8 +205,10 @@ public sealed partial class GameWorld : IDisposable
             new WorldPosition { Value = spec.Position },
             new MeshRef { Mesh = spec.Mesh, Material = spec.Material },
             new Bounds { Center = spec.BoundsCenter, Radius = spec.BoundsRadius },
-            new RenderOrder { Value = spec.Order });
+            new RenderOrder { Value = spec.Order },
+            new InstanceSlot { Value = -1 }); // -1 = unassigned; the next structural rebuild sets it
         _live[globalId] = entity;
+        _structuralDirty = true; // a new drawable changes the candidate set → force a persistent rebuild (P3-M6)
         return entity;
     }
 
@@ -294,6 +327,10 @@ public sealed partial class GameWorld : IDisposable
         {
             return; // the common case: nothing structural happened this stage
         }
+
+        // Any spawn or despawn changes the candidate set → the next collect must do a full persistent rebuild
+        // (re-sort, re-slot). Spawns also set this in MaterialiseDrawable; despawns are covered here (P3-M6).
+        _structuralDirty = true;
 
         // Pass 1 — create every spawn (populate _live) so every handle, including same-batch parents, resolves.
         for (var i = 0; i < _commands.Count; i++)
@@ -487,30 +524,15 @@ public sealed partial class GameWorld : IDisposable
         // would otherwise be untested under AOT. Since P3-M4 the scene is NOT CPU-culled (the camera cull is a GPU
         // compute pass), so the candidate list holds EVERY drawable that exists AT THIS POINT: 8 imported + 2 alive
         // deferred (x 500) = 10. The physics bodies are spawned AFTER this call (they lift the raw count to 12).
-        var wide = Frustum.FromViewProjection(
-            MathHelpers.LookAt(Vector3.Zero, -Vector3.UnitZ, Vector3.UnitY)
-            * MathHelpers.OrthographicVulkan(200f, 200f, -100f, 100f));
         var smokeView = new RenderView(
             Double3.Zero, Vector3.Zero, Matrix4x4.Identity, Matrix4x4.Identity, 1f, 1f, 0.1f, 1f);
         var render = new RenderList();
-        CollectRenderLists(render, in smokeView);
+        var persistent = new SceneCandidateSet();
+        CollectRenderLists(render, persistent, in smokeView); // also roots the persistent rebuild + slot stamping (P3-M6)
         if (render.Count != 10)
         {
             throw new InvalidOperationException(
                 $"AOT smoke: CollectRenderLists produced {render.Count} candidates, expected 10.");
-        }
-
-        // The CSM caster path (P3-M5): two cascades, so the ILC roots the span-of-frusta bucketing and the
-        // WithNone<NoShadowCast> query. Both frusta are the same wide box here — every caster lands in both.
-        Span<Frustum> smokeCascades = stackalloc Frustum[2] { wide, wide };
-        var smokeCasters = new[] { new RenderList(), new RenderList() };
-        CollectShadowCasters(smokeCascades, smokeCasters, in smokeView);
-        // 8, not 10: the two deferred drawables sit at x 500, far outside this frustum, so the per-cascade cull drops
-        // them — which is exactly the path being exercised. Both cascades see the same volume, hence the same count.
-        if (smokeCasters[0].Count != 8 || smokeCasters[1].Count != 8)
-        {
-            throw new InvalidOperationException(
-                $"AOT smoke: cascades collected {smokeCasters[0].Count}/{smokeCasters[1].Count} casters, expected 8/8.");
         }
 
         // AnimateDrawables is generic over a struct animator — the M4 direct-write animation path. Instantiate it
@@ -525,6 +547,13 @@ public sealed partial class GameWorld : IDisposable
             throw new InvalidOperationException(
                 $"AOT smoke: AnimateDrawables visited {animator.Count} drawables, expected 10.");
         }
+
+        // A SECOND collect at the same origin, now that AnimateDrawables has marked every drawable dirty, takes the
+        // INCREMENTAL path (P3-M6, audit 🟡): it roots PatchDirtyPersistent's generic Entity.Get<WorldTransform/
+        // WorldPosition/Bounds> instantiations under the ILC — the first (structural) collect never exercises them,
+        // and no other probe path uses Entity.Get<T> (the systems use chunk.GetSpan<T>). Must precede the SpawnBody
+        // calls below, which would re-arm _structuralDirty and force a rebuild instead.
+        CollectRenderLists(render, persistent, in smokeView);
 
         // Physics (P3-M3): two overlapping bodies + one StepPhysics roots the whole physics path under ILC — the
         // BodyDesc chunk query, the Entity.Set scatter, and the broadphase/sort/impulse of ResolveBodyContacts (a
@@ -570,11 +599,13 @@ public sealed partial class GameWorld : IDisposable
             var ids = chunk.GetSpan<GlobalId>();
             var positions = chunk.GetSpan<WorldPosition>();
             var worlds = chunk.GetSpan<WorldTransform>();
+            var slots = chunk.GetSpan<InstanceSlot>();
             var count = chunk.Count;
             for (var i = 0; i < count; i++)
             {
                 animator.Animate(ids[i].Value, ref positions[i].Value, ref worlds[i].Value);
                 AssertNoTranslation(worlds[i].Value); // the animator must not bake a translation (see the contract)
+                MarkDirty(slots[i].Value); // an animated drawable moved → queue its slot for an incremental patch (P3-M6)
             }
         }
     }
@@ -613,6 +644,12 @@ public sealed partial class GameWorld : IDisposable
             for (var i = 0; i < count; i++)
             {
                 ComputeWorld(entities[i], out worlds[i].Value, out positions[i].Value);
+                // A hierarchical DRAWABLE (one carrying InstanceSlot) moved → queue it. Today's propagated entities
+                // are transform nodes without a slot, so this is a no-op; it future-proofs hierarchical drawables (P3-M6).
+                if (entities[i].Has<InstanceSlot>())
+                {
+                    MarkDirty(entities[i].Get<InstanceSlot>().Value);
+                }
             }
         }
     }
@@ -660,116 +697,156 @@ public sealed partial class GameWorld : IDisposable
     }
 
     /// <summary>
-    /// PASS 1 of the frame's culling (spec §3.5, systems 3-4; P3-M2 D3.c). Each drawable's world bounding sphere is
-    /// tested against the CAMERA frustum (→ render list) and the BOUNDED WEDGE (→ shadow-caster list). The two are
-    /// separate on purpose — a caster off-screen still throws its shadow on-screen, so the caster list is culled
-    /// against the light region, never the camera, or shadows would pop at the screen edge. This pass produces a
-    /// SUPERSET of the final caster list (the wedge is looser than the fitted light volume) plus its
-    /// <paramref name="casterBounds"/> and a parallel sphere array; the caller fits the light to those, then calls
-    /// <see cref="CompactShadowCasters"/> to tighten the list against the light volume. The render list is final and
-    /// sorted here; the shadow list is left unsorted for pass 2.
+    /// Builds the frame's scene candidates and maintains the persistent slot buffer (spec §6, P3-M6). Every drawable
+    /// is a candidate (the camera-frustum cull runs on the GPU, P3-M4): the CPU narrows its world sphere to
+    /// origin-relative, bakes its model matrix, and tags it with the material-major sort key + a casts-shadow flag.
+    /// The list is sorted here into batch order.
     /// <para>
-    /// Zero-alloc: the lists and the sphere array are reused (Clear keeps capacity), iteration is chunk-based, no
-    /// lambda. The culling is a linear scan (dot products per entity per frustum) — a spatial structure would have to
-    /// refit every frame in a moving world and cost more than the scan below this milestone's entity counts (board D4).
+    /// The sorted list then drives <paramref name="persistent"/> in one of two regimes: a <b>structural rebuild</b>
+    /// (first frame, any spawn/despawn, or an origin re-snap) rewrites the whole candidate array + both batch tables
+    /// and re-stamps every drawable's <see cref="InstanceSlot"/> (= its sorted index); otherwise the <b>incremental</b>
+    /// path re-emits only the slots a mutator touched this frame, each re-narrowed against the current origin. The
+    /// <paramref name="render"/> list is still filled in full every frame for the not-yet-switched GPU scene cull
+    /// (P3-M4); AW-007 makes the incremental path skip that.
     /// </para>
+    /// <para>Zero-alloc: every buffer is reused (Clear/capacity kept), iteration is chunk-based, no lambda.</para>
     /// </summary>
-    public void CollectRenderLists(RenderList render, in RenderView view)
+    public void CollectRenderLists(RenderList render, SceneCandidateSet persistent, in RenderView view)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
         AssertOwnerThread();
         ArgumentNullException.ThrowIfNull(render);
+        ArgumentNullException.ThrowIfNull(persistent);
 
-        render.Clear();
         var origin = view.Origin;
 
-        foreach (ref var chunk in _world.Query(in DrawableDesc))
+        // The whole point of P3-M6: the O(n) gather + radix sort runs ONLY on a structural rebuild (a spawn/despawn
+        // or an origin re-snap). A steady frame takes the incremental path — it touches only the drawables a mutator
+        // moved this frame (O(dirty)), never re-gathering or re-sorting the world.
+        if (_structuralDirty || origin != _lastRebuildOrigin)
         {
-            var worlds = chunk.GetSpan<WorldTransform>();
-            var positions = chunk.GetSpan<WorldPosition>();
-            var bounds = chunk.GetSpan<Bounds>();
-            var meshes = chunk.GetSpan<MeshRef>();
-            var orders = chunk.GetSpan<RenderOrder>();
-            var count = chunk.Count;
-            for (var i = 0; i < count; i++)
-            {
-                // Every drawable is a scene CANDIDATE (P3-M4): the camera-frustum cull runs on the GPU, so the CPU
-                // narrows the world sphere to camera-relative (in double, then cast), bakes the model, and uploads.
-                WorldSphere(worlds[i].Value, positions[i].Value, bounds[i], out var worldCenter, out var radius);
-                var center = worldCenter.ToVector3(origin);
-                var sphere = new Vector4(center, radius);
-                var model = ComposeModel(worlds[i].Value, positions[i].Value, origin);
-
-                // Sorted by (material, mesh) so a run is one batch (P3-M1); carries its camera-relative sphere for
-                // the GPU cull (P3-M4). Tie-break = the stable RenderOrder (spec §6 condition b).
-                var key = RenderItem.ComposeSortKey(
-                    meshes[i].Material.Index, meshes[i].Mesh.Index, orders[i].Value);
-                render.Add(new RenderItem(model, meshes[i].Mesh, meshes[i].Material, key, sphere));
-            }
+            RebuildPersistent(render, persistent, origin);
+            _structuralDirty = false;
+            _lastRebuildOrigin = origin;
         }
-
-        render.SortByKey(); // into batch order for the GPU cull
+        else
+        {
+            PatchDirtyPersistent(persistent, origin);
+        }
     }
 
-    /// <summary>
-    /// Buckets the shadow casters into the CSM cascades (P3-M5): every drawable NOT tagged <see cref="NoShadowCast"/>
-    /// is tested against each cascade's light frustum and added to the matching <paramref name="cascadeCasters"/>
-    /// list (an entity straddling two cascades is drawn in both). This replaces the P3-M2 two-pass wedge: each
-    /// cascade's fit is camera-only, so its frustum is known here without any caster bounds — no circularity, no
-    /// parallel-sphere state. Each caster list keeps the MESH-major key (P3-M1) for instanced depth draws and is
-    /// sorted here. Zero-alloc: the lists are reused (Clear keeps capacity), iteration is chunk-based, no lambda.
-    /// </summary>
-    public void CollectShadowCasters(
-        ReadOnlySpan<Frustum> cascadeFrusta, RenderList[] cascadeCasters, in RenderView view)
+    // Structural rebuild (spec §6): gather every drawable, sort into (material, mesh) batch order, rebuild the
+    // candidate array + batch tables, then stamp every drawable's slot (= its sorted index) and rebuild the
+    // slot -> entity map the incremental path walks. O(n log n) but rare (spawn/despawn/origin re-snap only).
+    private void RebuildPersistent(RenderList render, SceneCandidateSet persistent, Double3 origin)
     {
-        ObjectDisposedException.ThrowIf(_disposed, this);
-        AssertOwnerThread();
-        ArgumentNullException.ThrowIfNull(cascadeCasters);
-        var n = cascadeFrusta.Length;
-        if (cascadeCasters.Length < n)
+        render.Clear();
+        var g = 0;
+        foreach (ref var chunk in _world.Query(in DrawableDesc))
         {
-            throw new ArgumentException($"cascadeCasters must hold at least {n} lists.", nameof(cascadeCasters));
-        }
-
-        for (var c = 0; c < n; c++)
-        {
-            ArgumentNullException.ThrowIfNull(cascadeCasters[c]);
-            cascadeCasters[c].Clear();
-        }
-
-        var origin = view.Origin;
-        foreach (ref var chunk in _world.Query(in CasterDesc))
-        {
+            var entities = chunk.Entities;
             var worlds = chunk.GetSpan<WorldTransform>();
             var positions = chunk.GetSpan<WorldPosition>();
             var bounds = chunk.GetSpan<Bounds>();
             var meshes = chunk.GetSpan<MeshRef>();
             var orders = chunk.GetSpan<RenderOrder>();
             var count = chunk.Count;
+            EnsureGatherCapacity(g + count);
             for (var i = 0; i < count; i++)
             {
                 WorldSphere(worlds[i].Value, positions[i].Value, bounds[i], out var worldCenter, out var radius);
-                var center = worldCenter.ToVector3(origin);
-                // The depth pass binds no material → MESH-major key (one instanced run per mesh).
-                var shadowKey = RenderItem.ComposeShadowSortKey(
-                    meshes[i].Mesh.Index, meshes[i].Material.Index, orders[i].Value);
-                Matrix4x4? model = null; // built once, lazily, only if this caster lands in any cascade
-                for (var c = 0; c < n; c++)
-                {
-                    if (!cascadeFrusta[c].Intersects(center, radius))
-                    {
-                        continue;
-                    }
+                var sphere = new Vector4(worldCenter.ToVector3(origin), radius);
+                var model = ComposeModel(worlds[i].Value, positions[i].Value, origin);
 
-                    model ??= ComposeModel(worlds[i].Value, positions[i].Value, origin);
-                    cascadeCasters[c].Add(new RenderItem(model.Value, meshes[i].Mesh, meshes[i].Material, shadowKey));
-                }
+                // Sorted by (material, mesh) so a run is one batch (P3-M1); carries its origin-relative sphere for
+                // the GPU cull (P3-M4). Tie-break = the stable RenderOrder (spec §6 condition b). The casts-shadow
+                // flag rides the sort so the rebuild can build the mesh-major shadow batch table (P3-M6).
+                var key = RenderItem.ComposeSortKey(
+                    meshes[i].Material.Index, meshes[i].Mesh.Index, orders[i].Value);
+                var flags = entities[i].Has<NoShadowCast>() ? 0u : SceneCandidate.FlagCastsShadow;
+                render.Add(new RenderItem(model, meshes[i].Mesh, meshes[i].Material, key, sphere, flags));
+                _gatherEntities[g++] = entities[i];
             }
         }
 
-        for (var c = 0; c < n; c++)
+        EnsureSortPermCapacity(render.Count);
+        render.SortByKey(_sortPerm.AsSpan(0, render.Count)); // into batch order; perm[i] = gather index at sorted i
+
+        persistent.Rebuild(render.Items);
+
+        _slotCount = render.Count;
+        EnsureSlotEntityCapacity(_slotCount);
+        EnsureSlotDirtyCapacity(_slotCount);
+        for (var i = 0; i < _slotCount; i++)
         {
-            cascadeCasters[c].SortByKey(); // deterministic mesh-major run order for the instanced depth draw
+            var entity = _gatherEntities[_sortPerm[i]];
+            entity.Set(new InstanceSlot { Value = i });
+            _slotEntity[i] = entity;
+        }
+
+        // The rebuild re-emitted every slot, so any pending dirty marks are subsumed.
+        for (var d = 0; d < _dirtySlots.Count; d++)
+        {
+            _slotDirty[_dirtySlots[d]] = false;
+        }
+
+        _dirtySlots.Clear();
+    }
+
+    // Incremental path (spec §6): re-emit only the slots a mutator touched this frame, each re-narrowed against the
+    // CURRENT origin (model/sphere are origin-relative; batch ids/flags are stable between rebuilds).
+    private void PatchDirtyPersistent(SceneCandidateSet persistent, Double3 origin)
+    {
+        // The set carries only THIS frame's changes: the Renderer drains them each frame and handles the
+        // cross-copy replay over FramesInFlight (spec §5, its mirror + slot countdown), so the World never
+        // re-emits an unchanged slot. Clearing here keeps the queue bounded (the 0-alloc gate).
+        persistent.ClearDirty();
+
+        for (var d = 0; d < _dirtySlots.Count; d++)
+        {
+            var slot = _dirtySlots[d];
+            var entity = _slotEntity[slot];
+            var world = entity.Get<WorldTransform>().Value;
+            var position = entity.Get<WorldPosition>().Value;
+            WorldSphere(world, position, entity.Get<Bounds>(), out var worldCenter, out var radius);
+            var sphere = new Vector4(worldCenter.ToVector3(origin), radius);
+            var model = ComposeModel(world, position, origin);
+            persistent.EnqueueDirty(slot, model, sphere);
+            _slotDirty[slot] = false;
+        }
+
+        _dirtySlots.Clear();
+    }
+
+    private void EnsureGatherCapacity(int needed)
+    {
+        if (_gatherEntities.Length < needed)
+        {
+            Array.Resize(ref _gatherEntities, Math.Max(needed, _gatherEntities.Length == 0 ? 1024 : _gatherEntities.Length * 2));
+        }
+    }
+
+    private void EnsureSortPermCapacity(int needed)
+    {
+        if (_sortPerm.Length < needed)
+        {
+            Array.Resize(ref _sortPerm, Math.Max(needed, _sortPerm.Length == 0 ? 1024 : _sortPerm.Length * 2));
+        }
+    }
+
+    private void EnsureSlotEntityCapacity(int needed)
+    {
+        if (_slotEntity.Length < needed)
+        {
+            Array.Resize(ref _slotEntity, Math.Max(needed, _slotEntity.Length == 0 ? 1024 : _slotEntity.Length * 2));
+        }
+    }
+
+    private void EnsureSlotDirtyCapacity(int needed)
+    {
+        if (_slotDirty.Length < needed)
+        {
+            Array.Resize(ref _slotDirty, Math.Max(needed, _slotDirty.Length == 0 ? 1024 : _slotDirty.Length * 2));
         }
     }
 
@@ -901,6 +978,10 @@ public sealed partial class GameWorld : IDisposable
     }
 
     internal Double3 GetWorldPosition(EntityRef entity) => Deref(entity).Get<WorldPosition>().Value;
+
+    /// <summary>Test hook (P3-M6): the drawable's persistent slot, or <c>-1</c> before its first structural
+    /// rebuild. Lets a test assert slot stability/determinism without exposing the ECS.</summary>
+    internal int SlotOf(EntityRef entity) => Deref(entity).Get<InstanceSlot>().Value;
 
     public void Dispose()
     {

@@ -83,9 +83,8 @@ public readonly struct Frustum
 
     /// <summary>
     /// Copies the six planes (each <c>(Normal.xyz, D)</c>, inward normals, normalized) into
-    /// <paramref name="dst"/> in order left, right, bottom, top, near, far. Lets
-    /// <see cref="ExtrudedShadowFrustum"/> derive the shadow-caster wedge from the camera frustum without
-    /// duplicating the Gribb-Hartmann extraction.
+    /// <paramref name="dst"/> in order left, right, bottom, top, near, far — the form the GPU culls
+    /// (<c>scene_cull.comp</c> / <c>shadow_cull.comp</c>) consume.
     /// </summary>
     public void CopyPlanes(Span<Vector4> dst)
     {

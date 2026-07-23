@@ -141,6 +141,24 @@ internal struct NoShadowCast
 }
 
 /// <summary>
+/// The drawable's index in the persistent sorted candidate buffer (P3-M6). Assigned at each structural rebuild
+/// (<see cref="GameWorld.CollectRenderLists"/>) and STABLE between rebuilds — which is what lets a per-entity
+/// dirty patch address a fixed GPU slot without re-sorting. <c>-1</c> means "not yet assigned" (a freshly spawned
+/// drawable, before the next rebuild). Present on every drawable (<c>MaterialiseDrawable</c>) and every physics
+/// body (<c>SpawnBody</c>), so the dirty-tracking mutation surfaces can read it back.
+/// <para>
+/// Stability holds precisely because <see cref="RenderOrder"/> (the sort tie-break) is position-independent; it
+/// would break the day depth enters the sort key (backlog §0), which is why that stays out of scope here.
+/// </para>
+/// </summary>
+[Component]
+[StructLayout(LayoutKind.Sequential)]
+internal struct InstanceSlot
+{
+    public int Value;
+}
+
+/// <summary>
 /// The rigid-body payload (P3-M3, linear only — no rotation/inertia in v1). <see cref="InverseMass"/> is
 /// <c>1/m</c> so an immovable body is <c>0</c> (division-free in the impulse solver); <see cref="Restitution"/>
 /// is the bounciness in [0,1]; <see cref="Radius"/> is the COLLISION radius in world metres, independent of the

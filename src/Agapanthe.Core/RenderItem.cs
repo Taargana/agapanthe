@@ -24,24 +24,35 @@ public readonly struct RenderItem
 
     /// <summary>
     /// The item's camera-relative bounding sphere (<c>xyz</c> = centre in the frame's camera-relative space,
-    /// <c>w</c> = radius), P3-M4. Carried through the sort so the GPU cull can test each candidate against the
-    /// frustum planes; a stale/parallel sphere array would desync under the radix sort. The shadow-caster list
-    /// leaves it default — the depth pass never GPU-culls (it keeps the P3-M2 two-pass wedge on the CPU).
+    /// <c>w</c> = radius), P3-M4. Carried through the sort into the persistent candidate buffer so both GPU culls
+    /// (scene against the camera frustum, shadow against the cascade frusta — P3-M6) can test each candidate; a
+    /// stale/parallel sphere array would desync under the radix sort.
     /// </summary>
     public readonly Vector4 CameraRelativeSphere;
 
+    /// <summary>
+    /// Per-item render flags carried through the sort so a structural rebuild can classify the sorted candidates
+    /// (P3-M6). Bit 0 (<see cref="SceneCandidate.FlagCastsShadow"/>) = the drawable casts a shadow (not tagged
+    /// <c>NoShadowCast</c>); the shadow batch table (mesh-major, casters only) is built from it. Copied verbatim
+    /// into <see cref="SceneCandidate.Flags"/>.
+    /// </summary>
+    public readonly uint Flags;
+
     public RenderItem(in Matrix4x4 worldTransform, MeshHandle mesh, MaterialHandle material, ulong sortKey)
-        : this(in worldTransform, mesh, material, sortKey, default)
+        : this(in worldTransform, mesh, material, sortKey, default, 0)
     {
     }
 
-    public RenderItem(in Matrix4x4 worldTransform, MeshHandle mesh, MaterialHandle material, ulong sortKey, Vector4 cameraRelativeSphere)
+    public RenderItem(
+        in Matrix4x4 worldTransform, MeshHandle mesh, MaterialHandle material, ulong sortKey,
+        Vector4 cameraRelativeSphere, uint flags = 0)
     {
         WorldTransform = worldTransform;
         Mesh = mesh;
         Material = material;
         SortKey = sortKey;
         CameraRelativeSphere = cameraRelativeSphere;
+        Flags = flags;
     }
 
     /// <summary>
@@ -70,13 +81,4 @@ public readonly struct RenderItem
             meshIndex is >= 0 and <= 0xFFFF, "meshIndex must fit in 16 bits for the sort key.");
         return ((ulong)(uint)materialIndex << 48) | ((ulong)(uint)meshIndex << 32) | tieBreak;
     }
-
-    /// <summary>
-    /// The same key with mesh and material SWAPPED, for the shadow-caster list: the depth pass binds no material,
-    /// so it batches by mesh alone. A material-major key would fragment a mesh shared by <c>k</c> materials into
-    /// <c>k</c> depth draws; a mesh-major key keeps it one contiguous run. Same tie-break, so the order stays
-    /// deterministic.
-    /// </summary>
-    public static ulong ComposeShadowSortKey(int meshIndex, int materialIndex, uint tieBreak)
-        => ComposeSortKey(meshIndex, materialIndex, tieBreak);
 }

@@ -32,14 +32,18 @@ public sealed class FrameOrchestrator
     private readonly Camera _camera;
     private readonly RenderList _render;
 
-    // CSM per-frame state (P3-M5), allocated once: the four cascade matrices, their split depths, the frusta derived
-    // from them, and one caster list per cascade. Reused every frame (the lists Clear, keeping capacity) so the
-    // shadow path stays zero-alloc.
+    // The persistent scene-candidate set (P3-M6): the World maintains it (structural rebuild vs incremental patch)
+    // from CollectRenderLists. Owned here; the GPU scene cull switches to consuming it in AW-007 (until then the
+    // _render list still drives DrawScene). Not owned by the Renderer, which stays a borrowed reference.
+    private readonly SceneCandidateSet _persistent = new();
+
+    // CSM per-frame state (P3-M5), allocated once: the four cascade matrices, their split depths, and the frusta
+    // derived from them. The frusta cross into DrawScene, where the GPU shadow cull tests the persistent candidates
+    // against them (P3-M6 — the per-cascade CPU caster lists are gone).
     private const int CascadeCount = 4;
     private readonly Matrix4x4[] _cascades = new Matrix4x4[CascadeCount];
     private readonly float[] _splits = new float[CascadeCount];
     private readonly Frustum[] _cascadeFrusta = new Frustum[CascadeCount];
-    private readonly RenderList[] _cascadeCasters;
 
     private readonly SystemScheduler _scheduler;
 
@@ -60,14 +64,6 @@ public sealed class FrameOrchestrator
         _registry = registry;
         _camera = camera;
         _render = render;
-
-        // One caster list per cascade, owned here (P3-M5): the application no longer supplies a shadow list, because
-        // how many there are is a property of the CSM, not of the app.
-        _cascadeCasters = new RenderList[CascadeCount];
-        for (var c = 0; c < CascadeCount; c++)
-        {
-            _cascadeCasters[c] = new RenderList();
-        }
 
         // The structural barrier the scheduler runs at the end of every stage IS the world's deferred-change flush
         // (P3-M2 D2): a system enqueues spawns/despawns, the barrier applies them before the next stage iterates.
@@ -179,14 +175,15 @@ public sealed class FrameOrchestrator
                 count > 2 ? splits[2] : last,
                 count > 3 ? splits[3] : last);
 
-            // Collect: scene CANDIDATES (all drawables, sorted, sphere-carrying — the camera cull runs on the GPU,
-            // P3-M4), then the casters bucketed per cascade (NoShadowCast entities excluded, P3-M5).
-            o._world.CollectRenderLists(o._render, in view);
-            o._world.CollectShadowCasters(o._cascadeFrusta.AsSpan(0, count), o._cascadeCasters, in view);
+            // Collect the scene candidates into the persistent set (structural rebuild vs incremental patch, P3-M6).
+            // The shadow casters are no longer bucketed on the CPU: the GPU shadow cull (in DrawScene) tests the same
+            // persistent candidates against the cascade frusta (P3-M6 W3 — the P3-M5 per-cascade CPU lists are gone).
+            o._world.CollectRenderLists(o._render, o._persistent, in view);
 
-            // The camera frustum crosses into DrawScene, where the compute pass culls the scene candidates against it.
+            // Both the camera frustum (scene cull) and the cascade frusta (shadow cull) cross into DrawScene, which
+            // runs both GPU culls against the persistent candidate buffer.
             o._renderer.DrawScene(
-                o._render, o._cascadeCasters, o._registry, in view, in cameraFrustum,
+                o._persistent, o._cascadeFrusta.AsSpan(0, count), o._registry, in view, in cameraFrustum,
                 cascades, splitVec, ctx.Cmd, ctx.Frame, ctx.Target);
         }
     }

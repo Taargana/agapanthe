@@ -13,46 +13,20 @@ public sealed class WorldSystemsTests
 {
     private static Vector3 Translation(Matrix4x4 m) => new(m.M41, m.M42, m.M43);
 
-    // A permissive frustum + view for tests that exercise the transform/aggregation, not the culling: it contains
-    // everything near the frame origin, so CollectRenderLists keeps every drawable. (Culling itself is covered by
-    // FrustumTests and the render-side captures.)
-    private static readonly Frustum Wide = Frustum.FromViewProjection(
-        MathHelpers.LookAt(Vector3.Zero, -Vector3.UnitZ, Vector3.UnitY)
-        * MathHelpers.OrthographicVulkan(1000f, 1000f, -500f, 500f));
-
     private static RenderView ViewAt(Double3 origin)
         => new(origin, Vector3.Zero, Matrix4x4.Identity, Matrix4x4.Identity, 1f, 1f, 0.1f, 1f);
-
-    // A real (narrow) camera frustum at the origin, looking down -Z, 60° FOV, near 0.1 / far 100.
-    private static readonly Frustum Camera = Frustum.FromViewProjection(
-        MathHelpers.LookAt(Vector3.Zero, -Vector3.UnitZ, Vector3.UnitY)
-        * MathHelpers.PerspectiveVulkan(MathF.PI / 3f, 1f, 0.1f, 100f));
-
-    // A degenerate extruded frustum (zero light direction → every plane dropped) that keeps every caster: for the
-    // tests that exercise transform/aggregation/camera-culling, not the shadow-caster tightening (P3-M1, debt #2).
-    private static readonly ExtrudedShadowFrustum AllCasters =
-        ExtrudedShadowFrustum.FromCameraFrustum(in Wide, Vector3.Zero);
 
     private static ImportedEntitySpec Drawable(Double3 position, float radius, uint order)
         => new(new MeshHandle(0, 1), new MaterialHandle(0, 1), position, Matrix4x4.Identity,
             Vector3.Zero, radius, order);
 
-    // Collect the scene candidates (all drawables — the camera cull is a GPU pass since P3-M4) and, when a caster
-    // list is wanted, the casters of ONE cascade against its light volume (the P3-M5 per-cascade cull, which
-    // replaced the P3-M2 two-pass wedge).
-    // The one-element list array is a FIELD, not a `[shadow]` collection expression: the latter allocates a fresh
-    // array on every call, which the zero-alloc test would (rightly) count against the hot path. The engine's own
-    // caster arrays are likewise allocated once, in the orchestrator.
-    private static readonly RenderList[] OneCascade = new RenderList[1];
+    // Reused (not per-call) so the zero-alloc test does not count the persistent set's warm-up growth (P3-M6).
+    private static readonly SceneCandidateSet Persistent = new();
 
-    private static void Cull(
-        GameWorld world, RenderList render, RenderList shadow, in RenderView view, in Frustum lightFrustum)
-    {
-        world.CollectRenderLists(render, in view);
-        Span<Frustum> one = stackalloc Frustum[1] { lightFrustum };
-        OneCascade[0] = shadow;
-        world.CollectShadowCasters(one, OneCascade, in view);
-    }
+    // Collect the scene candidates into the render list (all drawables — the camera cull is a GPU pass since P3-M4;
+    // the shadow cull is a GPU pass since P3-M6). Maintains the persistent set as a side effect.
+    private static void Cull(GameWorld world, RenderList render, in RenderView view)
+        => world.CollectRenderLists(render, Persistent, in view);
 
     [Fact]
     public void Propagate_Root_UsesItsOwnLocalTransform()
@@ -135,7 +109,7 @@ public sealed class WorldSystemsTests
         world.PropagateTransforms();
 
         var list = new RenderList();
-        Cull(world, list, new RenderList(), ViewAt(Double3.Zero), in Wide);
+        Cull(world, list, ViewAt(Double3.Zero));
         Assert.Equal(baked, list.Items[0].WorldTransform); // bit-for-bit unchanged
     }
 
@@ -159,10 +133,10 @@ public sealed class WorldSystemsTests
             Matrix4x4.Identity, Vector3.Zero, 0f, 0));
 
         var atOrigin = new RenderList();
-        Cull(near, atOrigin, new RenderList(), ViewAt(Double3.Zero), in Wide);
+        Cull(near, atOrigin, ViewAt(Double3.Zero));
 
         var atFar = new RenderList();
-        Cull(farAway, atFar, new RenderList(), ViewAt(far), in Wide);
+        Cull(farAway, atFar, ViewAt(far));
 
         Assert.Equal(atOrigin.Items[0].WorldTransform, atFar.Items[0].WorldTransform);
     }
@@ -255,8 +229,7 @@ public sealed class WorldSystemsTests
         world.SpawnImported(Drawable(new Double3(0, 0, 10), 2f, 1));  // behind the camera
 
         var render = new RenderList();
-        var shadow = new RenderList();
-        Cull(world, render, shadow, ViewAt(Double3.Zero), in Wide);
+        Cull(world, render, ViewAt(Double3.Zero));
 
         Assert.Equal(2, render.Count);                             // both are candidates now
         Assert.Equal(0ul, render.Items[0].SortKey);               // sorted: order 0 first
@@ -264,58 +237,6 @@ public sealed class WorldSystemsTests
         // z +10 r 2. The eye is at the origin, so camera-relative centre == world position here.
         Assert.Equal(new Vector4(0, 0, -10, 1), render.Items[0].CameraRelativeSphere);
         Assert.Equal(new Vector4(0, 0, 10, 2), render.Items[1].CameraRelativeSphere);
-        Assert.Equal(2, shadow.Count);                            // Wide light volume keeps both as casters
-    }
-
-    [Fact]
-    public void CollectShadowCasters_KeepsAnOffScreenCasterInsideTheLightVolume()
-    {
-        // Anti-popping: a caster OUTSIDE the camera frustum whose shadow still reaches the view must stay in the
-        // caster list. Since P3-M5 that is decided by the CASCADE's light volume, never by the camera frustum —
-        // here the caster sits behind the camera (+Z) but well inside the wide light volume, so it is kept.
-        using var world = new GameWorld();
-        world.SpawnImported(Drawable(new Double3(0, 0, 10), 1f, 0)); // behind the camera
-
-        var render = new RenderList();
-        var shadow = new RenderList();
-        Cull(world, render, shadow, ViewAt(Double3.Zero), in Wide);
-
-        Assert.Equal(1, render.Count);  // a scene candidate (the GPU will cull it — it is behind the camera)
-        Assert.Equal(1, shadow.Count);  // and still a shadow caster: it is inside the light volume
-    }
-
-    [Fact]
-    public void CollectShadowCasters_DropsACasterOutsideTheCascadeVolume()
-    {
-        // The per-cascade cull (P3-M5): a caster far outside the cascade's fitted light volume contributes nothing
-        // to that cascade's map and must not be drawn into it. `Camera` here stands in for a tight cascade volume.
-        using var world = new GameWorld();
-        world.SpawnImported(Drawable(new Double3(0, -100_000, -10), 1f, 0)); // far below any cascade
-
-        var render = new RenderList();
-        var shadow = new RenderList();
-        Cull(world, render, shadow, ViewAt(Double3.Zero), in Camera);
-
-        Assert.Equal(1, render.Count); // still a scene candidate (the GPU culls it)
-        Assert.Equal(0, shadow.Count); // dropped from this cascade: outside its light volume
-    }
-
-    [Fact]
-    public void CollectShadowCasters_ExcludesNoShadowCastEntities()
-    {
-        // The ground plane (P3-M5): it RECEIVES shadows but must never CAST. A drawable spawned with
-        // castsShadow:false is a scene candidate like any other, but never enters a caster list — which is what
-        // keeps a large flat receiver from self-shadowing into acne and from inflating every cascade's fit.
-        using var world = new GameWorld();
-        world.SpawnImported(Drawable(new Double3(0, 0, -10), 1f, 0));                     // a normal caster
-        world.SpawnImported(Drawable(new Double3(0, -1, -10), 50f, 1), castsShadow: false); // the "ground"
-
-        var render = new RenderList();
-        var shadow = new RenderList();
-        Cull(world, render, shadow, ViewAt(Double3.Zero), in Wide);
-
-        Assert.Equal(2, render.Count); // both are drawn
-        Assert.Equal(1, shadow.Count); // but only the caster casts
     }
 
     [Fact]
@@ -330,7 +251,7 @@ public sealed class WorldSystemsTests
         world.SpawnImported(Drawable(far + new Double3(0, 0, -10), 2f, 0));
 
         var render = new RenderList();
-        Cull(world, render, new RenderList(), ViewAt(far), in Wide);
+        Cull(world, render, ViewAt(far));
 
         Assert.Equal(1, render.Count);
         Assert.Equal(new Vector4(0, 0, -10, 2), render.Items[0].CameraRelativeSphere);
@@ -361,7 +282,6 @@ public sealed class WorldSystemsTests
         }
 
         var render = new RenderList();
-        var shadow = new RenderList();
         var spin = new TestSpin();
 
         // Warm up: first calls may grow the reused buffers (walk stack, render lists).
@@ -370,7 +290,7 @@ public sealed class WorldSystemsTests
             world.AnimateDrawables(ref spin);
             world.PropagateTransforms();
             _ = world.AggregateBounds();
-            Cull(world, render, shadow, ViewAt(Double3.Zero), in Wide);
+            Cull(world, render, ViewAt(Double3.Zero));
         }
 
         var before = GC.GetAllocatedBytesForCurrentThread();
@@ -379,7 +299,7 @@ public sealed class WorldSystemsTests
             world.AnimateDrawables(ref spin); // the W4 path — its zero-alloc must be covered too (audit Med1)
             world.PropagateTransforms();
             _ = world.AggregateBounds();
-            Cull(world, render, shadow, ViewAt(Double3.Zero), in Wide);
+            Cull(world, render, ViewAt(Double3.Zero));
         }
 
         var allocated = GC.GetAllocatedBytesForCurrentThread() - before;
