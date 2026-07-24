@@ -239,6 +239,33 @@ Spec : [2026-07-14-p3m2-scheduler-lifecycle-design.md](plans/2026-07-14-p3m2-sch
 > physique) : **[BACKLOG.md](BACKLOG.md)** — chaque item dit *ce qui casse sans lui* et *à quelle échelle il devient
 > obligatoire*.
 
+> ### ⏸️ EN INSTRUCTION — P3-M8 « premier pas planétaire » (brainstorm interrompu avant la spec)
+> Prochaine session : **reprendre l'interview de conception** (skill absolute-brainstorm) là où elle s'est arrêtée,
+> PUIS spec → review notée → board → vagues. **Rien de codé, aucun fichier de prod touché** (arbre propre sur
+> `09f6a2c`). Détail scratch (non repo-tracké, peut ne pas voyager) : `~/.claude/plans/glistening-strolling-lovelace.md`.
+> Réf : [backlog §4bis](BACKLOG.md) (échelle + découpage), ci-dessous.
+>
+> **But (backlog §4bis pas 1)** : sphère planétaire nue à l'échelle + fix du **depth range** + **jour/nuit analytique**.
+> Échelle tranchée : tailles **1/2** (Terre 3 186 km, Soleil 348 000 km), distances **1/10** (1 UA → **1,5e10 m**).
+> LOD sphérique + atmosphère = HORS scope (pas 3).
+>
+> **Décisions VERROUILLÉES pendant l'interview** :
+> 1. **Depth = reversed-Z + D32 float, frustum unique** (near→1, far→0, clear 0, comparateur **GreaterOrEqual**).
+>    Multi-frustum = repli différé ; depth-log rejeté.
+> 2. **Reversed-Z GLOBAL** (convention unique du renderer). **Rebaseline assumé** de `4848F93F` → équivalence prouvée
+>    par audit du diff, pas le hash. Touche : `GraphicsPipeline.cs:201` (comparateur codé en dur), les clears depth
+>    (`Renderer.cs:923,1118`), le **skybox** far-plane, et **vérifier que la passe d'ombre CSM ne casse pas**.
+> 3. **Scène = planète (proche) + Soleil (sphère à 1,5e10 m) dans un frustum** (le near+far simultané = stress depth réel).
+> 4. **Shading = réutiliser le PBR, zéro nouveau shader.** Contrainte humaine : **le Soleil est la SEULE lumière**.
+>    Directionnel unique (0 point light) · **environnement noir** → ambient IBL 0 + espace noir · planète = albedo
+>    (jour/nuit gratuit via `dot(N,L)`) · Soleil = **emissive** · pas de shadow map (CSM se no-op à 3e6 m).
+> 5. **Fond noir pur** au pas 1 (starfield différé, n'éclaire rien).
+>
+> **Reste à trancher (reprendre l'interview ICI)** : générateur de sphère (`Primitives` n'a que `Cube()`) ·
+> câblage `AGAPANTHE_SCENE=planet` + placement caméra + near/far concrets · gates de preuve (rendu + terminateur +
+> Soleil lointain sans z-fighting/clip ; précision double ; 0 validation/leak ; AOT ; rebaseline documenté) ·
+> forme exacte de la matrice reversed-Z · **point de vigilance : reversed-Z global vs passe d'ombre CSM**.
+
 **Point de reprise (2026-07-23, session 20)** : **P3-M7 buffers device-local + réduction du raster d'ombre 4× — CLOS.**
 Double audit PASS (`csharp-lowlevel` PASS · `graphics-3d` PASS with concerns ; 0 🔴/🟠, findings 🟡 appliqués),
 **verdict visuel humain PASS** (incl. le cas **soleil bas**, exigé par l'audit). Referme les **deux dettes perf
