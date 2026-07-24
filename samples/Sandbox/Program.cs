@@ -162,7 +162,14 @@ window.Loaded += () =>
     // loaded, its handles are global (M3), so every copy is just more entities pointing at the same GPU resources.
     // Unset / unparseable → the model once, as before.
     var sceneSpec = Environment.GetEnvironmentVariable("AGAPANTHE_SCENE");
-    var planetScene = string.Equals(sceneSpec, "planet", StringComparison.OrdinalIgnoreCase);
+    // VS-1: AGAPANTHE_SAVE=<path> snapshots the world after the scene is built; AGAPANTHE_LOAD=<path> restores it
+    // instead of spawning. The Option 1 seam contract holds because both runs load the SAME assets in the same order
+    // (the planet/Sun spheres) before applying the snapshot — the serialized handles then still resolve. Load forces
+    // the planet scene (the vertical-slice anchor): the assets are loaded but the entities come from the snapshot.
+    var savePath = Environment.GetEnvironmentVariable("AGAPANTHE_SAVE");
+    var loadPath = Environment.GetEnvironmentVariable("AGAPANTHE_LOAD");
+    var loadMode = loadPath is { Length: > 0 };
+    var planetScene = loadMode || string.Equals(sceneSpec, "planet", StringComparison.OrdinalIgnoreCase);
     var (rows, cols) = ParseGrid(sceneSpec);
     var dropCount = ParseDrop(sceneSpec);
     bool multiInstance;
@@ -175,8 +182,17 @@ window.Loaded += () =>
     var planetSunOrigin = Double3.Zero;
     if (planetScene)
     {
+        // In load mode we still load the assets (so the snapshot's handles resolve — Option 1) but skip spawning;
+        // world.Load below repopulates the entities from the snapshot.
         (planetSunTravelDir, planetRadius, planetSunOrigin) = SetupPlanetScene(
-            device, registry, world, renderer.MaterialSetLayout, worldOrigin);
+            device, registry, world, renderer.MaterialSetLayout, worldOrigin, spawnEntities: !loadMode);
+        if (loadMode)
+        {
+            using var loadStream = File.OpenRead(loadPath!);
+            world.Load(loadStream);
+            Log.Info($"Sandbox: [VS-1] world restored from '{loadPath}'.");
+        }
+
         multiInstance = true;
     }
     else if (dropCount > 0)
@@ -360,6 +376,18 @@ window.Loaded += () =>
         {
             Log.Error($"Sandbox: HDRI environment '{iblHdrPath}' not found; the M7 renderer requires one to draw.");
         }
+    }
+
+    // VS-1: snapshot the fully-built world to disk. Save flushes any pending structural change first, so this is a
+    // settled world. Placed after the scene is populated; a subsequent run with AGAPANTHE_LOAD restores it verbatim.
+    if (savePath is { Length: > 0 })
+    {
+        using (var saveStream = File.Create(savePath))
+        {
+            world.Save(saveStream);
+        }
+
+        Log.Info($"Sandbox: [VS-1] world saved to '{savePath}' ({world.LiveEntityCount} entities).");
     }
 
     // The scene clear color lives on the Renderer now (it owns the scene pass); the FrameRenderer only
@@ -1018,7 +1046,8 @@ static ModelAsset BuildSphereModel(float radius, MaterialAsset material, string 
 // side and empty space. Returns the Sun→planet travel direction, the planet's radius, and the Sun's world origin so the
 // caller can place the camera and the light. Scale = 1/2 of reality, UNIFORM (sizes AND distances; overridable by env var).
 static (Vector3 SunTravelDir, double PlanetRadius, Double3 SunOrigin) SetupPlanetScene(
-    GraphicsDevice device, ResourceRegistry registry, GameWorld world, DescriptorSetLayout materialLayout, Double3 planetOrigin)
+    GraphicsDevice device, ResourceRegistry registry, GameWorld world, DescriptorSetLayout materialLayout,
+    Double3 planetOrigin, bool spawnEntities = true)
 {
     // Scale = 1/2 of reality, UNIFORM (sizes AND distances) — so the Sun keeps its true angular size (~0.53° from
     // the planet); a non-uniform factor would blow it up. All three derived from the real value ÷2:
@@ -1047,9 +1076,12 @@ static (Vector3 SunTravelDir, double PlanetRadius, Double3 SunOrigin) SetupPlane
     };
     var (_, planetSpecs) = registry.Load(
         device, BuildSphereModel((float)planetRadius, planetMaterial, "Planet", 128, 64), materialLayout, planetOrigin);
-    foreach (var s in planetSpecs)
+    if (spawnEntities)
     {
-        world.SpawnImported(in s, castsShadow: false); // CSM no-ops at 3e6 m; the night comes from dot(N,L)
+        foreach (var s in planetSpecs)
+        {
+            world.SpawnImported(in s, castsShadow: false); // CSM no-ops at 3e6 m; the night comes from dot(N,L)
+        }
     }
 
     // Sun: strongly emissive (self-lit), so it reads as a bright disc regardless of the (zero) ambient and its own
@@ -1065,9 +1097,12 @@ static (Vector3 SunTravelDir, double PlanetRadius, Double3 SunOrigin) SetupPlane
     };
     var (_, sunSpecs) = registry.Load(
         device, BuildSphereModel((float)sunRadius, sunMaterial, "Sun", 64, 32), materialLayout, sunOrigin);
-    foreach (var s in sunSpecs)
+    if (spawnEntities)
     {
-        world.SpawnImported(in s, castsShadow: false);
+        foreach (var s in sunSpecs)
+        {
+            world.SpawnImported(in s, castsShadow: false);
+        }
     }
 
     var sunAngularDeg = 2.0 * Math.Atan(sunRadius / sunDistance) * 180.0 / Math.PI;

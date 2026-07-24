@@ -25,6 +25,17 @@ try
         Console.Error.WriteLine($"AotComponentProbe: FAIL — query iterated {iterated}, expected >= 9.");
         return 1;
     }
+
+    // VS-1: prove the save/load round-trip (per-component Add<T> dispatch + MemoryMarshal blittable paths) survives
+    // NativeAOT and is byte-identical. A fresh world, so its identity counter is independent of the smoke above.
+    using var serWorld = new GameWorld();
+    var restored = serWorld.AotSerializationSmoke();
+    Console.WriteLine($"AotSerializationSmoke restored {restored} entities (byte-identical round-trip).");
+    if (restored < 5) // 3 drawables/body + 2 hierarchy nodes
+    {
+        Console.Error.WriteLine($"AotComponentProbe: FAIL — serialization restored {restored}, expected >= 5.");
+        return 1;
+    }
 }
 catch (Exception ex)
 {

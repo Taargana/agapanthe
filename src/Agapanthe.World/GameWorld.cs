@@ -983,6 +983,22 @@ public sealed partial class GameWorld : IDisposable
     /// rebuild. Lets a test assert slot stability/determinism without exposing the ECS.</summary>
     internal int SlotOf(EntityRef entity) => Deref(entity).Get<InstanceSlot>().Value;
 
+    /// <summary>Test hook (VS-1): the next identity the world will assign. Lets a round-trip test assert the counter
+    /// is restored by <see cref="Load"/> without exposing the ECS.</summary>
+    internal ulong NextGlobalIdForTest => _nextGlobalId;
+
+    /// <summary>The number of flushed, live entities (VS-1). Public: a save/load caller or HUD reports it, and a
+    /// round-trip test asserts it survives serialization — without touching the ECS.</summary>
+    public int LiveEntityCount => _live.Count;
+
+    /// <summary>Test hook (VS-1): the GlobalId of an entity's parent, or 0 if it has none. Lets a round-trip test
+    /// assert the hierarchy link survived serialization (which stores it as a GlobalId, not an Arch Entity).</summary>
+    internal ulong ParentIdForTest(EntityRef entity)
+    {
+        var e = Deref(entity);
+        return e.Has<Parent>() ? e.Get<Parent>().Value.Get<GlobalId>().Value : 0;
+    }
+
     public void Dispose()
     {
         if (_disposed)

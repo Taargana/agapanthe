@@ -310,9 +310,15 @@ path, tests verts, NativeAOT PASS, GPU==CPU) :
 5. *(stretch, opportuniste)* **un cue audio** sur un événement (spawn / save).
 
 **Découpage** (ordre de dépendance ; chaque item = un jalon P3-Mx, spec + board + double audit + verdict comme d'hab) :
-- **VS-1 — Sérialisation** (source-gen, **partage le générateur du rooting AOT**, §4) : save/load du `World` (entités,
-  composants, transforms `Double3`) round-trip fidèle. **La plus grosse pièce manquante**, et le prérequis dur de la DoD.
-  *Mord : sans elle, « univers persistant » reste une affirmation.*
+- ~~**VS-1 — Sérialisation**~~ ✅ **livrée session 22** (double audit PASS, verdict humain PASS). `GameWorld.Save/Load(Stream)`,
+  format **binaire blittable déterministe** (byte-identique cross-process), remap `Parent` par GlobalId, compteur restauré.
+  **Correction de cadrage** : *pas de générateur source-gen* (les composants sont blittables → bulk-copy sans réflexion ;
+  le « partage le générateur du rooting AOT » supposait un rooting source-generated qui n'a jamais existé — le rooting est
+  écrit à la main). **Seam GPU = handles reproductibles** (Option 1) : le caller recharge les mêmes assets d'abord.
+  *Dette léguée* : la `Generation` des handles n'est pas validée au load → un **ordre de chargement d'assets différent
+  casse en silence**. Correctif futur non bloquant (streaming/prefabs) : un **fingerprint d'assets** (hash count/ordre)
+  fourni par le caller dans le header transformerait le mauvais-asset-silencieux en erreur dure, sans casser le
+  GPU-free du World. *Mord : le jour où l'ordre/le set d'assets chargés varie entre save et load.*
 - **VS-2 — Spawn runtime** (`SpawnBodyDeferred` + `CommandKind.SpawnBody`, le `StructuralCommand` fat portant
   vitesse/masse/restitution/rayon — dette P3-M3, §4). Débloque tout contenu dynamique créé en cours de simulation.
 - **VS-3 — Couche gameplay minimale** : un système `Stage.Simulation` qui câble input → spawn/act → une règle d'état

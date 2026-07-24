@@ -253,21 +253,34 @@ Spec : [2026-07-23-p3m8-planetary-first-step-design.md](plans/2026-07-23-p3m8-pl
 - 🟠 **Ombres planétaires analytiques** (backlog §2.2) : au pas 1 le CSM se no-op à 3e6 m (nuit = `dot(N,L)`) ; les éclipses/terminateur avancé viennent avec l'atmosphère (backlog §3, §4bis pas 3).
 - Suite planétaire (backlog §4bis) : orbites képlériennes (pas 2), LOD sphérique + atmosphère (pas 3).
 
+## VS-1 — Sérialisation du World (save/load snapshot) (2026-07-24, session 22)
+
+Spec : [2026-07-24-vs1-world-serialization-design.md](plans/2026-07-24-vs1-world-serialization-design.md). **Premier jalon de la Vertical Slice** (backlog §4ter) — la **preuve de persistance** (DoD item 3) : `world.Save(Stream)` / `world.Load(Stream)`, round-trip **byte-identique, déterministe, AOT-pur, 0 leak**, et la scène planète qui se recharge à l'identique dans un **process neuf**.
+
+**Format binaire blittable** (`WorldSerialization.cs`, partial `GameWorld` — GPU-free, aucun type Arch ne fuit) : header `AGWD`/version/componentCount/nextGlobalId/entityCount, puis chaque entité **triée par GlobalId** (ordre total → save déterministe) avec un `presenceMask` u32 sur l'ordre `ComponentRegistry.All` et les octets blittables de chaque composant présent, **sauf `InstanceSlot`** (runtime, réassigné au rebuild) et **`Parent` écrit comme le GlobalId du parent** (l'`Entity` Arch est un handle mémoire non-persistable). Dispatch par-composant = 3 switches concrets (Has/Write/ReadAdd) → **AOT-safe** (instanciations statiquement visibles), `MemoryMarshal` + `BinaryPrimitives` LE. **Décisions** (spec §3, déléguées à Claude) : **seam GPU = handles reproductibles** (Option 1 : le caller recharge les mêmes assets d'abord ; clés d'asset stables déférées), **pas de générateur** (blittable → ni réflexion ni source-gen — le « un seul générateur » du backlog supposait un rooting source-generated inexistant), style écrit-à-la-main de `ComponentRegistry`.
+
+**Load** (World frais) : header vérifié → `_nextGlobalId` restauré **sans bump** ; passe 1 create avec le GlobalId sérialisé + `InstanceSlot=-1` sur les drawables ; passe 2 `LinkParent` par GlobalId (réutilise l'existant) ; `_structuralDirty=true`. Arch clé les archétypes par **ensemble** de composants → `Create+Add` reconstruit exactement l'archétype d'origine. Robustesse : magic/version/count/**tronqué (EOF)**/**mask hors-plage**/World non vide/**GlobalId dupliqué** → `WorldSerializationException` typée.
+
+**Intégration Sandbox** : `AGAPANTHE_SAVE=<path>` (snapshot après build de scène) / `AGAPANTHE_LOAD=<path>` (force scène planète, charge les assets puis `SetupPlanetScene(spawnEntities:false)` + `world.Load` — contrat Option 1). `GameWorld.LiveEntityCount` public.
+
+**Gates** : **346 tests** (round-trip tous archétypes, **byte-identique `Save(Load(bytes))==bytes`**, remap Parent, déterminisme, 7 cas d'erreur, garde d'ordre + garde ≤32), 0 warning, 0 validation, 0 leak, **AOT probe PASS** (`AotSerializationSmoke`, `IsDynamicCodeSupported=False`), **round-trip cross-process byte-identique JIT+AOT** (`0034af33…`, save planète 2 entités / 314 o → reload process neuf). **Double audit PASS** (`csharp-lowlevel` 0 🔴/🟠 · `engine-architect` 1 🟠 + 6 🟡, tous appliqués : garde ≤32, garde GlobalId dupliqué, doc endianness, invariants commentés, `.gitignore`). **Verdict humain fonctionnel PASS.**
+
+**Dette / notée** : source-unique émergente (le triple switch DUPLIQUE l'ordre du registre — gardé par le test d'ordre figé + `Save` qui lève sur index inconnu, mais pas une table unique) · `GlobalId` sérialisé ×2 (clé + composant 0, inoffensif) · **Generation d'Option 1 non exploitée** (un ordre de chargement d'assets différent casse en silence — futur *fingerprint d'assets* fourni par le caller, backlog) · garde fresh-world plus permissive que « fraîchement construit » (inoffensif, `Load` écrase l'état stale).
+
 ## Reprise — où repartir
 
 > Trajectoire long terme (CSM, rendu GPU-driven, nuages volumétriques, atmosphère, ombres planétaires analytiques,
 > physique) : **[BACKLOG.md](BACKLOG.md)** — chaque item dit *ce qui casse sans lui* et *à quelle échelle il devient
 > obligatoire*.
 
-> ### ▶️ PROCHAIN — Vertical Slice, jalon **VS-1 (sérialisation)**
-> **P3-M8 est CLOS** (session 21, double audit PASS, verdict visuel PASS ; bloc détaillé ci-dessus). Cap formalisé :
-> **[Vertical Slice, backlog §4ter](BACKLOG.md)** — preuve d'intégration, **ancre planétaire**, Windows d'abord.
-> Décisions d'ancrage tranchées (humain, S21) : ancre planétaire/spatial · ambition **preuve d'intégration** (pas de
-> mini-jeu jouable) · **P3-M0 (Linux) non bloquant**. La slice consomme, dans l'ordre de dépendance :
-> **VS-1 sérialisation** (source-gen, **partage le générateur du rooting AOT** — la grosse pièce, prérequis dur) →
-> **VS-2 spawn runtime** (`SpawnBodyDeferred` + `CommandKind.SpawnBody`, dette P3-M3) → VS-3 glu gameplay → VS-4 HUD →
-> VS-5 audio (stretch). **Commencer par VS-1** : ouvrir l'interview de conception (absolute-brainstorm) sur la
-> sérialisation du `World` (save/load round-trip fidèle des entités/composants/transforms `Double3`).
+> ### ▶️ PROCHAIN — Vertical Slice, jalon **VS-2 (spawn runtime)**
+> **VS-1 sérialisation CLOSE** (session 22, double audit PASS, verdict humain PASS ; bloc ci-dessus). Cap :
+> **[Vertical Slice, backlog §4ter](BACKLOG.md)** — preuve d'intégration, ancre planétaire, Windows d'abord.
+> Prochain dans l'ordre de dépendance : **VS-2 spawn runtime** — `SpawnBodyDeferred` + `CommandKind.SpawnBody` (le
+> `StructuralCommand` fat portant vitesse/masse/restitution/rayon), dette P3-M3 : aujourd'hui `SpawnBody` est
+> **immédiat** (seam load-time), il faut un spawn de corps **différé** applicable en cours de simulation (projectiles/
+> débris/sonde larguée). Puis VS-3 glu gameplay → VS-4 HUD → VS-5 audio (stretch). **P3-M0 (Linux) non bloquant.**
+> Ouvrir l'interview de conception (absolute-brainstorm) sur VS-2.
 
 **Point de reprise (2026-07-23, session 20)** : **P3-M7 buffers device-local + réduction du raster d'ombre 4× — CLOS.**
 Double audit PASS (`csharp-lowlevel` PASS · `graphics-3d` PASS with concerns ; 0 🔴/🟠, findings 🟡 appliqués),

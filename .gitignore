@@ -12,6 +12,8 @@ artifacts/
 # Session-local temp captures/scripts (never pushed)
 scratchpad_run/
 TestResults/
+*.ppm
+*.sav
 
 # Installed absolute-* skills (local tooling, not project source)
 .agents/skills/
