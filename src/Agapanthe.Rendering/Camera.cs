@@ -70,8 +70,10 @@ public sealed class Camera
     /// <summary>Unit up vector of the camera basis, <c>cross(right, forward)</c>.</summary>
     public Vector3 Up => Vector3.Cross(Right, Forward);
 
-    /// <summary>Vulkan perspective projection (Y flipped, depth [0,1]).</summary>
-    public Matrix4x4 ProjectionMatrix => MathHelpers.PerspectiveVulkan(FovY, AspectRatio, Near, Far);
+    /// <summary>Vulkan reversed-Z perspective projection (P3-M8): Y flipped, near→1 / far→0. Paired with the D32
+    /// float depth target cleared to 0 and the camera passes' <c>GreaterOrEqual</c> test, it spreads depth precision
+    /// across a planetary near/far range without z-fighting. The shadow pass keeps standard depth (see ShadowFit).</summary>
+    public Matrix4x4 ProjectionMatrix => MathHelpers.PerspectiveVulkanReversed(FovY, AspectRatio, Near, Far);
 
     /// <summary>
     /// The frame's <see cref="RenderView"/> (M4): the camera-relative origin is this camera's position

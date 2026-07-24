@@ -22,6 +22,26 @@ public static class MathHelpers
     }
 
     /// <summary>
+    /// Reversed-Z perspective for Vulkan (P3-M8): like <see cref="PerspectiveVulkan"/> but the near plane maps to
+    /// NDC z = 1 and the far plane to z = 0. Paired with a float depth buffer and a <c>GreaterOrEqual</c> depth
+    /// test, this spreads depth precision near-uniformly across a huge near/far ratio — the fix that lets a surface
+    /// at 1 m and a body at 1e10 m share one frustum without z-fighting.
+    /// <para>
+    /// Derived from the standard matrix by the clip-space transform <c>z → w − z</c> (so NDC z inverts while x/y/w
+    /// are untouched): in the row-vector matrix that is column 3 ← column 4 − column 3, i.e. <c>M33 = −1 − M33</c>
+    /// and <c>M43 = −M43</c> (M13/M23 are already 0). Exact for any near/far — no reconstruction of the depth terms
+    /// by hand.
+    /// </para>
+    /// </summary>
+    public static Matrix4x4 PerspectiveVulkanReversed(float fovYRadians, float aspect, float near, float far)
+    {
+        var m = PerspectiveVulkan(fovYRadians, aspect, near, far);
+        m.M33 = -1f - m.M33;
+        m.M43 = -m.M43;
+        return m;
+    }
+
+    /// <summary>
     /// Right-handed, centred orthographic projection for Vulkan: depth [0, 1], Y flipped so world +Y
     /// maps to up on screen despite Vulkan's Y-down clip space. Same convention as
     /// <see cref="PerspectiveVulkan"/>.

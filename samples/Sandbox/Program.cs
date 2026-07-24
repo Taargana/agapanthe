@@ -162,11 +162,24 @@ window.Loaded += () =>
     // loaded, its handles are global (M3), so every copy is just more entities pointing at the same GPU resources.
     // Unset / unparseable → the model once, as before.
     var sceneSpec = Environment.GetEnvironmentVariable("AGAPANTHE_SCENE");
+    var planetScene = string.Equals(sceneSpec, "planet", StringComparison.OrdinalIgnoreCase);
     var (rows, cols) = ParseGrid(sceneSpec);
     var dropCount = ParseDrop(sceneSpec);
     bool multiInstance;
     double? physicsGroundY = null; // set by drop mode: the Y of the collision plane AND the rendered ground quad
-    if (dropCount > 0)
+    // P3-M8: the planet scene builds its OWN entities (planet + Sun spheres in Double3), ignoring the loaded glTF —
+    // it is the near+far reversed-Z stress bench, not a model viewer. Set below so the camera/light/env branches
+    // configure it for sun-only lighting instead of the studio/outdoor defaults.
+    var planetSunTravelDir = Vector3.Zero;
+    var planetRadius = 0d;
+    var planetSunOrigin = Double3.Zero;
+    if (planetScene)
+    {
+        (planetSunTravelDir, planetRadius, planetSunOrigin) = SetupPlanetScene(
+            device, registry, world, renderer.MaterialSetLayout, worldOrigin);
+        multiInstance = true;
+    }
+    else if (dropCount > 0)
     {
         physicsGroundY = SpawnDropScene(world, specs, dropCount, worldOrigin);
         multiInstance = true;
@@ -197,13 +210,22 @@ window.Loaded += () =>
     sceneBounds = world.AggregateBounds();
 
     // Frame the model: sit the camera back by 1.5x the diagonal along a slightly-raised front direction,
-    // orient yaw/pitch to look at the centre.
-    FrameCamera(camera, controller, renderer, in sceneBounds);
+    // orient yaw/pitch to look at the centre. The planet scene frames on the PLANET only (its bounds include the
+    // Sun at 7.48e10 m, which would push the camera a hundred million km away), and picks a reversed-Z near/far that
+    // holds both the planet surface and the distant Sun.
+    if (planetScene)
+    {
+        FramePlanetCamera(camera, controller, renderer, worldOrigin, planetSunOrigin, planetRadius, planetSunTravelDir);
+    }
+    else
+    {
+        FrameCamera(camera, controller, renderer, in sceneBounds);
+    }
 
     // Bench: put the camera INSIDE the scene, looking along -Z, so the frustum sees only a forward wedge and
     // culling has most of the grid to reject (the exit criterion wants << all visible). near/far span the local
     // neighbourhood, not the whole grid.
-    if (benchMode)
+    if (benchMode && !planetScene)
     {
         var (center, diagonal) = NarrowBounds(in sceneBounds);
         camera.Position = center;
@@ -224,7 +246,7 @@ window.Loaded += () =>
     // MODEL, not the (much larger) floor. AGAPANTHE_GROUND=0 removes it, which is what the precision captures want
     // (they compare against pre-ground baselines).
     var groundSpawned = false;
-    if (Environment.GetEnvironmentVariable("AGAPANTHE_GROUND") is not "0" && !sceneBounds.IsEmpty)
+    if (!planetScene && Environment.GetEnvironmentVariable("AGAPANTHE_GROUND") is not "0" && !sceneBounds.IsEmpty)
     {
         var extent = sceneBounds.Max - sceneBounds.Min;
         var span = Math.Max(Math.Max(extent.X, extent.Z), 1e-3);
@@ -264,7 +286,39 @@ window.Loaded += () =>
     // attenuation then paints a brightness gradient across the crowd ("each helmet has its own
     // light"). The sun + IBL are physically consistent across the whole grid; the studio rig is a
     // single-model showcase only.
-    SetupLights(renderer.Lights, in sceneBounds, multiInstance);
+    if (planetScene)
+    {
+        // The Sun is a plasma SPHERE and the ONLY emitter, so the light must physically radiate FROM it: a point
+        // light co-located with the Sun entity (inverse-square), NOT an abstract directional vector. At 7.48e10 m the
+        // rays reach the planet near-parallel — the same crisp terminator a directional would give — but the light is
+        // now TIED to the Sun's position (move the Sun and the day side follows). Floats keep the terminator sharp:
+        // the huge intensity × tiny 1/d² preserves RELATIVE precision through the multiply regardless of magnitude.
+        // The Sun's own surface stays purely emissive: its normals face outward, so dot(N, L) < 0 for a light at its
+        // centre → the point light adds nothing to it.
+        var sunDist = Double3.Distance(worldOrigin, planetSunOrigin);
+        const float targetIrradiance = 3.5f; // the lit-side radiance at the planet (matches the earlier directional)
+        renderer.Lights.Points[0] = new PointLight
+        {
+            Position = planetSunOrigin,
+            Color = new Vector3(1f, 0.97f, 0.92f),
+            Intensity = (float)(targetIrradiance * sunDist * sunDist), // I / d² = target irradiance at the planet
+            Range = 0f, // no cutoff window — the Sun lights the whole system
+        };
+        renderer.Lights.PointCount = 1;
+        // Keep a valid direction for ShadowFit (it reads Directional.Direction), but zero intensity so the directional
+        // emits nothing — all light comes from the Sun point light above.
+        renderer.Lights.Directional = new DirectionalLight
+        {
+            Direction = planetSunTravelDir,
+            Color = Vector3.One,
+            Intensity = 0f,
+        };
+        renderer.Lights.Ambient = Vector3.Zero; // black space → zero IBL AND zero constant ambient
+    }
+    else
+    {
+        SetupLights(renderer.Lights, in sceneBounds, multiInstance);
+    }
 
     // The environment (M7): the renderer needs one before it can draw — the ambient and the skybox both sample it.
     // AGAPANTHE_HDRI=<path> always wins. Otherwise: with the ground on, an OUTDOOR sky, generated procedurally; with
@@ -276,7 +330,15 @@ window.Loaded += () =>
     // ground the way the shadow expects.
     // </para>
     var hdriOverride = Environment.GetEnvironmentVariable("AGAPANTHE_HDRI");
-    if (hdriOverride is { Length: > 0 } && File.Exists(hdriOverride))
+    if (planetScene)
+    {
+        // Black space: zero IBL ambient + a black skybox. With the Sun as the only emitter this is what makes the
+        // night side truly dark and the background empty (P3-M8 decision 4/5).
+        renderer.SetEnvironment(BuildBlackEnvironment());
+        renderer.ClearColor = (0f, 0f, 0f, 1f);
+        Log.Info("Sandbox: environment = black space (sun-only).");
+    }
+    else if (hdriOverride is { Length: > 0 } && File.Exists(hdriOverride))
     {
         renderer.SetEnvironment(HdrImageLoader.Load(hdriOverride));
         Log.Info($"Sandbox: environment '{hdriOverride}'.");
@@ -903,6 +965,158 @@ static ModelAsset BuildGroundModel(float size)
     };
 }
 
+// A sphere ModelAsset at a given RADIUS (baked into the local vertex positions, so the entity needs no scale
+// transform and its bounds sphere is exactly the radius). Reuses Primitives.UvSphere (P3-M8 AW-003) and splits its
+// interleaved Vertex[] into the SoA arrays MeshAsset wants; the ushort indices are widened to the u32 DTO contract.
+// Baking the radius keeps the whole thing in the frame's camera-relative float space: a body 3 186 km across placed
+// at its Double3 origin has local coords up to ±3.186e6, whose float ULP (~0.25 m) is invisible on a planet.
+static ModelAsset BuildSphereModel(float radius, MaterialAsset material, string name, int segments = 128, int rings = 64)
+{
+    var (verts, idx) = Primitives.UvSphere(segments, rings);
+    var positions = new Vector3[verts.Length];
+    var normals = new Vector3[verts.Length];
+    var tangents = new Vector4[verts.Length];
+    var uvs = new Vector2[verts.Length];
+    for (var i = 0; i < verts.Length; i++)
+    {
+        positions[i] = verts[i].Position * radius; // unit sphere → actual radius
+        normals[i] = verts[i].Normal;              // scale is uniform, so the normal is unchanged
+        tangents[i] = verts[i].Tangent;
+        uvs[i] = verts[i].Uv;
+    }
+
+    var indices = new uint[idx.Length];
+    for (var i = 0; i < idx.Length; i++)
+    {
+        indices[i] = idx[i];
+    }
+
+    var mesh = new MeshAsset
+    {
+        Positions = positions,
+        Normals = normals,
+        Tangents = tangents,
+        Uvs = uvs,
+        Indices = indices,
+        MaterialIndex = 0,
+        Name = name,
+    };
+
+    return new ModelAsset
+    {
+        Meshes = [mesh],
+        Materials = [material],
+        Images = [],
+        Name = name,
+    };
+}
+
+// P3-M8 planetary scene (AGAPANTHE_SCENE=planet): a planet at the world origin and the Sun as an emissive sphere at
+// 7.48e10 m, both in Double3 — the second reference scene, and the one that finally exercises the double/camera-relative
+// foundations end to end (near planet surface + far Sun in one reversed-Z frustum). The Sun is the ONLY light — a point
+// light co-located with the Sun sphere (set by the caller); a black environment (set later) gives a truly dark night
+// side and empty space. Returns the Sun→planet travel direction, the planet's radius, and the Sun's world origin so the
+// caller can place the camera and the light. Scale = 1/2 of reality, UNIFORM (sizes AND distances; overridable by env var).
+static (Vector3 SunTravelDir, double PlanetRadius, Double3 SunOrigin) SetupPlanetScene(
+    GraphicsDevice device, ResourceRegistry registry, GameWorld world, DescriptorSetLayout materialLayout, Double3 planetOrigin)
+{
+    // Scale = 1/2 of reality, UNIFORM (sizes AND distances) — so the Sun keeps its true angular size (~0.53° from
+    // the planet); a non-uniform factor would blow it up. All three derived from the real value ÷2:
+    //   Earth mean radius 6 371 km → 3 185.5 km · Sun radius 696 340 km → 348 170 km · 1 AU 1.496e11 m → 7.48e10 m.
+    var planetRadius = EnvDouble("AGAPANTHE_PLANET_RADIUS", 6_371_000d / 2d);
+    var sunRadius = EnvDouble("AGAPANTHE_SUN_RADIUS", 696_340_000d / 2d);
+    var sunDistance = EnvDouble("AGAPANTHE_SUN_DISTANCE", 1.495_978_707e11 / 2d);
+
+    // Direction FROM the planet TO the Sun. The default puts the Sun mostly ahead (-Z) and to the side/up, so the
+    // camera (placed opposite by the caller) sees a lit crescent with a smooth terminator and the Sun disc near the
+    // limb — a side-lit half disc and the Sun cannot share one narrow frame (the Sun would then be ~90° off-axis).
+    var sunFromPlanet = Vector3.Normalize(EnvVector3("AGAPANTHE_SUN_DIR", new Vector3(0.55f, 0.25f, -0.8f)));
+    var sunOrigin = planetOrigin + new Double3(new Vector3(
+        (float)(sunFromPlanet.X * sunDistance),
+        (float)(sunFromPlanet.Y * sunDistance),
+        (float)(sunFromPlanet.Z * sunDistance)));
+
+    // Planet: a plain albedo material (blue-green). PBR then gives the day/night for free — albedo·max(dot(N,L),0),
+    // a smooth terminator, and a black night side once the ambient is zeroed.
+    var planetMaterial = new MaterialAsset
+    {
+        BaseColorFactor = new Vector4(0.16f, 0.42f, 0.62f, 1f),
+        MetallicFactor = 0f,
+        RoughnessFactor = 0.9f,
+        Name = "PlanetSurface",
+    };
+    var (_, planetSpecs) = registry.Load(
+        device, BuildSphereModel((float)planetRadius, planetMaterial, "Planet", 128, 64), materialLayout, planetOrigin);
+    foreach (var s in planetSpecs)
+    {
+        world.SpawnImported(in s, castsShadow: false); // CSM no-ops at 3e6 m; the night comes from dot(N,L)
+    }
+
+    // Sun: strongly emissive (self-lit), so it reads as a bright disc regardless of the (zero) ambient and its own
+    // orientation to the light. A near-black albedo keeps the lit side from adding a second tone.
+    var sunMaterial = new MaterialAsset
+    {
+        BaseColorFactor = new Vector4(0.02f, 0.02f, 0.02f, 1f),
+        MetallicFactor = 0f,
+        RoughnessFactor = 1f,
+        EmissiveFactor = new Vector3(1f, 0.95f, 0.85f),
+        EmissiveStrength = 40f, // HDR: well above 1 so the ACES tonemap still leaves it a bright white-hot disc
+        Name = "SunSurface",
+    };
+    var (_, sunSpecs) = registry.Load(
+        device, BuildSphereModel((float)sunRadius, sunMaterial, "Sun", 64, 32), materialLayout, sunOrigin);
+    foreach (var s in sunSpecs)
+    {
+        world.SpawnImported(in s, castsShadow: false);
+    }
+
+    var sunAngularDeg = 2.0 * Math.Atan(sunRadius / sunDistance) * 180.0 / Math.PI;
+    Log.Info(
+        $"Sandbox: [scene] planet radius {planetRadius / 1000:F0} km @ origin, Sun radius {sunRadius / 1000:F0} km " +
+        $"@ {sunDistance:E2} m (1/2 real scale, Sun subtends {sunAngularDeg:F2}°; sun-only lighting, black space).");
+
+    // The light TRAVELS from the Sun to the planet, i.e. opposite the planet→Sun direction.
+    return (-sunFromPlanet, planetRadius, sunOrigin);
+}
+
+// Reads a scalar env var as a double (invariant culture), falling back to a default. For the planet scene's
+// configurable scale factors.
+static double EnvDouble(string name, double fallback)
+    => Environment.GetEnvironmentVariable(name) is { } s
+       && double.TryParse(s, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var v)
+        ? v : fallback;
+
+// Reads an "x,y,z" env var as a Vector3, falling back to a default.
+static Vector3 EnvVector3(string name, Vector3 fallback)
+{
+    if (Environment.GetEnvironmentVariable(name) is { } s)
+    {
+        var p = s.Split(',');
+        if (p.Length == 3
+            && float.TryParse(p[0], System.Globalization.CultureInfo.InvariantCulture, out var x)
+            && float.TryParse(p[1], System.Globalization.CultureInfo.InvariantCulture, out var y)
+            && float.TryParse(p[2], System.Globalization.CultureInfo.InvariantCulture, out var z))
+        {
+            var v = new Vector3(x, y, z);
+            // A zero vector would Normalize to NaN downstream (sun direction) and blank the screen with no diagnostic
+            // (audit P3-M8 🟡-2). Reject it back to the (valid) fallback.
+            if (v.LengthSquared() >= 1e-12f)
+            {
+                return v;
+            }
+
+            Log.Warn($"Sandbox: {name}='{s}' is a zero vector; using the default direction.");
+        }
+    }
+
+    return fallback;
+}
+
+// A pure-black environment (P3-M8): every texel zero, so the IBL bakes to zero ambient and the skybox paints empty
+// space black. This is the mechanism that makes the Sun the SOLE light — no cubemap radiance anywhere else.
+static HdrImageAsset BuildBlackEnvironment()
+    => new() { RgbaPixels = new float[16 * 8 * 4], Width = 16, Height = 8 };
+
 // An outdoor sky as an equirectangular HDR, generated at load — no asset to ship, and physically consistent with
 // the sun the scene actually uses (<paramref name="sunDirection"/> is the light's propagation direction, so the sun
 // disc goes at -sunDirection). Linear radiance, values well above 1 around the sun: that is what makes the IBL read
@@ -1355,6 +1569,52 @@ static void FrameCamera(Camera camera, FreeCameraController controller, Renderer
     // distant helmets. Keeping the old 50 m would silently brake the CSM at a quarter of its range.
     // </para>
     renderer.ShadowDistance = MathF.Max(MathF.Max(diagonal * 4f, 1f), renderer.Cascades.MaxDistance);
+}
+
+// Frames the P3-M8 planet scene: places the camera a few planet radii out, on the far side from the Sun and tilted
+// off the Sun–planet axis, so it sees a lit crescent with a smooth terminator AND the Sun disc just clear of the
+// limb (a side-lit half disc and a distant Sun cannot share one narrow frame — the Sun would sit ~90° off-axis).
+// The reversed-Z near/far spans from just above the surface to past the Sun in ONE frustum — the whole point of the
+// milestone. Everything overridable by env var for headless tuning.
+static void FramePlanetCamera(
+    Camera camera, FreeCameraController controller, Renderer renderer,
+    Double3 planetOrigin, Double3 sunOrigin, double planetRadius, Vector3 sunTravelDir)
+{
+    // Direction from the planet toward the camera. The Sun is opposite the light's travel direction, so the far
+    // (unlit-facing) side is +sunTravelDir; tilting off that axis (right + up) reveals the crescent.
+    // Geometry constraint: for the Sun to be IN FRAME the camera must look TOWARD it, which puts it on the planet's
+    // anti-Sun side — so it necessarily sees the night hemisphere (a crescent). The only free parameter is how far
+    // OFF the pure backlit axis we tilt (`beta`): a bigger tilt fattens the crescent (more day side creeps into
+    // view) and slides the Sun toward the frame edge. Cap beta under the (wide) horizontal FOV so the Sun stays in.
+    var backDir = Vector3.Normalize(sunTravelDir); // camera sits here: the anti-Sun side, dark hemisphere toward us
+    var worldUp = MathF.Abs(backDir.Y) > 0.95f ? Vector3.UnitX : Vector3.UnitY;
+    var right = Vector3.Normalize(Vector3.Cross(backDir, worldUp));
+    var up = Vector3.Cross(right, backDir);
+    var beta = (float)(EnvDouble("AGAPANTHE_PLANET_PHASE", 40.0) * MathF.PI / 180.0);
+    var side = Vector3.Normalize((right * 0.9f) + (up * 0.35f)); // tilt mostly sideways, a little up
+    var camDir = Vector3.Normalize((backDir * MathF.Cos(beta)) + (side * MathF.Sin(beta)));
+
+    var altMul = (float)EnvDouble("AGAPANTHE_PLANET_ALT", 3.4); // camera distance from planet centre, in radii
+    var distance = planetRadius * altMul;
+    camera.Position = planetOrigin + new Double3(new Vector3(
+        (float)(camDir.X * distance), (float)(camDir.Y * distance), (float)(camDir.Z * distance)));
+
+    var forward = -camDir; // look back at the planet centre (and the Sun beyond)
+    camera.Pitch = MathF.Asin(Math.Clamp(forward.Y, -1f, 1f));
+    camera.Yaw = MathF.Atan2(forward.X, -forward.Z);
+    camera.FovY = (float)(EnvDouble("AGAPANTHE_PLANET_FOV", 70.0) * MathF.PI / 180.0);
+
+    // Reversed-Z spans a huge range with a small near plane: from just above the surface to past the Sun. This is the
+    // near+far stress the milestone exists to prove — a standard depth buffer would z-fight the surface to mush here.
+    camera.Near = (float)MathF.Max((float)(planetRadius * 0.01), 100f);
+    camera.Far = (float)(Double3.Distance(planetOrigin, sunOrigin) * 1.4);
+
+    // No shadow map at this scale (CSM cascades ≤ a few hundred metres no-op against a 3e6 m body); keep the range
+    // bounded so the caster cull has nothing to chew on.
+    renderer.ShadowDistance = 1f;
+
+    // Travel speed scaled so crossing the planet takes a few seconds; sprint (shift) is 3×.
+    controller.MoveSpeed = (float)(planetRadius * 0.5);
 }
 
 file static class DebugViews

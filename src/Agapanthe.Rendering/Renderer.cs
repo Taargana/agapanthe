@@ -1115,7 +1115,7 @@ public sealed class Renderer : IDisposable
             {
                 Target = new RenderTargetView(depth),
                 LoadOp = AttachmentLoadAction.Clear,
-                ClearDepth = 1f,
+                ClearDepth = 0f, // reversed-Z (P3-M8): far = 0, nearer fragments hold larger depth (GreaterOrEqual)
             },
             Width = target.Width,
             Height = target.Height,

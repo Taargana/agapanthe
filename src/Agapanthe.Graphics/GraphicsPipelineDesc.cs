@@ -16,6 +16,18 @@ public enum CullMode
 }
 
 /// <summary>
+/// Depth comparison a fragment must pass to be kept. <see cref="LessOrEqual"/> is the standard depth convention
+/// (smaller = nearer); <see cref="GreaterOrEqual"/> is reversed-Z (larger = nearer, paired with a float depth
+/// buffer cleared to 0) — P3-M8's fix for a planetary near/far range. Kept per-pipeline so the camera passes can
+/// go reversed-Z while the shadow pass stays on its own standard-depth convention.
+/// </summary>
+public enum DepthCompare
+{
+    LessOrEqual,
+    GreaterOrEqual,
+}
+
+/// <summary>
 /// Everything needed to build a graphics pipeline, decoupled from Vulkan types. Replaces the
 /// M1 hard-coded triangle constructor so pipelines can declare vertex input, descriptor set
 /// layouts, push constants and depth state (spec §3.4).
@@ -43,6 +55,11 @@ public sealed class GraphicsPipelineDesc
 
     public bool DepthTest { get; init; }
     public bool DepthWrite { get; init; } = true;
+
+    /// <summary>Depth comparison op. Defaults to <see cref="DepthCompare.LessOrEqual"/> (standard depth) so existing
+    /// pipelines are unchanged; camera passes opt into reversed-Z with <see cref="DepthCompare.GreaterOrEqual"/>.</summary>
+    public DepthCompare DepthCompare { get; init; } = DepthCompare.LessOrEqual;
+
     public CullMode Cull { get; init; } = CullMode.Back;
     public FrontFace FrontFace { get; init; } = FrontFace.CounterClockwise;
 

@@ -48,6 +48,8 @@ internal sealed class ScenePass : ReloadablePass
             ColorFormat = _colorFormat,
             DepthFormat = _depthFormat,
             DepthTest = true,
+            // Reversed-Z (P3-M8): camera projection is PerspectiveVulkanReversed, depth cleared to 0, nearer = larger.
+            DepthCompare = DepthCompare.GreaterOrEqual,
             // glTF winding is CCW viewed from outside; PerspectiveVulkan bakes the Y-flip so a world-CCW
             // triangle is classified CounterClockwise by Vulkan's front-face formula (M5 debugging).
             FrontFace = FrontFace.CounterClockwise,

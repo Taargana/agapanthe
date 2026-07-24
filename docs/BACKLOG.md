@@ -7,7 +7,7 @@
 > Règle de tri : chaque item dit **ce qui casse sans lui** et **à quelle échelle il devient obligatoire**. Un item sans
 > déclencheur clair est une idée, pas du backlog.
 
-Dernière mise à jour : 2026-07-14 (session 14, après P3-M1).
+Dernière mise à jour : 2026-07-24 (session 21 — échelle planétaire 1/2 uniforme, **§4ter Vertical Slice** formalisée).
 
 ---
 
@@ -249,32 +249,85 @@ les fondations `double` + camera-relative + origine quantifiée ont été constr
 - 🟠 **Atmosphère + terminateur** (§3) : c'est ce qui fait qu'une planète *ressemble* à une planète. Sans ça, une
   sphère texturée reste une balle.
 
-**✅ Décision (humain, session 18) : DEUX facteurs distincts — un pour les tailles, un pour les distances.**
-C'est le bon arbitrage, parce que la scène sert deux objectifs qui tirent en sens inverse :
-- **objectif de test** — de *grandes coordonnées absolues*, c'est tout l'intérêt (stresser `double` + depth) ;
-- **objectif d'usage** — une planète *atteignable et visible*, sinon on regarde un point pendant tout le trajet.
+**✅ Décision (humain, session 21) : UN facteur unique — 1/2 de la réalité, tailles ET distances.**
+Remplace la décision « deux facteurs » de la session 18 (ci-dessous, gardée pour le raisonnement). Motif : un facteur
+uniforme **conserve la taille angulaire réelle** des corps — le Soleil vu de la planète fait **~0,53°** (comme le vrai
+depuis la Terre), au lieu d'être grossi ×5 par un 1/10 en distance. Une étoile est une **sphère de plasma physique** et
+doit *paraître* à sa vraie taille.
 
-Un facteur unique force à sacrifier l'un des deux. Deux facteurs laissent garder des distances énormes (la valeur
-de test) tout en rapprochant les corps de l'observateur (la valeur d'usage).
-
-**Point de départ proposé** (à caler à la construction, ce sont des molettes, pas des constantes gravées) :
-| | Facteur | Résultat |
+| | Facteur | Résultat (réel ÷ 2) |
 |---|---|---|
-| **Tailles** (rayons) | **1/2** | Terre **3 186 km**, Soleil **348 000 km** |
-| **Distances** (orbites) | **1/10** | 1 UA → **1,5e10 m** |
+| **Rayon planète** | **1/2** | Terre 6 371 km → **3 185,5 km** |
+| **Rayon Soleil** | **1/2** | Soleil 696 340 km → **348 170 km** |
+| **Distance (1 UA)** | **1/2** | 1,496e11 m → **7,48e10 m** |
 
-Ça donne ~4 700 rayons terrestres entre la Terre et le Soleil (contre **23 480** à l'échelle réelle) : **5× plus
-compact**, tout en gardant des coordonnées à `1e10` m — soit exactement le régime qu'on veut éprouver
-(ULP `double` ≈ **2 µm** à cette distance : encore très confortable). *Le rapport tailles/distances est le vrai
-bouton de « game feel » ; le rendre configurable dès le départ évitera de le regretter.*
+Coordonnées à `7,5e10` m (ULP `double` ≈ **17 µm** — très confortable ; le snap d'origine 1024 m sans effet). Les trois
+valeurs sont dérivées du réel÷2 dans le code (constantes/env vars `AGAPANTHE_PLANET_*`/`AGAPANTHE_SUN_*`).
+
+> **Décision superseded (session 18) — DEUX facteurs (tailles 1/2, distances 1/10), gardée pour mémoire.** L'idée était
+> de servir deux objectifs contraires : *test* (grandes coordonnées absolues) et *usage* (planète atteignable/visible),
+> qu'un facteur unique semblait sacrifier. En pratique 1/2 uniforme garde des coordonnées à `1e10` m (la valeur de test)
+> ET la fidélité physique ; l'« atteignabilité » est réglée par la **vitesse de déplacement** mise à l'échelle, pas par
+> une distorsion de la distance.
 
 **Découpage réaliste** (ce n'est pas un jalon, c'est une petite phase) :
-1. **Sphère planétaire nue à l'échelle** + fix du **depth range** (reversed-Z / multi-frustum) + jour/nuit
-   analytique. *Prouve la précision et le depth à `1e11` m — l'essentiel du risque, sans terrain.* ⇦ **commencer ici**
+1. ~~**Sphère planétaire nue à l'échelle** + fix du **depth range** (reversed-Z) + jour/nuit analytique~~ ✅ **P3-M8**
+   (session 21) : `Primitives.UvSphere`, `AGAPANTHE_SCENE=planet` (planète + Soleil sphère émissive à 7,48e10 m en
+   `Double3`), **reversed-Z** global + comparateur depth par pipeline (shadow pass découplée), **point light
+   co-localisée avec la sphère-Soleil** (la lumière part physiquement de l'étoile). *Depth + précision prouvés à
+   `7,5e10` m dans un frustum, sans z-fighting. Verdict visuel + double audit en cours.*
 2. Orbites képlériennes + échelle temporelle (le système bouge).
 3. LOD sphérique (dépend du terrain §5) + atmosphère (§3).
 
 *Mord : c'est la scène qui valide — ou infirme — la thèse « fondations pour un univers persistant » de la Phase 2.*
+
+## 4ter. Vertical Slice — preuve d'intégration (ancre planétaire) *(cible instruite, session 21)*
+
+> **Ce que c'est.** Le premier chemin **de bout en bout, mince mais complet**, qui prouve qu'on peut *faire un jeu* avec
+> ce moteur — pas une démo jolie, une **preuve d'intégration**. La roadmap Phase 3 avance par jalons de *capacité*
+> (P3-M0…M8) ; la vertical slice est le **capstone transversal** qui les fait tenir ensemble sur un cas réel.
+
+**Décisions d'ancrage (humain, session 21) :**
+- **Ancre = planétaire / spatial.** Prolonge P3-M8 : une caméra/sonde qu'on pilote autour de la planète et du Soleil à
+  l'échelle 1/2, qu'on approche, avec des éléments **dynamiques spawns au runtime**. C'est le *payoff d'usage* de la
+  scène §4bis, et la mise à l'épreuve grandeur nature de `double` + camera-relative + reversed-Z.
+- **Ambition = preuve d'intégration** (pas de mini-jeu jouable). On prouve que `input → simulation → règle → rendu →
+  save/load` tient de bout en bout ; le *fun* n'est pas l'objectif. Dette de scope minimale, gameplay délibérément mince.
+- **Plateforme = Windows d'abord** (JIT + NativeAOT). **P3-M0 (Linux/macOS) n'est PAS un gate dur** de la slice — il
+  est débloqué dès qu'une machine est dispo, mais n'empêche pas le « done » Windows.
+
+**Definition of Done** (le chemin qui DOIT tourner, gates habituels : 0 validation, 0 leak, 0 alloc/frame sur le hot
+path, tests verts, NativeAOT PASS, GPU==CPU) :
+1. Boot dans la scène planétaire (P3-M8) ; **free-fly** autour de planète + Soleil à l'échelle, précision stable à
+   `7,5e10` m (déjà acquis).
+2. Au moins **un élément dynamique spawné au runtime** pendant la simulation (pas au load) qui se comporte selon une
+   **règle minimale** (p. ex. une sonde larguée qui tombe/orbite localement) — prouve le spawn différé + la physique
+   sous mouvement réel.
+3. **Sauvegarder l'état du monde sur disque puis le recharger** de façon fidèle (round-trip vérifié) — la preuve de
+   persistance, cœur de la thèse Phase 2.
+4. **HUD minimal** à l'écran : coordonnées `double` courantes, nombre d'entités, état save/load (au-delà de la barre
+   de titre debug actuelle).
+5. *(stretch, opportuniste)* **un cue audio** sur un événement (spawn / save).
+
+**Découpage** (ordre de dépendance ; chaque item = un jalon P3-Mx, spec + board + double audit + verdict comme d'hab) :
+- **VS-1 — Sérialisation** (source-gen, **partage le générateur du rooting AOT**, §4) : save/load du `World` (entités,
+  composants, transforms `Double3`) round-trip fidèle. **La plus grosse pièce manquante**, et le prérequis dur de la DoD.
+  *Mord : sans elle, « univers persistant » reste une affirmation.*
+- **VS-2 — Spawn runtime** (`SpawnBodyDeferred` + `CommandKind.SpawnBody`, le `StructuralCommand` fat portant
+  vitesse/masse/restitution/rayon — dette P3-M3, §4). Débloque tout contenu dynamique créé en cours de simulation.
+- **VS-3 — Couche gameplay minimale** : un système `Stage.Simulation` qui câble input → spawn/act → une règle d'état
+  simple sur la scène planétaire. La glu d'intégration, volontairement fine (pas de prefabs/pooling — différés §4).
+- **VS-4 — HUD minimal** : lecture d'état à l'écran (réutilise ou étend la barre de titre debug ; un overlay texte
+  simple suffit).
+- **VS-5 — Audio** *(stretch)* : un cue opportuniste.
+- **Prérequis externe non bloquant** : **P3-M0** (validation Linux/macOS) — à faire dès machine dispo, hors gate slice.
+
+**Ce qui reste explicitement HORS slice** (pour ne pas élargir le scope) : orbites képlériennes (§4bis pas 2), LOD
+sphérique + atmosphère (§4bis pas 3), prefabs/pooling (§4), mini-jeu jouable (ambition supérieure), toute UI au-delà du
+HUD de lecture.
+
+*Mord : c'est le jalon qui transforme « un moteur avec des fondations » en « un moteur avec lequel on a fait tourner un
+monde de bout en bout ». Tant qu'il n'a pas tourné, l'intégration des sous-systèmes reste théorique.*
 
 ## 5. Confort / qualité d'image (opportuniste)
 

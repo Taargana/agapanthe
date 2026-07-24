@@ -55,4 +55,91 @@ public static class Primitives
 
         return (vertices, indices);
     }
+
+    /// <summary>
+    /// Unit UV-sphere centered at the origin, radius 1 (P3-M8 planetary bodies — the model transform scales it to a
+    /// planet or the Sun). <paramref name="segments"/> longitude slices × <paramref name="rings"/> latitude stacks;
+    /// the grid is <c>(rings+1)×(segments+1)</c> vertices with a duplicated longitude seam so U wraps 0→1 cleanly.
+    /// Normals are analytic (= normalized position), tangents run along +U (increasing longitude), winding is CCW
+    /// viewed from outside — same front-face convention as <see cref="Cube"/>. Color is white so the material albedo
+    /// alone drives the look. Indices are <c>ushort</c>: the default 128×64 gives 8385 vertices, well under 65 535.
+    /// The pole rows collapse to a single point, so the top/bottom triangle fans are degenerate (zero-area) — cheap
+    /// and harmless; an icosphere would avoid them (deferred, backlog §5).
+    /// </summary>
+    public static (Vertex[] Vertices, ushort[] Indices) UvSphere(int segments = 128, int rings = 64)
+    {
+        if (segments < 3)
+        {
+            throw new ArgumentOutOfRangeException(nameof(segments), segments, "A sphere needs at least 3 longitude segments.");
+        }
+
+        if (rings < 2)
+        {
+            throw new ArgumentOutOfRangeException(nameof(rings), rings, "A sphere needs at least 2 latitude rings.");
+        }
+
+        // Indices are ushort, so the vertex grid must fit in 65 536. Fail loudly rather than let the (ushort) casts
+        // below wrap silently into a corrupt mesh (audit P3-M8 🟡-1). The default 128×64 = 8385 is well clear.
+        var vertexCount = (long)(rings + 1) * (segments + 1);
+        if (vertexCount > ushort.MaxValue + 1)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(segments),
+                $"Tessellation {segments}×{rings} yields {vertexCount} vertices, over the ushort index limit ({ushort.MaxValue + 1}).");
+        }
+
+        var cols = segments + 1;
+        var vertices = new Vertex[(rings + 1) * cols];
+        var color = new Vector3(1f, 1f, 1f);
+
+        for (var i = 0; i <= rings; i++)
+        {
+            // phi: 0 at the +Y pole → PI at the -Y pole (latitude).
+            var phi = MathF.PI * i / rings;
+            var sinPhi = MathF.Sin(phi);
+            var cosPhi = MathF.Cos(phi);
+
+            for (var j = 0; j <= segments; j++)
+            {
+                // theta: 0 → 2PI around +Y (longitude). The last column (j == segments) repeats theta = 0 to close
+                // the seam with its own U = 1, so texturing wraps without sharing vertices.
+                var theta = MathF.Tau * j / segments;
+                var sinTheta = MathF.Sin(theta);
+                var cosTheta = MathF.Cos(theta);
+
+                var position = new Vector3(sinPhi * cosTheta, cosPhi, sinPhi * sinTheta);
+                // On the unit sphere the outward normal is the position itself.
+                var normal = position;
+                // dP/dtheta ∝ (-sinTheta, 0, cosTheta): the +U (longitude) direction. Handedness +1 so
+                // bitangent = cross(N, T) points along +V (toward the -Y pole, increasing phi).
+                var tangent = new Vector4(-sinTheta, 0f, cosTheta, 1f);
+                var uv = new Vector2((float)j / segments, (float)i / rings);
+
+                vertices[(i * cols) + j] = new Vertex(position, color, normal, uv, tangent);
+            }
+        }
+
+        var indices = new ushort[rings * segments * 6];
+        var n = 0;
+        for (var i = 0; i < rings; i++)
+        {
+            for (var j = 0; j < segments; j++)
+            {
+                var tl = (ushort)((i * cols) + j);
+                var tr = (ushort)((i * cols) + j + 1);
+                var bl = (ushort)(((i + 1) * cols) + j);
+                var br = (ushort)(((i + 1) * cols) + j + 1);
+
+                // CCW seen from outside (geometric normal ∥ outward vertex normals).
+                indices[n++] = tl;
+                indices[n++] = br;
+                indices[n++] = bl;
+                indices[n++] = tl;
+                indices[n++] = tr;
+                indices[n++] = br;
+            }
+        }
+
+        return (vertices, indices);
+    }
 }

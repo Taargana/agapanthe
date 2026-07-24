@@ -34,10 +34,12 @@ internal sealed class SkyboxPass : ReloadablePass
             SetLayouts = [_setLayout],
             ColorFormat = _colorFormat,
             DepthFormat = _depthFormat,
-            // Test against the scene depth but never write: the far-plane triangle (z=w=1) passes the
-            // LessOrEqual test only where the cleared background depth (1.0) survived, i.e. no geometry.
+            // Reversed-Z (P3-M8): the far plane is now z = 0 and the depth clear is 0, so the background triangle
+            // (forced to gl_Position.z = 0 in skybox.vert) passes GreaterOrEqual only where no geometry wrote a
+            // larger (nearer) depth. Never writes depth.
             DepthTest = true,
             DepthWrite = false,
+            DepthCompare = DepthCompare.GreaterOrEqual,
             Cull = CullMode.None,
         });
 }

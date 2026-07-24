@@ -233,38 +233,41 @@ Spec : [2026-07-14-p3m2-scheduler-lifecycle-design.md](plans/2026-07-14-p3m2-sch
 - 🟠 Verdict visuel humain P3-M1 **et** P3-M2 encore dus (P3-M2 bit-identique → non bloquant pour la clôture technique).
 - (Report P3-M1 : cull GPU = `DrawIndexedIndirect` + `drawIndirectFirstInstance` ; slots persistants dirty-trackés ; `SortKey` sans profondeur ; plafond 16 bits mesh/matériau.)
 
+## P3-M8 — Premier pas planétaire : reversed-Z + sphère + scène planète/Soleil à l'échelle (2026-07-24, session 21)
+
+Spec : [2026-07-23-p3m8-planetary-first-step-design.md](plans/2026-07-23-p3m8-planetary-first-step-design.md). La **seconde scène de référence** (à côté de la grille de casques) : une planète et un Soleil à l'échelle **1/2 uniforme** (réel÷2 : planète 3 185,5 km, Soleil 348 170 km, distance **7,48e10 m**), qui met enfin à l'épreuve ce pour quoi les fondations `double`/camera-relative ont été bâties — surface planétaire (~1e7 m) et Soleil (7,48e10 m) **dans un seul frustum, sans z-fighting**.
+
+**Le blocage structurel soldé — reversed-Z global.** `MathHelpers.PerspectiveVulkanReversed` (dérivation clip-space exacte `z→w−z` : `M33=−1−M33 ; M43=−M43`) mappe near→NDC 1, far→NDC 0 ; couplé au depth **D32 float** cleared à 0 et au test **`GreaterOrEqual`**, il répartit la précision quasi-uniformément sur un ratio near/far planétaire. **Comparateur depth par pipeline** (`GraphicsPipelineDesc.DepthCompare`, défaut `LessOrEqual` back-compat) : passes caméra (Scene, Skybox) en `GreaterOrEqual`, **passe d'ombre laissée en `LessOrEqual`** → **le CSM est totalement découplé** (ShadowFit reconstruit ses coins depuis les scalaires `FovY/near/far`, jamais depuis la matrice ; `Frustum` label-swap near↔far mais volume identique → culling invariant, prouvé par audit).
+
+**La scène (`AGAPANTHE_SCENE=planet`).** `Primitives.UvSphere` (sphère unité, normales analytiques, tangentes longitude, winding CCW, `ushort` avec garde d'overflow) → `BuildSphereModel` (rayon baké dans les positions locales) → planète (albedo bleu-vert) + Soleil (emissive fort) en `Double3`. **Sun-only, physiquement fidèle** : le Soleil est une **sphère de plasma = seule lumière**, donc une **point light co-localisée avec l'entité Soleil** (inverse-carré, `I = irradiance·d²` ; la lumière part physiquement de l'étoile, pas d'un vecteur abstrait) ; **env noir** (`BuildBlackEnvironment` → IBL 0 + skybox noir) ; ambient 0. À 7,48e10 m les rayons arrivent quasi-parallèles → terminateur net, mais lié à la position du Soleil. La surface du Soleil reste purement émissive (ses normales pointent dehors → `dot(N,L)<0` depuis son centre → la point light ne l'éclaire pas). Échelle 1/2 uniforme = **taille angulaire réelle du Soleil (~0,53°)**.
+
+**Mesures / gates** : **333 tests verts**, 0 warning, 0 message de validation, 0 leak, **NativeAOT PASS**, **GPU==CPU MATCH** (casque/grille 401, planète 2), **0 alloc/frame**. Captures headless casque + grille (rebaselinées sous reversed-Z, verdict visuel humain PASS — pas de régression) + scène planète (croissant + terminateur lisse, nuit noire, Soleil disque lointain sans z-fighting, fond noir). **Rebaseline assumé** : le hash mono/grille change sous reversed-Z ; équivalence prouvée par **audit du diff** (culling invariant, aucun z-test inversé) + verdict visuel, jamais masquée. Env vars : `AGAPANTHE_PLANET_{RADIUS,PHASE,ALT,FOV}`, `AGAPANTHE_SUN_{DIR,RADIUS,DISTANCE}`.
+
+**Double audit de clôture** — les deux **PASS**, 0 🔴/🟠 :
+- `csharp-lowlevel` **PASS** : 0 alloc/frame préservé (tout le code allocateur est load-time), chemins AOT-purs, ressources GPU possédées/libérées, **précision point light saine** (I≈2e22 sans overflow, 1/d²≈1.8e-22 sans underflow, `Range=0` désactive le cutoff). 2 🟡 **appliqués** (garde overflow `ushort` dans `UvSphere` + test ; fallback vecteur nul dans `EnvVector3`).
+- `graphics-3d` **PASS** : matrice reversed-Z exacte, comparateur par pipeline correct, **culling invariant sous reversed-Z** (labels near/far échangés, volume identique, AND symétrique → 0 faux-négatif — le risque n°1 écarté), CSM confirmé insensible, skybox/z-fighting sains. 1 🟡 **appliqué** (commentaires d'échelle périmés `7,48e10`/`1/2 uniforme`) ; 1 🟡 **noté, aucune action** (garde normalisation `Frustum` `1e-8` conservatrice + pré-existante, hors régime de la scène — mord seulement à un near sub-mètre).
+
+**Dette ouverte / notée** :
+- 🔴 **Linux/macOS toujours jamais validés** (P3-M0), premier item de fond.
+- 🟡 **Garde normalisation `Frustum` (`Frustum.cs:105`)** : un near sub-mètre avec far≈1e11 rendrait le plan far non normalisé (conservateur — jamais de faux-négatif) ; à traiter si un near < 1 m apparaît.
+- 🟠 **Ombres planétaires analytiques** (backlog §2.2) : au pas 1 le CSM se no-op à 3e6 m (nuit = `dot(N,L)`) ; les éclipses/terminateur avancé viennent avec l'atmosphère (backlog §3, §4bis pas 3).
+- Suite planétaire (backlog §4bis) : orbites képlériennes (pas 2), LOD sphérique + atmosphère (pas 3).
+
 ## Reprise — où repartir
 
 > Trajectoire long terme (CSM, rendu GPU-driven, nuages volumétriques, atmosphère, ombres planétaires analytiques,
 > physique) : **[BACKLOG.md](BACKLOG.md)** — chaque item dit *ce qui casse sans lui* et *à quelle échelle il devient
 > obligatoire*.
 
-> ### ⏸️ EN INSTRUCTION — P3-M8 « premier pas planétaire » (brainstorm interrompu avant la spec)
-> Prochaine session : **reprendre l'interview de conception** (skill absolute-brainstorm) là où elle s'est arrêtée,
-> PUIS spec → review notée → board → vagues. **Rien de codé, aucun fichier de prod touché** (arbre propre sur
-> `09f6a2c`). Détail scratch (non repo-tracké, peut ne pas voyager) : `~/.claude/plans/glistening-strolling-lovelace.md`.
-> Réf : [backlog §4bis](BACKLOG.md) (échelle + découpage), ci-dessous.
->
-> **But (backlog §4bis pas 1)** : sphère planétaire nue à l'échelle + fix du **depth range** + **jour/nuit analytique**.
-> Échelle tranchée : tailles **1/2** (Terre 3 186 km, Soleil 348 000 km), distances **1/10** (1 UA → **1,5e10 m**).
-> LOD sphérique + atmosphère = HORS scope (pas 3).
->
-> **Décisions VERROUILLÉES pendant l'interview** :
-> 1. **Depth = reversed-Z + D32 float, frustum unique** (near→1, far→0, clear 0, comparateur **GreaterOrEqual**).
->    Multi-frustum = repli différé ; depth-log rejeté.
-> 2. **Reversed-Z GLOBAL** (convention unique du renderer). **Rebaseline assumé** de `4848F93F` → équivalence prouvée
->    par audit du diff, pas le hash. Touche : `GraphicsPipeline.cs:201` (comparateur codé en dur), les clears depth
->    (`Renderer.cs:923,1118`), le **skybox** far-plane, et **vérifier que la passe d'ombre CSM ne casse pas**.
-> 3. **Scène = planète (proche) + Soleil (sphère à 1,5e10 m) dans un frustum** (le near+far simultané = stress depth réel).
-> 4. **Shading = réutiliser le PBR, zéro nouveau shader.** Contrainte humaine : **le Soleil est la SEULE lumière**.
->    Directionnel unique (0 point light) · **environnement noir** → ambient IBL 0 + espace noir · planète = albedo
->    (jour/nuit gratuit via `dot(N,L)`) · Soleil = **emissive** · pas de shadow map (CSM se no-op à 3e6 m).
-> 5. **Fond noir pur** au pas 1 (starfield différé, n'éclaire rien).
->
-> **Reste à trancher (reprendre l'interview ICI)** : générateur de sphère (`Primitives` n'a que `Cube()`) ·
-> câblage `AGAPANTHE_SCENE=planet` + placement caméra + near/far concrets · gates de preuve (rendu + terminateur +
-> Soleil lointain sans z-fighting/clip ; précision double ; 0 validation/leak ; AOT ; rebaseline documenté) ·
-> forme exacte de la matrice reversed-Z · **point de vigilance : reversed-Z global vs passe d'ombre CSM**.
+> ### ▶️ PROCHAIN — Vertical Slice, jalon **VS-1 (sérialisation)**
+> **P3-M8 est CLOS** (session 21, double audit PASS, verdict visuel PASS ; bloc détaillé ci-dessus). Cap formalisé :
+> **[Vertical Slice, backlog §4ter](BACKLOG.md)** — preuve d'intégration, **ancre planétaire**, Windows d'abord.
+> Décisions d'ancrage tranchées (humain, S21) : ancre planétaire/spatial · ambition **preuve d'intégration** (pas de
+> mini-jeu jouable) · **P3-M0 (Linux) non bloquant**. La slice consomme, dans l'ordre de dépendance :
+> **VS-1 sérialisation** (source-gen, **partage le générateur du rooting AOT** — la grosse pièce, prérequis dur) →
+> **VS-2 spawn runtime** (`SpawnBodyDeferred` + `CommandKind.SpawnBody`, dette P3-M3) → VS-3 glu gameplay → VS-4 HUD →
+> VS-5 audio (stretch). **Commencer par VS-1** : ouvrir l'interview de conception (absolute-brainstorm) sur la
+> sérialisation du `World` (save/load round-trip fidèle des entités/composants/transforms `Double3`).
 
 **Point de reprise (2026-07-23, session 20)** : **P3-M7 buffers device-local + réduction du raster d'ombre 4× — CLOS.**
 Double audit PASS (`csharp-lowlevel` PASS · `graphics-3d` PASS with concerns ; 0 🔴/🟠, findings 🟡 appliqués),
@@ -329,6 +332,7 @@ le cull d'ombre n'a pas de readback GPU==CPU (asymétrie avec la scène, dette d
 | P3-M5 | **CSM** (4 cascades, atlas 2×2, `NoShadowCast`) | S18 | Ombres nettes près **et** loin ; les 4 artefacts du constat P3-M4 corrigés |
 | P3-M6 | **Slots persistants dirty-trackés + cull d'ombre GPU** | S19 | Le CPU ne re-trie/re-upload plus tout (chemin incrémental O(dirty)) ; le cull d'ombre quitte le CPU (12 Mo managés disparus) — double audit PASS, verdict visuel PASS |
 | P3-M7 | **Buffers device-local + réduction raster d'ombre 4×** | S20 | Les buffers GPU quittent l'host-visible (PCIe) ; le raster d'ombre passe de ~4× à ~1×/caster — A+B ~15,3 → ~8,0 ms (≈ ×2), double audit PASS, verdict visuel PASS (incl. soleil bas) |
+| P3-M8 | **Premier pas planétaire (reversed-Z + sphère + scène planète/Soleil 1/2)** | S21 | Surface planétaire + Soleil à 7,48e10 m dans **un** frustum sans z-fighting ; reversed-Z global découplé du CSM ; Soleil = sphère de plasma = seule lumière (point light co-localisée) — double audit PASS, verdict visuel PASS |
 
 **Ouverts, par ordre de recommandation** (chaque ligne dit *ce qui casse sans lui*) :
 
@@ -341,16 +345,21 @@ le cull d'ombre n'a pas de readback GPU==CPU (asymétrie avec la scène, dette d
    les 10k candidats par frame). *Mord : déjà au banc, et à 40k il domine.*
 3. 🟠 **Terrain** ([backlog §5](BACKLOG.md)) — le sol est un quad plat. Prérequis de **beaucoup** : ray marching
    pour les ombres lointaines (§2.3, la piste retenue avec l'humain), relief au soleil rasant, scènes crédibles.
-4. 🟠 **Scène de test « planète / système solaire à l'échelle 1/2 »** ([backlog §4bis](BACKLOG.md), demande humaine
-   S18) — la **seconde scène de référence**, à côté de la grille de casques. C'est le banc qui met enfin à l'épreuve
-   ce pour quoi les fondations `double` + camera-relative ont été construites. **Premier pas isolable et payant** :
-   sphère planétaire nue à l'échelle + **fix du depth range** (reversed-Z / multi-frustum — `near/far ≈ 1e11` ne
-   passe pas en une passe) + jour/nuit analytique. Le LOD sphérique et l'atmosphère viennent après (dépendent du
-   terrain). *Attention : la précision `double` tient (ULP ≈ 17 µm à `7,5e10` m) — c'est le **depth buffer** qui
-   casse en premier.*
+4. ~~🟠 **Scène de test « planète / système solaire à l'échelle 1/2 »**~~ ✅ **pas 1 livré en P3-M8** (S21) : sphère
+   planétaire à l'échelle **1/2 uniforme** + **reversed-Z** (le depth range à `near/far ≈ 1e11` soldé) + jour/nuit
+   par `dot(N,L)` d'une point light co-localisée avec la sphère-Soleil. La précision `double` a tenu (ULP ≈ 17 µm à
+   `7,5e10` m), c'était bien le depth qui cassait — et il est réglé. **Suite** (backlog §4bis) : orbites képlériennes
+   (pas 2), LOD sphérique + atmosphère (pas 3). *La scène planète est désormais l'ancre de la [Vertical Slice §4ter](BACKLOG.md).*
 5. 🟡 **PCSS** ([backlog §2.1bis](BACKLOG.md)) — pénombre à largeur variable, partage la sélection de cascade
    avec le CSM tout juste livré. Qualité pure, pas de dette remboursée.
 6. 🟡 **Sérialisation source-gen** (partage le générateur du rooting AOT ; parallélisable). **Audio** en dernier.
+
+> **Cap moyen terme (formalisé S21) — [Vertical Slice, backlog §4ter](BACKLOG.md).** Le premier chemin de bout en bout
+> (preuve d'intégration, **ancre planétaire**, Windows d'abord) : free-fly autour de la planète/Soleil P3-M8 + un
+> élément **spawné au runtime** + **save/load** du monde + HUD minimal. Consomme, dans l'ordre : **VS-1 sérialisation**
+> (la grosse pièce, item 6 ci-dessus), **VS-2 spawn runtime** (`SpawnBodyDeferred`, dette P3-M3), VS-3 glu gameplay,
+> VS-4 HUD, VS-5 audio (stretch). P3-M0 (Linux) reste un prérequis **non bloquant**. C'est le jalon qui fait passer de
+> « moteur avec fondations » à « moteur qui a fait tourner un monde de bout en bout ».
 
 ## Reprise — recommandations immédiates (écrit 2026-07-20, fin session 18)
 

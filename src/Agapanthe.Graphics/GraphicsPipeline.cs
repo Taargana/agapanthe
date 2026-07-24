@@ -198,7 +198,9 @@ public sealed unsafe class GraphicsPipeline : IDisposable
                 SType = StructureType.PipelineDepthStencilStateCreateInfo,
                 DepthTestEnable = desc.DepthTest,
                 DepthWriteEnable = desc.DepthTest && desc.DepthWrite,
-                DepthCompareOp = CompareOp.LessOrEqual,
+                DepthCompareOp = desc.DepthCompare == DepthCompare.GreaterOrEqual
+                    ? CompareOp.GreaterOrEqual
+                    : CompareOp.LessOrEqual,
             };
             // A depth-only pipeline (no color format) declares zero blend attachments; the color-blend state
             // stays present but empty, which is legal when there are no color attachments.
