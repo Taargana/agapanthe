@@ -264,4 +264,51 @@ public sealed class LifecycleTests
         var allocated = GC.GetAllocatedBytesForCurrentThread() - before;
         Assert.Equal(0, allocated);
     }
+
+    // --- VS-2: deferred body spawn (SpawnBodyDeferred) ------------------------------------------------------------
+
+    private static ImportedEntitySpec BodySpec(Double3 position)
+        => new(new MeshHandle(0, 1), new MaterialHandle(0, 1), position, Matrix4x4.Identity, Vector3.Zero, 1f, 0);
+
+    [Fact]
+    public void SpawnBodyDeferred_HandleAliveImmediately_MaterialisesWithPayloadAtTheBarrier()
+    {
+        using var world = new GameWorld();
+        var body = world.SpawnBodyDeferred(
+            BodySpec(new Double3(0, 200, 0)), new Vector3(1, 2, 3), inverseMass: 0.5f, restitution: 0.4f, radius: 2f);
+
+        Assert.True(world.IsAlive(body));                                            // usable at once...
+        Assert.Throws<InvalidOperationException>(() => world.GetWorldPosition(body)); // ...nothing to read yet
+
+        world.FlushStructuralChanges();
+
+        Assert.True(world.IsAlive(body));
+        Assert.Equal(new Double3(0, 200, 0), world.GetWorldPosition(body)); // payload materialised verbatim
+        Assert.Equal(new Vector3(1, 2, 3), world.GetVelocity(body));
+        Assert.Equal(-1, world.SlotOf(body)); // unassigned until the next structural rebuild (like MaterialiseDrawable)
+    }
+
+    [Fact]
+    public void SpawnBodyDeferred_NotIntegratedBeforeTheBarrier_IntegratedAfter()
+    {
+        // The whole reason the milestone exists: a body spawned mid-simulation must not appear until the barrier, so
+        // StepPhysics never sees the archetype storage move under its own iteration.
+        using var world = new GameWorld();
+        var settings = NewtonSettingsFor(new Double3(0, 0, 0), mu: 1000.0, surfaceRadius: 1.0);
+        var body = world.SpawnBodyDeferred(
+            BodySpec(new Double3(0, 100, 0)), Vector3.Zero, inverseMass: 1f, restitution: 0.3f, radius: 0f);
+
+        world.StepPhysics(in settings); // BEFORE the flush: the body does not exist yet
+        Assert.Throws<InvalidOperationException>(() => world.GetWorldPosition(body));
+
+        world.FlushStructuralChanges();
+        world.StepPhysics(in settings); // AFTER the flush: now it integrates
+
+        Assert.True(world.GetVelocity(body).Y < 0f, "the materialised body should be pulled toward the attractor");
+        Assert.True(world.GetWorldPosition(body).Y < 100.0, "it should have fallen");
+    }
+
+    // A radial-attractor settings, shared with the deferred-integration test above.
+    private static PhysicsSettings NewtonSettingsFor(Double3 centre, double mu, double surfaceRadius)
+        => new PhysicsSettings(Vector3.Zero, groundY: 0f, fixedDt: 1f / 60f).WithAttractor(centre, mu, surfaceRadius);
 }

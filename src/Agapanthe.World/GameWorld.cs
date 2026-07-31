@@ -133,6 +133,7 @@ public sealed partial class GameWorld : IDisposable
         SpawnDrawable,  // a baked imported drawable (mirrors SpawnImported, deferred)
         SetParent,      // reparent an existing entity (ParentId == 0 clears the parent)
         Despawn,        // destroy an entity and, cascading, its descendants
+        SpawnBody,      // a physics body (drawable + Velocity + RigidBody), mirrors SpawnBody, deferred (VS-2)
     }
 
     // One fat value struct rather than a class hierarchy: it lives in a reused List, so no per-command allocation and
@@ -143,7 +144,11 @@ public sealed partial class GameWorld : IDisposable
         public ulong Target;                 // GlobalId this command concerns
         public ulong ParentId;               // SpawnNode: parent (0 = root). SetParent: new parent (0 = clear).
         public LocalTransform Local;         // SpawnNode
-        public ImportedEntitySpec Imported;  // SpawnDrawable
+        public ImportedEntitySpec Imported;  // SpawnDrawable, SpawnBody
+        public Vector3 Velocity;             // SpawnBody
+        public float InverseMass;            // SpawnBody
+        public float Restitution;            // SpawnBody
+        public float Radius;                 // SpawnBody
     }
 
     private bool _disposed;
@@ -343,6 +348,9 @@ public sealed partial class GameWorld : IDisposable
                     break;
                 case CommandKind.SpawnDrawable:
                     MaterialiseDrawable(cmd.Target, cmd.Imported);
+                    break;
+                case CommandKind.SpawnBody:
+                    MaterialiseBody(cmd.Target, cmd.Imported, cmd.Velocity, cmd.InverseMass, cmd.Restitution, cmd.Radius);
                     break;
             }
         }
@@ -566,9 +574,22 @@ public sealed partial class GameWorld : IDisposable
         SpawnBody(in bodySpec, new Vector3(-1, 0, 0), inverseMass: 1f, restitution: 0.3f, radius: 1f); // overlaps → pair path
         StepPhysics(PhysicsSettings.Default(groundY: -10f));
 
+        // VS-2: the two paths this milestone adds — the DEFERRED body spawn (SpawnBodyDeferred enqueues
+        // CommandKind.SpawnBody, MaterialiseBody runs at the barrier) and the NEWTONIAN branch of StepPhysics (radial
+        // inverse-square gravity + radial ground). Rooted here so the probe proves them under ILC, not just the
+        // immediate SpawnBody + uniform step above. The attractor is at the origin; the bodies sit ~600 m out, and
+        // surfaceRadius = 700 puts them BELOW the radial surface (dist - r < R) so the smoke also EXECUTES the radial
+        // ground path — push-out, normal-velocity reflect, rest-clamp — under NativeAOT, not merely roots it (audit m3).
+        SpawnBodyDeferred(in bodySpec, new Vector3(0, 1, 0), inverseMass: 1f, restitution: 0.3f, radius: 1f);
+        FlushStructuralChanges();
+        // Zero uniform gravity WITH the attractor (the Newtonian branch ignores Gravity — a non-zero one here would trip
+        // the Debug.Assert that guards that exact misconfiguration).
+        StepPhysics(new PhysicsSettings(Vector3.Zero, groundY: -10f, fixedDt: 1f / 60f)
+            .WithAttractor(Double3.Zero, mu: 1000.0, surfaceRadius: 700.0));
+
         // Chunk-iteration query (the path the systems use) touching several component arrays. Counts the 8 imported
-        // entities, the 2 surviving deferred drawables, and the 2 physics bodies (all carry WorldTransform +
-        // RenderOrder) = 12.
+        // entities, the 2 surviving deferred drawables, and the 3 physics bodies (2 immediate + 1 deferred, all carry
+        // WorldTransform + RenderOrder) = 13.
         var count = 0;
         foreach (ref var chunk in _world.Query(new QueryDescription().WithAll<WorldTransform, RenderOrder>()))
         {

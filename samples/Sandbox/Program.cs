@@ -81,6 +81,10 @@ long benchCpuStart = 0;
 // caches its own render delegate (allocated once), so the zero-alloc hot path is preserved.
 FrameOrchestrator? orchestrator = null;
 
+// VS-2 planet-drop: the deterministic probe spawner, hoisted so the B keypress (below) can drop one on demand. Null
+// unless AGAPANTHE_SCENE=planet-drop built it.
+ProbeDropSystem? probeDropper = null;
+
 window.Loaded += () =>
 {
     var requiredExtensions = window.GetRequiredVulkanExtensions();
@@ -169,11 +173,20 @@ window.Loaded += () =>
     var savePath = Environment.GetEnvironmentVariable("AGAPANTHE_SAVE");
     var loadPath = Environment.GetEnvironmentVariable("AGAPANTHE_LOAD");
     var loadMode = loadPath is { Length: > 0 };
-    var planetScene = loadMode || string.Equals(sceneSpec, "planet", StringComparison.OrdinalIgnoreCase);
+    // VS-2: planet-drop is the Newtonian integration demo — the P3-M8 planet + Sun, plus a runtime probe spawner and
+    // radial gravity. It IS a planet scene (same sun-only lighting / black-space env), but with a near-surface camera.
+    var planetDrop = string.Equals(sceneSpec, "planet-drop", StringComparison.OrdinalIgnoreCase);
+    var planetScene = loadMode || planetDrop || string.Equals(sceneSpec, "planet", StringComparison.OrdinalIgnoreCase);
     var (rows, cols) = ParseGrid(sceneSpec);
     var dropCount = ParseDrop(sceneSpec);
     bool multiInstance;
     double? physicsGroundY = null; // set by drop mode: the Y of the collision plane AND the rendered ground quad
+    // VS-2 planet-drop state (filled by the planet branch below, consumed by the physics + spawner systems):
+    PhysicsSettings? planetPhysics = null;   // Newtonian attractor settings (Gravity 0, radial ground at planetRadius)
+    var probeSpec = default(ImportedEntitySpec); // the probe's base spec — its Position is overwritten per drop
+    var probeReady = false;
+    var probeRadius = 0f;
+    var dropCentre = Double3.Zero;            // world point directly above the +Y surface anchor where probes appear
     // P3-M8: the planet scene builds its OWN entities (planet + Sun spheres in Double3), ignoring the loaded glTF —
     // it is the near+far reversed-Z stress bench, not a model viewer. Set below so the camera/light/env branches
     // configure it for sun-only lighting instead of the studio/outdoor defaults.
@@ -191,6 +204,13 @@ window.Loaded += () =>
             using var loadStream = File.OpenRead(loadPath!);
             world.Load(loadStream);
             Log.Info($"Sandbox: [VS-1] world restored from '{loadPath}'.");
+        }
+
+        if (planetDrop)
+        {
+            (planetPhysics, probeSpec, dropCentre, probeRadius) = SetupPlanetDrop(
+                device, registry, renderer.MaterialSetLayout, worldOrigin, planetRadius);
+            probeReady = true;
         }
 
         multiInstance = true;
@@ -229,7 +249,11 @@ window.Loaded += () =>
     // orient yaw/pitch to look at the centre. The planet scene frames on the PLANET only (its bounds include the
     // Sun at 7.48e10 m, which would push the camera a hundred million km away), and picks a reversed-Z near/far that
     // holds both the planet surface and the distant Sun.
-    if (planetScene)
+    if (planetDrop)
+    {
+        FramePlanetDropCamera(camera, controller, renderer, worldOrigin, planetSunOrigin, planetRadius, planetSunTravelDir);
+    }
+    else if (planetScene)
     {
         FramePlanetCamera(camera, controller, renderer, worldOrigin, planetSunOrigin, planetRadius, planetSunTravelDir);
     }
@@ -429,6 +453,19 @@ window.Loaded += () =>
                  $"fixed dt {settings.FixedDt:F4}s.");
     }
 
+    // VS-2 planet-drop: Newtonian physics + the runtime probe spawner, enabled by the scene name itself (the demo is
+    // the point). The spawner runs in Stage.Input — its SpawnBodyDeferred is applied at the end-of-Input barrier, so
+    // Simulation's StepPhysics integrates each probe the SAME frame it appears (§3.4). Deterministic cadence + fixed
+    // step → byte-identical headless capture; the B keypress (via probeDropper) drops extra probes off the gate.
+    if (planetDrop && planetPhysics is { } dropPhysics && probeReady)
+    {
+        orchestrator.Add(Stage.Simulation, new PhysicsSystem(world!, in dropPhysics));
+        var dropEvery = (int)Math.Max(EnvDouble("AGAPANTHE_DROP_EVERY", 30.0), 1.0);
+        probeDropper = new ProbeDropSystem(world!, in probeSpec, dropCentre, probeRadius, dropEvery);
+        orchestrator.Add(Stage.Input, probeDropper);
+        Log.Info($"Sandbox: [physics] planet-drop enabled — a probe every {dropEvery} ticks, key B drops one.");
+    }
+
     // Camera-relative proof (spec §3.3): both are world-space doubles, and the GPU sees neither — it only ever
     // sees their difference. Logged so a far-out run is visibly far out, not silently at the origin.
     Log.Info($"Sandbox: model at world origin {worldOrigin}, eye at {camera.Position} " +
@@ -516,6 +553,11 @@ window.KeyPressed += key =>
                 (d.Direction.X * sin) + (d.Direction.Z * cos));
             renderer.Lights.Directional = d;
             Log.Info($"Key light direction: {d.Direction}");
+            break;
+        // B: drop one probe (VS-2 planet-drop only). Edge-triggered, off the deterministic gate — the human's
+        // hands-on verdict. No-op in any other scene. Same owner thread as the tick, so the deferred spawn is safe.
+        case Key.B when probeDropper is not null:
+            probeDropper.DropOne();
             break;
     }
 
@@ -1114,6 +1156,43 @@ static (Vector3 SunTravelDir, double PlanetRadius, Double3 SunOrigin) SetupPlane
     return (-sunFromPlanet, planetRadius, sunOrigin);
 }
 
+// VS-2 planet-drop setup: a single Newtonian attractor at the planet centre (C = worldOrigin), a radial ground
+// half-space at the planet radius, and a small probe sphere loaded once. μ = g·R² gives surface g ≈ 10 m/s² for a
+// legible fall (design decision 7), overridable by AGAPANTHE_PLANET_MU. Gravity is ZERO on the uniform field — all
+// the pull is radial, so the rest-speed clamp in StepPhysics uses μ/R², not gravity.Y (the exact reviewer finding).
+// Returns the physics settings, the probe base spec (position set per drop), the world point above the +Y surface
+// anchor where probes appear, and the probe radius. The planet + Sun are already spawned by SetupPlanetScene.
+static (PhysicsSettings Physics, ImportedEntitySpec ProbeSpec, Double3 DropCentre, float ProbeRadius) SetupPlanetDrop(
+    GraphicsDevice device, ResourceRegistry registry, DescriptorSetLayout materialLayout,
+    Double3 planetCentre, double planetRadius)
+{
+    var probeRadius = (float)EnvDouble("AGAPANTHE_PROBE_RADIUS", 3.0);
+    var dropHeight = EnvDouble("AGAPANTHE_DROP_HEIGHT", 120.0);
+    var mu = EnvDouble("AGAPANTHE_PLANET_MU", 10.0 * planetRadius * planetRadius); // g = μ/R² ≈ 10 m/s²
+    var physics = new PhysicsSettings(Vector3.Zero, groundY: 0f, fixedDt: 1f / 60f)
+        .WithAttractor(planetCentre, mu, planetRadius);
+
+    // The probe: a small embery sphere — warm and low-roughness so it reads against the blue planet and the black sky.
+    var probeMaterial = new MaterialAsset
+    {
+        BaseColorFactor = new Vector4(0.9f, 0.35f, 0.1f, 1f),
+        MetallicFactor = 0.1f,
+        RoughnessFactor = 0.6f,
+        Name = "Probe",
+    };
+    // Anchor at the +Y "north pole": local up = world +Y, so the free camera's +Y-up model keeps the horizon level and
+    // the probes fall straight down the screen. Load bakes this position into the spec; the spawner overwrites it.
+    var dropCentre = planetCentre + new Double3(0.0, planetRadius + dropHeight, 0.0);
+    var (_, probeSpecs) = registry.Load(
+        device, BuildSphereModel(probeRadius, probeMaterial, "Probe", 24, 12), materialLayout, dropCentre);
+
+    var g = mu / (planetRadius * planetRadius);
+    Log.Info(
+        $"Sandbox: [scene] planet-drop — probe r={probeRadius:F1} m from {dropHeight:F0} m up, surface g={g:F2} m/s² " +
+        $"(μ={mu:E2}); tune with AGAPANTHE_DROP_EVERY / _PLANET_MU / _DROP_HEIGHT / _PROBE_RADIUS, key B drops one.");
+    return (physics, probeSpecs[0], dropCentre, probeRadius);
+}
+
 // Reads a scalar env var as a double (invariant culture), falling back to a default. For the planet scene's
 // configurable scale factors.
 static double EnvDouble(string name, double fallback)
@@ -1652,6 +1731,46 @@ static void FramePlanetCamera(
     controller.MoveSpeed = (float)(planetRadius * 0.5);
 }
 
+// Frames the VS-2 planet-drop scene: a near-surface station at the +Y north-pole anchor, looking along the Sun's
+// compass bearing and pitched up so the falling probes, the curving surface below, and the low Sun share one
+// reversed-Z frustum. World up is +Y at this anchor (the north pole), so the free camera's up-model stays valid and
+// the horizon is level. Everything overridable by env var for headless tuning.
+static void FramePlanetDropCamera(
+    Camera camera, FreeCameraController controller, Renderer renderer,
+    Double3 planetCentre, Double3 sunOrigin, double planetRadius, Vector3 sunTravelDir)
+{
+    var surface = planetCentre + new Double3(0.0, planetRadius, 0.0); // the north-pole surface anchor
+    // The Sun's bearing at the anchor = the horizontal part of the planet→Sun direction. Look toward it so the Sun
+    // sits ahead in the sky (its default ~14° elevation keeps it just above the horizon).
+    var sunDir = -Vector3.Normalize(sunTravelDir); // planet → Sun
+    var bearing = new Vector3(sunDir.X, 0f, sunDir.Z);
+    bearing = bearing.LengthSquared() > 1e-6f ? Vector3.Normalize(bearing) : -Vector3.UnitZ;
+
+    // Look azimuth = the Sun's bearing rotated off to one side, so the low Sun SIDE-lights the falling probes (their
+    // warm faces show) and its disc clears the drop column instead of being eclipsed by it. Camera sits behind the
+    // column along -lookAz; the column stays centred, the Sun sits ~sunOff° to the side.
+    var sunOff = (float)(EnvDouble("AGAPANTHE_DROP_SUN_OFF", 32.0) * Math.PI / 180.0);
+    var (so, co) = MathF.SinCos(sunOff);
+    var lookAz = new Vector3((bearing.X * co) + (bearing.Z * so), 0f, (-bearing.X * so) + (bearing.Z * co));
+
+    var camBack = (float)EnvDouble("AGAPANTHE_DROP_CAM_BACK", 60.0);    // metres behind the drop column
+    var camHeight = (float)EnvDouble("AGAPANTHE_DROP_CAM_HEIGHT", 8.0); // metres above the surface
+    camera.Position = surface + new Double3(-lookAz.X * camBack, camHeight, -lookAz.Z * camBack);
+
+    // Look partway up the drop column: frames the surface (lower third), the falling probes (centre) and the sky.
+    var target = surface + new Double3(0.0, 30.0, 0.0);
+    var forward = Vector3.Normalize((target - camera.Position).ToVector3(Double3.Zero));
+    camera.Pitch = MathF.Asin(Math.Clamp(forward.Y, -1f, 1f));
+    camera.Yaw = MathF.Atan2(forward.X, -forward.Z);
+    camera.FovY = (float)(EnvDouble("AGAPANTHE_PLANET_FOV", 70.0) * MathF.PI / 180.0);
+
+    // Reversed-Z from a metre above the surface out past the Sun — the near+far the milestone proves, at human scale.
+    camera.Near = 1f;
+    camera.Far = (float)(Double3.Distance(planetCentre, sunOrigin) * 1.4);
+    renderer.ShadowDistance = 1f; // CSM no-ops at planetary scale; keep the caster cull idle
+    controller.MoveSpeed = 20f;   // a walking-scale station, not a planet-crossing flyer
+}
+
 file static class DebugViews
 {
     public static readonly string[] Names =
@@ -1708,5 +1827,55 @@ file sealed class ChurnSystem(GameWorld world, int perFrame) : ISystem
         {
             world.Despawn(_roots.Dequeue()); // cascades to the subtree
         }
+    }
+}
+
+// VS-2 planet-drop spawner, as a Stage.Input system: every `every` ticks it drops one probe (a small physics body)
+// above the planet's surface anchor via SpawnBodyDeferred. The scheduler's end-of-Input barrier materialises it, so
+// Simulation's StepPhysics integrates it the SAME frame — the whole point of the deferred spawn (§3.4). Deterministic
+// cadence + fixed-step physics → byte-identical headless capture. DropOne() is also called by the B keypress (off the
+// deterministic gate — human hands-on only). Zero per-frame allocation on the non-drop ticks.
+file sealed class ProbeDropSystem : ISystem
+{
+    private readonly GameWorld _world;
+    private readonly ImportedEntitySpec _spec; // mesh/material/bounds fixed; the Position is set per drop
+    private readonly Double3 _centre;          // world point above the surface where probes appear
+    private readonly float _radius;
+    private readonly int _every;
+    private int _tick;
+    private int _dropped;
+
+    public ProbeDropSystem(GameWorld world, in ImportedEntitySpec spec, Double3 centre, float radius, int every)
+    {
+        _world = world;
+        _spec = spec;
+        _centre = centre;
+        _radius = radius;
+        _every = Math.Max(every, 1);
+    }
+
+    public void Execute(in TickContext ctx)
+    {
+        if (_tick++ % _every == 0)
+        {
+            DropOne();
+        }
+    }
+
+    // Drops one probe, nudged onto a golden-angle spiral in the local tangent plane (world X/Z at the +Y anchor) so
+    // successive probes land in a small pile instead of a perfect stack that never settles. Deterministic in _dropped,
+    // so a fixed frame count reproduces the same heap. Zero initial velocity — radial gravity does the rest.
+    public void DropOne()
+    {
+        const float goldenAngle = 2.399963f; // radians — an even, non-repeating angular spread
+        var (sin, cos) = MathF.SinCos(_dropped * goldenAngle);
+        // Bounded spiral radius, cycling every 8 drops. The +0.5 phase keeps it OFF zero so two probes never spawn at
+        // the exact same XZ (which would lean on ResolvePair's coincident-normal fallback every 8th drop — audit m4).
+        var spread = _radius * 2.5f * MathF.Sqrt((_dropped % 8) + 0.5f);
+        var pos = _centre + new Double3(cos * spread, 0f, sin * spread);
+        var spec = new ImportedEntitySpec(
+            _spec.Mesh, _spec.Material, pos, _spec.RotationScale, _spec.BoundsCenter, _spec.BoundsRadius, _spec.Order);
+        _world.SpawnBodyDeferred(in spec, Vector3.Zero, inverseMass: 1f, restitution: 0.4f, radius: _radius);
+        _dropped++;
     }
 }

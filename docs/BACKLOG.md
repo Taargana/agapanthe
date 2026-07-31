@@ -7,7 +7,7 @@
 > Règle de tri : chaque item dit **ce qui casse sans lui** et **à quelle échelle il devient obligatoire**. Un item sans
 > déclencheur clair est une idée, pas du backlog.
 
-Dernière mise à jour : 2026-07-24 (session 21 — échelle planétaire 1/2 uniforme, **§4ter Vertical Slice** formalisée).
+Dernière mise à jour : 2026-07-26 (session 23 — **VS-2 livrée** : spawn runtime différé + gravité newtonienne ; §4ter à jour) · 2026-07-24 (session 21 — échelle planétaire 1/2 uniforme, **§4ter Vertical Slice** formalisée).
 
 ---
 
@@ -319,8 +319,14 @@ path, tests verts, NativeAOT PASS, GPU==CPU) :
   casse en silence**. Correctif futur non bloquant (streaming/prefabs) : un **fingerprint d'assets** (hash count/ordre)
   fourni par le caller dans le header transformerait le mauvais-asset-silencieux en erreur dure, sans casser le
   GPU-free du World. *Mord : le jour où l'ordre/le set d'assets chargés varie entre save et load.*
-- **VS-2 — Spawn runtime** (`SpawnBodyDeferred` + `CommandKind.SpawnBody`, le `StructuralCommand` fat portant
-  vitesse/masse/restitution/rayon — dette P3-M3, §4). Débloque tout contenu dynamique créé en cours de simulation.
+- ~~**VS-2 — Spawn runtime**~~ ✅ **livrée session 23** (double audit PASS-with-concerns [4,5/5], verdict visuel PASS).
+  `SpawnBodyDeferred` + `CommandKind.SpawnBody` (le `StructuralCommand` fat portant vitesse/masse/restitution/rayon,
+  `MaterialiseBody` = point de matérialisation unique) — dette P3-M3 soldée. **Élargi (décision humaine)** : gravité
+  **newtonienne** minimale — attracteur unique dans `PhysicsSettings` (`WithAttractor(C, μ, R)`, pas un composant),
+  gravité radiale inverse-carré + sol radial (`|p−C|−r<R`, rest-clamp `2·(μ/R²)·dt`). `μ=0` byte-identique. Démo
+  `AGAPANTHE_SCENE=planet-drop`. *Dette léguée* : **pas de lifetime/rest-cull des corps runtime** (croissance non
+  bornée) · garde `r2>ε` = accel 0 au barycentre (envisager un échec bruyant pour l'univers persistant). Hors scope
+  assumé : orbites (Euler+velocity float), n-body/attraction mutuelle, friction, terrain non-sphérique.
 - **VS-3 — Couche gameplay minimale** : un système `Stage.Simulation` qui câble input → spawn/act → une règle d'état
   simple sur la scène planétaire. La glu d'intégration, volontairement fine (pas de prefabs/pooling — différés §4).
 - **VS-4 — HUD minimal** : lecture d'état à l'écran (réutilise ou étend la barre de titre debug ; un overlay texte

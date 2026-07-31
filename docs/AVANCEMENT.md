@@ -1,6 +1,6 @@
 # Agapanthe — Plan complet & état d'avancement
 
-**Mis à jour** : 2026-07-23 (session 20 — **P3-M7 CLOS** : buffers device-local + réduction du raster d'ombre 4×→~1× ; double audit PASS, verdict visuel PASS incl. soleil bas ; A+B ~15,3 → ~8,0 ms ≈ ×2) · 2026-07-23 (session 19 — **P3-M6 CLOS** : slots persistants dirty-trackés + cull d'ombre GPU ; double audit PASS, verdict visuel PASS ; voir « Point de reprise ») · 2026-07-14 (session 14 — **vérifs humaines de la Phase 2 soldées** : banc M4 PASS with concerns [perf → P3-M1], précision M3 PASS, hot reload M1 PASS) · 2026-07-13 (session 13 — **PHASE 2 CLOSE** — frustum culling + montée en charge : 10 000 entités cullées à 10 000 km, 0 alloc/frame, en NativeAOT ; double audit signe la clôture) · **Machines de dev** : macOS (Apple M3, MoltenVK) + Windows 11 (RTX 5070 Ti, Vulkan 1.3 core) · **Cibles** : Windows / Linux / macOS
+**Mis à jour** : 2026-07-26 (session 23 — **VS-2 CLOS** : spawn runtime différé (`SpawnBodyDeferred`) + gravité newtonienne (attracteur radial + sol radial) ; double audit PASS-with-concerns [4,5/5], verdict visuel PASS ; scène `planet-drop`, 355 tests, AOT PASS) · 2026-07-24 (session 22 — **VS-1 CLOS** : sérialisation du World save/load, double audit PASS, verdict humain PASS) · 2026-07-23 (session 20 — **P3-M7 CLOS** : buffers device-local + réduction du raster d'ombre 4×→~1× ; double audit PASS, verdict visuel PASS incl. soleil bas ; A+B ~15,3 → ~8,0 ms ≈ ×2) · 2026-07-23 (session 19 — **P3-M6 CLOS** : slots persistants dirty-trackés + cull d'ombre GPU ; double audit PASS, verdict visuel PASS ; voir « Point de reprise ») · 2026-07-14 (session 14 — **vérifs humaines de la Phase 2 soldées** : banc M4 PASS with concerns [perf → P3-M1], précision M3 PASS, hot reload M1 PASS) · 2026-07-13 (session 13 — **PHASE 2 CLOSE** — frustum culling + montée en charge : 10 000 entités cullées à 10 000 km, 0 alloc/frame, en NativeAOT ; double audit signe la clôture) · **Machines de dev** : macOS (Apple M3, MoltenVK) + Windows 11 (RTX 5070 Ti, Vulkan 1.3 core) · **Cibles** : Windows / Linux / macOS
 
 ## Vision
 
@@ -267,20 +267,34 @@ Spec : [2026-07-24-vs1-world-serialization-design.md](plans/2026-07-24-vs1-world
 
 **Dette / notée** : source-unique émergente (le triple switch DUPLIQUE l'ordre du registre — gardé par le test d'ordre figé + `Save` qui lève sur index inconnu, mais pas une table unique) · `GlobalId` sérialisé ×2 (clé + composant 0, inoffensif) · **Generation d'Option 1 non exploitée** (un ordre de chargement d'assets différent casse en silence — futur *fingerprint d'assets* fourni par le caller, backlog) · garde fresh-world plus permissive que « fraîchement construit » (inoffensif, `Load` écrase l'état stale).
 
+## VS-2 — Spawn runtime différé + gravité newtonienne (2026-07-26, session 23)
+
+Spec : [2026-07-25-vs2-spawn-runtime-newtonian-gravity-design.md](plans/2026-07-25-vs2-spawn-runtime-newtonian-gravity-design.md). **Deuxième jalon de la Vertical Slice** — solde la **dette P3-M3** (`SpawnBody` immédiat → impossible de spawner un corps en cours de simulation sans muter les archétypes sous l'itération de `StepPhysics`) et, sur décision humaine en cours d'interview, ajoute une **gravité newtonienne** minimale pour donner une démo d'intégration cohérente (sonde larguée vers une planète).
+
+**Spawn différé** (`GameWorld.Physics.cs` / `GameWorld.cs`) : `SpawnBodyDeferred(spec, v, invMass, e, r)` = jumeau runtime de l'immédiat `SpawnBody`, enfilé sur la file de commandes du World (`CommandKind.SpawnBody` + 4 champs plats sur `StructuralCommand`) et appliqué à la **barrière structurelle** de fin d'étage. `MaterialiseBody(...)` = **point de matérialisation unique** partagé immédiat/différé (anti-drift). Handle `IsAlive` immédiat, intégré la **même frame** (spawner en `Stage.Input` → barrière → `StepPhysics` en `Stage.Simulation`, §3.4). `InstanceSlot=-1` → rebuild de slots au prochain collect.
+
+**Gravité newtonienne** (`PhysicsSettings.cs` / `GameWorld.Physics.cs`) : attracteur unique **dans les settings** (`WithAttractor(C, μ, R)`, PAS un composant ECS → ordre `ComponentRegistry.All` et masque VS-1 intouchés). `StepPhysics` branche sur `Mu>0` : pass 1 gravité radiale inverse-carré `a=−μ·(p−C)/|p−C|³` (double, cast float velocity, **garde singularité `r2>1e-18`**), pass 3 **sol radial** `|p−C|−r<R` (push-out à `R+r`, réflexion de la vitesse normale, **rest-clamp `2·(μ/R²)·dt`** — PAS `gravity.Y`, sinon micro-bounce éternel). **`μ=0` → chemin uniforme byte-identique** (scène `drop` P3-M3 protégée). Pas d'orbites (Euler symplectique + velocity `float`), pas de n-body — hors scope assumé.
+
+**Intégration Sandbox** : `AGAPANTHE_SCENE=planet-drop` (planète+Soleil ½ réel de P3-M8, attracteur au centre, caméra proche surface `FramePlanetDropCamera` side-lit), `ProbeDropSystem` déterministe en `Stage.Input` (`AGAPANTHE_DROP_EVERY=N`) **+ keypress `B`** (hors gate déterministe). Tunables : `AGAPANTHE_PLANET_MU`, `_DROP_HEIGHT`, `_PROBE_RADIUS`, `_DROP_SUN_OFF`, `_DROP_CAM_BACK/_CAM_HEIGHT`. Profils Rider dans `samples/Sandbox/Properties/launchSettings.json`.
+
+**Gates** : **355 tests** (spawn différé : handle vivant avant flush / matérialisé à la barrière / non intégré avant flush ; gravité radiale : accel vers C, symétrie angulaire, inverse-carré, sol radial lift/reflect, settling, déterminisme ; régression μ=0 byte-identique), 0 warning, 0 validation, 0 leak (217 resources), **0 alloc hot path** (spawner 0-alloc hors drop), **NativeAOT PASS** (`AotRootingSmoke iterated 13`, exécute le contact du sol radial sous ILC). **Capture headless déterministe byte-identique** (intra-binaire — casts double→float ⇒ pas de byte-identité pixel cross-JIT/AOT, hors scope). **Double audit PASS-with-concerns** (`csharp-lowlevel` PASS-w-c · `engine-architect` **4,5/5** ; les deux ont trouvé indépendamment le **même 🟠** singularité `r2≈0`, corrigé + 🟡 m1/m3/m4 appliqués). **Verdict visuel humain PASS.**
+
+**Dette / notée** : pas de **lifetime/rest-cull** des corps runtime → croissance non bornée (m2, à traiter pour l'ancre persistante) · garde `r2>ε` retourne accel=0 au barycentre (sain ; pour l'univers persistant, envisager un échec *bruyant* si un corps mobile atteint le centre) · broadphase cellule planétaire (cloud clusterisé O(n²), OK pour la démo).
+
 ## Reprise — où repartir
 
 > Trajectoire long terme (CSM, rendu GPU-driven, nuages volumétriques, atmosphère, ombres planétaires analytiques,
 > physique) : **[BACKLOG.md](BACKLOG.md)** — chaque item dit *ce qui casse sans lui* et *à quelle échelle il devient
 > obligatoire*.
 
-> ### ▶️ PROCHAIN — Vertical Slice, jalon **VS-2 (spawn runtime)**
-> **VS-1 sérialisation CLOSE** (session 22, double audit PASS, verdict humain PASS ; bloc ci-dessus). Cap :
-> **[Vertical Slice, backlog §4ter](BACKLOG.md)** — preuve d'intégration, ancre planétaire, Windows d'abord.
-> Prochain dans l'ordre de dépendance : **VS-2 spawn runtime** — `SpawnBodyDeferred` + `CommandKind.SpawnBody` (le
-> `StructuralCommand` fat portant vitesse/masse/restitution/rayon), dette P3-M3 : aujourd'hui `SpawnBody` est
-> **immédiat** (seam load-time), il faut un spawn de corps **différé** applicable en cours de simulation (projectiles/
-> débris/sonde larguée). Puis VS-3 glu gameplay → VS-4 HUD → VS-5 audio (stretch). **P3-M0 (Linux) non bloquant.**
-> Ouvrir l'interview de conception (absolute-brainstorm) sur VS-2.
+> ### ▶️ PROCHAIN — Vertical Slice, jalon **VS-3 (glu gameplay)**
+> **VS-1 sérialisation CLOSE** (S22) · **VS-2 spawn runtime + gravité newtonienne CLOSE** (S23, double audit
+> PASS-with-concerns + verdict visuel PASS ; section ci-dessus). Cap : **[Vertical Slice, backlog §4ter](BACKLOG.md)** —
+> preuve d'intégration, ancre planétaire, Windows d'abord.
+> Prochain dans l'ordre de dépendance : **VS-3 glu gameplay** (assembler spawn+physique+sérialisation en une boucle
+> jouable minimale), puis **VS-4 HUD** → **VS-5 audio** (stretch). **P3-M0 validation Linux/macOS** toujours dûe (non
+> bloquante). Dettes VS-2 à reprendre le moment venu : **lifetime/rest-cull des corps runtime** (m2), fingerprint
+> d'assets pour la sérialisation (VS-1). Ouvrir l'interview de conception (absolute-brainstorm) sur VS-3.
 
 **Point de reprise (2026-07-23, session 20)** : **P3-M7 buffers device-local + réduction du raster d'ombre 4× — CLOS.**
 Double audit PASS (`csharp-lowlevel` PASS · `graphics-3d` PASS with concerns ; 0 🔴/🟠, findings 🟡 appliqués),

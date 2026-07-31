@@ -1,8 +1,7 @@
 # Absolute-Work Board — Agapanthe Session 23 (VS-2 : spawn runtime + gravité newtonienne)
 
-**Status**: ✅ **CLOS — VS-2 livré (session 23).** Wave 1 & 2 & 3 closes ; double audit PASS-with-concerns
-(`engine-architect` 4,5/5), findings appliqués, **verdict visuel humain PASS**. Docs (AVANCEMENT/BACKLOG/CLAUDE) à
-jour, board archivé `archive/board-session23-VS2.md`. **Prochain : VS-3 glu gameplay.**
+**Status**: 🟢 **EXÉCUTION — Wave 1 & Wave 2 CLOSES. Pause en boundary Wave 2 (avant Wave 3).** Spec **Approved
+4.4/5** (`engine-architect`, 4 findings repliés). Rollback point : `3057bb4` (arbre propre, VS-1 poussé).
 **Sessions passées** : S1–S22 → `archive/` (S22 = VS-1, clos + poussé `3057bb4`).
 
 ### ⏸️ REPRISE (prochaine session) — où repartir

@@ -1,0 +1,43 @@
+{
+  "profiles": {
+    "Sandbox (default)": {
+      "commandName": "Project"
+    },
+    "planet-drop (interactive)": {
+      "commandName": "Project",
+      "environmentVariables": {
+        "AGAPANTHE_SCENE": "planet-drop"
+      }
+    },
+    "planet-drop (rain of probes)": {
+      "commandName": "Project",
+      "environmentVariables": {
+        "AGAPANTHE_SCENE": "planet-drop",
+        "AGAPANTHE_DROP_EVERY": "6",
+        "AGAPANTHE_PROBE_RADIUS": "6"
+      }
+    },
+    "planet-drop (keypress B only)": {
+      "commandName": "Project",
+      "environmentVariables": {
+        "AGAPANTHE_SCENE": "planet-drop",
+        "AGAPANTHE_DROP_EVERY": "99999"
+      }
+    },
+    "planet-drop (headless capture)": {
+      "commandName": "Project",
+      "environmentVariables": {
+        "AGAPANTHE_SCENE": "planet-drop",
+        "AGAPANTHE_DROP_EVERY": "12",
+        "AGAPANTHE_MAX_FRAMES": "420",
+        "AGAPANTHE_CAPTURE": "planet-drop.ppm"
+      }
+    },
+    "planet (P3-M8, orbit view)": {
+      "commandName": "Project",
+      "environmentVariables": {
+        "AGAPANTHE_SCENE": "planet"
+      }
+    }
+  }
+}

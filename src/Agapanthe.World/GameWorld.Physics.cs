@@ -55,9 +55,46 @@ public sealed partial class GameWorld
         ObjectDisposedException.ThrowIf(_disposed, this);
         AssertOwnerThread();
         var id = _nextGlobalId++;
+        MaterialiseBody(id, in spec, velocity, inverseMass, restitution, radius);
+        return new EntityRef(id);
+    }
+
+    /// <summary>
+    /// Queues a physics body for creation at the next barrier — the deferred, runtime counterpart of
+    /// <see cref="SpawnBody"/> (VS-2, solves the P3-M3 debt: the immediate <see cref="SpawnBody"/> cannot be called
+    /// from inside a running system because it moves the archetype storage under <see cref="StepPhysics"/>'s own
+    /// chunk iteration). Returns its stable handle immediately (<see cref="IsAlive"/> is true at once); the body is
+    /// materialised, and first integrated, only after the barrier applies the queue.
+    /// </summary>
+    public EntityRef SpawnBodyDeferred(
+        in ImportedEntitySpec spec, Vector3 velocity, float inverseMass, float restitution, float radius)
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        AssertOwnerThread();
+        var id = _nextGlobalId++;
+        _pendingSpawn.Add(id);
+        _commands.Add(new StructuralCommand
+        {
+            Kind = CommandKind.SpawnBody,
+            Target = id,
+            Imported = spec,
+            Velocity = velocity,
+            InverseMass = inverseMass,
+            Restitution = restitution,
+            Radius = radius,
+        });
+        return new EntityRef(id);
+    }
+
+    // Creates the body entity NOW and registers it in _live: a baked drawable (exactly like MaterialiseDrawable) that
+    // additionally carries Velocity + RigidBody. Shared by the immediate SpawnBody (a load-time seam) and the deferred
+    // SpawnBodyDeferred barrier path — the single materialisation point, so the two can never drift.
+    private void MaterialiseBody(
+        ulong globalId, in ImportedEntitySpec spec, Vector3 velocity, float inverseMass, float restitution, float radius)
+    {
         AssertNoTranslation(spec.RotationScale);
         var entity = _world.Create(
-            new GlobalId { Value = id },
+            new GlobalId { Value = globalId },
             new WorldTransform { Value = spec.RotationScale },
             new WorldPosition { Value = spec.Position },
             new MeshRef { Mesh = spec.Mesh, Material = spec.Material },
@@ -66,9 +103,8 @@ public sealed partial class GameWorld
             new Velocity { Linear = velocity },
             new RigidBody { InverseMass = inverseMass, Restitution = restitution, Radius = radius },
             new InstanceSlot { Value = -1 }); // -1 = unassigned; the next structural rebuild sets it
-        _live[id] = entity;
+        _live[globalId] = entity;
         _structuralDirty = true; // a new body is a new drawable → force a persistent rebuild (P3-M6)
-        return new EntityRef(id);
     }
 
     /// <summary>
@@ -83,6 +119,20 @@ public sealed partial class GameWorld
 
         var dt = settings.FixedDt;
         var gravity = settings.Gravity;
+
+        // VS-2 Newtonian branch: an attractor (Mu > 0) replaces the uniform field with a radial inverse-square one and
+        // the flat ground with a radial surface. Mu == 0 leaves every arithmetic below exactly as P3-M3 wrote it, so
+        // the uniform-gravity scene (drop) steps byte-identically — the regression the review flagged as critical.
+        var newtonian = settings.Mu > 0.0;
+        var attractorCenter = settings.AttractorCenter;
+        var mu = settings.Mu;
+        var surfaceRadius = settings.SurfaceRadius;
+        // The Newtonian branch IGNORES the uniform Gravity (a body cannot feel both a radial and a uniform field). Catch
+        // a caller who set both by mistake — loudly in Debug, compiled away in Release (zero hot-path cost, like the
+        // owner-thread guard). Not a runtime throw: a misconfigured field is a programmer error, not a data condition.
+        System.Diagnostics.Debug.Assert(
+            !newtonian || settings.Gravity == Vector3.Zero,
+            "PhysicsSettings has both an attractor (Mu > 0) and a non-zero uniform Gravity; the uniform field is ignored.");
 
         // Pass 1 — gather every body into flat scratch and integrate it (velocity then position: symplectic Euler).
         // maxRadius drives the broadphase cell size. Chunk order is stable within a frame (no structural change), so
@@ -105,7 +155,26 @@ public sealed partial class GameWorld
                 var pos = positions[i].Value;
                 if (invMass != 0f)
                 {
-                    v += gravity * dt;
+                    if (newtonian)
+                    {
+                        // a = μ·d/|d|³ toward the centre (inverse-square, computed in double, cast to the float
+                        // velocity). Gravity correctly weakens with altitude — the whole point of Newtonian.
+                        // Guard the singularity at the centre (r2 → 0 ⇒ μ/0 = Inf ⇒ 0·Inf = NaN, which would poison
+                        // the whole frame through the broadphase floor): a body AT the barycentre feels zero net pull.
+                        // Symmetric with the radial-ground (dist > 1e-9) and sphere-sphere (dist > 1e-9) guards below.
+                        var d = attractorCenter - pos;
+                        var r2 = d.LengthSquared;
+                        if (r2 > 1e-18)
+                        {
+                            var accel = d * (mu / (r2 * Math.Sqrt(r2)));
+                            v += (accel * dt).ToVector3(Double3.Zero);
+                        }
+                    }
+                    else
+                    {
+                        v += gravity * dt;
+                    }
+
                     pos += new Double3(v * dt);
                 }
 
@@ -137,6 +206,10 @@ public sealed partial class GameWorld
         // micro-bounce forever (scaled to what gravity re-adds in a couple of steps: works for any gravity/dt).
         var groundY = settings.GroundY;
         var restSpeed = 2f * MathF.Abs(gravity.Y) * dt;
+        // VS-2 radial rest clamp: the effective surface gravity is μ/R², NOT gravity.Y. The planet-drop scene sets
+        // Gravity = 0 and relies on μ, so a gravity.Y-based clamp would be 0 → the probe would micro-bounce forever
+        // and never settle (review finding #1). Only meaningful on the Newtonian path.
+        var restSpeedRadial = newtonian ? (float)(2.0 * (mu / (surfaceRadius * surfaceRadius)) * dt) : 0f;
         for (var k = 0; k < count; k++)
         {
             if (_pInvMass[k] != 0f)
@@ -144,7 +217,31 @@ public sealed partial class GameWorld
                 var pos = _pPos[k];
                 var v = _pVel[k];
                 var r = _pRadius[k];
-                if (pos.Y - r < groundY)
+                if (newtonian)
+                {
+                    // Radial ground half-space: the exact analogue of the flat one below, on a sphere. Push the body
+                    // out to |pos - C| = R + r along the outward normal, reflect the normal velocity (restitution +
+                    // rest clamp), leave the tangential velocity untouched (v1 has no friction).
+                    var d = pos - attractorCenter;
+                    var dist = d.Length;
+                    if (dist - r < surfaceRadius && dist > 1e-9)
+                    {
+                        var nf = (d * (1.0 / dist)).ToVector3(Double3.Zero); // outward unit (double, then cast)
+                        pos = attractorCenter + (d * ((surfaceRadius + r) / dist));
+                        var vn = Vector3.Dot(v, nf);
+                        if (vn < 0f) // moving into the surface
+                        {
+                            var bounce = -vn * _pRest[k];
+                            if (bounce < restSpeedRadial)
+                            {
+                                bounce = 0f;
+                            }
+
+                            v = v - (vn * nf) + (bounce * nf); // keep tangential, replace normal with the clamped bounce
+                        }
+                    }
+                }
+                else if (pos.Y - r < groundY)
                 {
                     pos = new Double3(pos.X, groundY + r, pos.Z);
                     if (v.Y < 0f)

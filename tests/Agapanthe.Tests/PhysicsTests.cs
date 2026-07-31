@@ -225,4 +225,150 @@ public sealed class PhysicsTests
         var allocated = GC.GetAllocatedBytesForCurrentThread() - before;
         Assert.True(allocated == 0, $"StepPhysics should allocate nothing after warmup, observed {allocated} bytes.");
     }
+
+    // --- VS-2: Newtonian point-gravity + radial ground -----------------------------------------------------------
+
+    // Settings carrying an attractor at the origin. Gravity is 0 so the ONLY field is the radial μ (the planet-drop
+    // scene works exactly this way — hence the radial rest clamp must derive from μ/R², not gravity.Y).
+    private static PhysicsSettings NewtonSettings(double mu, double surfaceRadius)
+        => new PhysicsSettings(Vector3.Zero, groundY: 0f, fixedDt: 1f / 60f)
+            .WithAttractor(Double3.Zero, mu, surfaceRadius);
+
+    [Fact]
+    public void WithAttractor_SetsTheRadialFields_LeavesTheUniformFieldsIntact()
+    {
+        var baseSettings = PhysicsSettings.Default(groundY: -3f);
+        Assert.Equal(0.0, baseSettings.Mu); // no attractor by default → the uniform path
+
+        var s = baseSettings.WithAttractor(new Double3(1, 2, 3), mu: 500.0, surfaceRadius: 10.0);
+        Assert.Equal(new Double3(1, 2, 3), s.AttractorCenter);
+        Assert.Equal(500.0, s.Mu);
+        Assert.Equal(10.0, s.SurfaceRadius);
+        Assert.Equal(new Vector3(0f, -9.81f, 0f), s.Gravity); // base untouched
+        Assert.Equal(-3f, s.GroundY);
+        Assert.Equal(1f / 60f, s.FixedDt);
+    }
+
+    // A body far above the attractor accelerates straight toward the centre, by μ/r²·dt (semi-implicit, one step).
+    [Fact]
+    public void Newtonian_Gravity_AcceleratesTowardTheCentre()
+    {
+        using var world = new GameWorld();
+        var body = BodyAt(world, new Double3(0, 100, 0), Vector3.Zero, radius: 0f);
+        var settings = NewtonSettings(mu: 1000.0, surfaceRadius: 1.0); // surface far below → no contact
+
+        world.StepPhysics(in settings);
+
+        var v = world.GetVelocity(body);
+        Assert.True(v.Y < 0f, "gravity must pull the body toward the centre (−Y)");
+        Assert.Equal(0f, v.X, 4);
+        Assert.Equal(0f, v.Z, 4);
+        // a = μ/r² = 1000 / 100² = 0.1 m/s² ; after one 1/60 s step, v = −0.1/60.
+        Assert.Equal(-0.1 / 60.0, (double)v.Y, 6);
+    }
+
+    // Same radius, different direction → same speed after one step: the field is isotropic (μ·d/|d|³).
+    [Fact]
+    public void Newtonian_Gravity_IsAngularlySymmetric()
+    {
+        static float SpeedAfterStep(Double3 position)
+        {
+            using var world = new GameWorld();
+            var body = BodyAt(world, position, Vector3.Zero, radius: 0f);
+            var settings = NewtonSettings(mu: 1000.0, surfaceRadius: 1.0);
+            world.StepPhysics(in settings);
+            return world.GetVelocity(body).Length();
+        }
+
+        var alongY = SpeedAfterStep(new Double3(0, 50, 0));
+        var alongX = SpeedAfterStep(new Double3(50, 0, 0));
+        var diagonal = SpeedAfterStep(new Double3(0, 0, 50));
+        Assert.Equal(alongY, alongX, 5);
+        Assert.Equal(alongY, diagonal, 5);
+    }
+
+    // Inverse-square: at twice the radius the acceleration is a quarter — the speed after one step scales 4:1.
+    [Fact]
+    public void Newtonian_Gravity_WeakensWithAltitude_InverseSquare()
+    {
+        static double SpeedAfterStep(double radius)
+        {
+            using var world = new GameWorld();
+            var body = BodyAt(world, new Double3(0, radius, 0), Vector3.Zero, radius: 0f);
+            var settings = NewtonSettings(mu: 1000.0, surfaceRadius: 1.0);
+            world.StepPhysics(in settings);
+            return -world.GetVelocity(body).Y;
+        }
+
+        var near = SpeedAfterStep(50);
+        var far = SpeedAfterStep(100); // 2× radius → 1/4 accel
+        Assert.Equal(4.0, near / far, 3);
+    }
+
+    // The radial ground is the sphere analogue of the flat one: a body driven below the surface is lifted back onto
+    // it (|pos − C| = R + r) and its inward velocity is reflected outward.
+    [Fact]
+    public void RadialGround_Bounce_LiftsToSurface_AndReflectsNormalVelocity()
+    {
+        using var world = new GameWorld();
+        // Surface at R = 10, body radius 1 → rests at |pos| = 11. Start just above with restitution 0.5 so the bounce
+        // clears the rest clamp.
+        var body = BodyAt(world, new Double3(0, 11.2, 0), Vector3.Zero, radius: 1f, restitution: 0.5f);
+        var settings = NewtonSettings(mu: 1000.0, surfaceRadius: 10.0);
+
+        var bounced = false;
+        for (var i = 0; i < 30 && !bounced; i++)
+        {
+            world.StepPhysics(in settings);
+            if (world.GetVelocity(body).Y > 0f)
+            {
+                bounced = true;
+            }
+        }
+
+        Assert.True(bounced, "the body should rebound outward after hitting the radial surface");
+        var dist = world.GetWorldPosition(body).Length;
+        Assert.True(dist >= 11.0 - 1e-6, $"the body must not sink below the surface (|pos| ≥ 11), got {dist:F4}");
+    }
+
+    // The review's critical finding: with Gravity = 0 the rest clamp MUST come from μ/R², or the probe micro-bounces
+    // forever. This pins that it settles — comes to rest exactly on the surface with no residual velocity.
+    [Fact]
+    public void RadialGround_Settles_NoEternalMicroBounce()
+    {
+        using var world = new GameWorld();
+        // Dropped from |pos| = 13 onto a surface at R + r = 11, several bounces then rest. Gravity is 0 → the ONLY
+        // thing that lets it settle is restSpeed = 2·(μ/R²)·dt.
+        var body = BodyAt(world, new Double3(0, 13, 0), Vector3.Zero, radius: 1f, restitution: 0.3f);
+        var settings = NewtonSettings(mu: 1000.0, surfaceRadius: 10.0); // surface g = μ/R² = 10 m/s²
+
+        for (var i = 0; i < 600; i++) // 10 s: plenty to settle
+        {
+            world.StepPhysics(in settings);
+        }
+
+        Assert.Equal(11.0, world.GetWorldPosition(body).Length, 3); // resting on the surface, radius above it
+        Assert.Equal(0.0, (double)world.GetVelocity(body).Length(), 3); // no residual bounce
+    }
+
+    // Determinism on the Newtonian path too (the reproducible-capture gate rests on it): two independent worlds,
+    // bit-identical positions.
+    [Fact]
+    public void Newtonian_Determinism_TwoWorlds_IdenticalTrajectory()
+    {
+        static Double3 Run()
+        {
+            using var world = new GameWorld();
+            var body = BodyAt(world, new Double3(2, 14, -3), new Vector3(1, 0, 0.5f), radius: 1f, restitution: 0.4f);
+            var settings = NewtonSettings(mu: 1200.0, surfaceRadius: 10.0);
+            for (var i = 0; i < 240; i++)
+            {
+                world.StepPhysics(in settings);
+            }
+
+            return world.GetWorldPosition(body);
+        }
+
+        Assert.Equal(Run(), Run());
+    }
 }
