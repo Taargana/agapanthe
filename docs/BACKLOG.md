@@ -336,10 +336,13 @@ path, tests verts, NativeAOT PASS, GPU==CPU) :
   (état re-dérivé ; un-win/un-lose possible si un probe glisse hors/dans la zone entre save et reload — faible proba,
   `.state` 1 octet déférée) · churn titre au bord de zone (glissement frictionless). Hors scope assumé : quickload
   en-process, HUD in-view (VS-4), prefabs/pooling, multi-cible.
-- **VS-4 — HUD minimal** : lecture d'état à l'écran (réutilise ou étend la barre de titre debug ; un overlay texte
-  simple suffit).
-- **VS-5 — Audio** *(stretch)* : un cue opportuniste.
+- ⏸️ **VS-4 — HUD minimal** : **EN PAUSE (session 25)**. La slice a fait son travail (VS-1→VS-3 ont prouvé
+  l'intégration) ; le texte à l'écran revient en **§4quater** comme *infrastructure* (debug overlay → profiler → UI de
+  jeu), pas comme HUD de démo.
+- ⏸️ **VS-5 — Audio** *(stretch)* : **EN PAUSE (session 25)**, sans regret. Repris quand un jeu-échantillon le tire.
 - **Prérequis externe non bloquant** : **P3-M0** (validation Linux/macOS) — à faire dès machine dispo, hors gate slice.
+  *Requalifié en §4quater* : le cross-platform est **revendiqué** sans avoir jamais été validé → item de crédibilité
+  pour un moteur-artefact.
 
 **Ce qui reste explicitement HORS slice** (pour ne pas élargir le scope) : orbites képlériennes (§4bis pas 2), LOD
 sphérique + atmosphère (§4bis pas 3), prefabs/pooling (§4), mini-jeu jouable (ambition supérieure), toute UI au-delà du
@@ -347,6 +350,86 @@ HUD de lecture.
 
 *Mord : c'est le jalon qui transforme « un moteur avec des fondations » en « un moteur avec lequel on a fait tourner un
 monde de bout en bout ». Tant qu'il n'a pas tourné, l'intégration des sous-systèmes reste théorique.*
+
+## 4quater. Cap moteur — « faire d'Agapanthe un vrai engine » *(réorientation instruite, session 25)*
+
+> **Ce que c'est.** La Vertical Slice a prouvé l'*intégration*. Ce cap-ci change la **nature** du projet : passer d'un
+> excellent *runtime* de rendu/simulation à un **moteur** — c'est-à-dire à quelque chose avec lequel on fait un
+> **deuxième jeu, différent, sans éditer le code du moteur**.
+
+**Décisions d'ancrage (humain, session 25) :**
+- **L'artefact, c'est le moteur** (pas un jeu). Les jeux deviennent des **instruments de mesure**.
+- **Généraliste, mais spécialement les sims spatiales à grande échelle** — et capable d'un Stardew-like.
+  *Constat* : ces deux cibles ne divergent PAS côté rendu ; leur goulot commun est **l'authoring de contenu et l'UI**.
+  La généralité vient des **frontières**, pas des features.
+- **Multijoueur pensé dès maintenant**, **serveur autoritaire** (pas lockstep : la byte-identité d'Agapanthe est
+  *intra-binaire* seulement — cf. VS-2 — et le float bit-exact cross-machine à l'échelle `double` planétaire est un piège).
+- **Massif / persistant visé, petite coop possible** → **la topologie doit être un choix de DÉPLOIEMENT, jamais
+  d'architecture** : même code de simulation partout, seule l'**autorité** change (listen-server = coop ; cluster = massif).
+  Corollaire : ne jamais supposer qu'un seul process possède tout — l'**ownership** d'entité est un concept dès le départ.
+
+### Constat de départ (mesuré, session 25)
+
+`Agapanthe.Graphics` 47 types publics · `Rendering` 22 · `Core` 17 · `Assets` 15 · **`Engine` 10 (6 fichiers)** ·
+`Platform` 1 — contre **`samples/Sandbox/Program.cs` = 2 164 lignes** qui contiennent le bootstrap, la génération de
+contenu, 5 scènes, 4 cadrages caméra, les rigs de lumière, l'input, le save/load et le gameplay. **La couche « engine »
+n'existe pas encore : elle est dans le Sandbox.**
+
+### MP-0 — Fondations d'autorité *(le prochain jalon ; décisions quasi irréversibles)*
+
+Tout ici coûte **peu maintenant** et est **catastrophique à rétrofitter**.
+
+1. 🔴 **Identité d'entité globale.** `GlobalId` est un **compteur local** (`_nextGlobalId = 1` par `GameWorld`) → deux
+   serveurs allouent tous deux 1, 2, 3… (**collision**), et VS-1 restaure ce compteur → deux shards sauvegardés sont
+   **inmergeables**. *Décision proposée* : **64 bits partitionné** (poids fort = id d'autorité/shard, solo = shard 0,
+   zéro coordination, marche hors-ligne ; poids faible = compteur local).
+2. 🔴 **Clé de contact physique 64-bit-safe.** `_pairKey = (_pGid[j] << 32) | (uint)_pGid[k]` **écrase l'ID sur 32 bits**
+   (commentaire du code : *« Assumes GlobalId < 2^32 »*). Couplé au point 1 : si on partitionne l'ID, deux entités de
+   shards différents deviennent **silencieusement la même paire de collision**. *Fix* : garder l'ordre déterministe
+   `(minGid, maxGid)` mais sur **deux clés parallèles** au lieu d'un packing 32+32 (reste 0-alloc et déterministe).
+3. 🟠 **Split headless.** `Agapanthe.Engine` référence aujourd'hui **`Rendering` ET `Graphics`** → un serveur dédié
+   embarquerait Vulkan. Il faut une simulation qui tourne **sans GPU**. (`Agapanthe.World` est déjà GPU-free : la moitié
+   du chemin est faite.)
+4. 🟠 **Input → commandes horodatées.** Aujourd'hui l'input **mute directement** (`Key.B` → spawn immédiat). Le netcode
+   exige des commandes **envoyables / bufferisables / rejouables**. Règle *aussi* l'absence d'abstraction d'input
+   (aujourd'hui : `Silk.NET.Input.Key` brut dans un `switch` du Sandbox).
+5. 🟠 **Autorité du temps.** Découpler le **tick de simulation** de la frame de rendu (accumulator + interpolation) —
+   dette déjà notée en P3-M3, que le multijoueur rend **obligatoire**.
+
+### Ensuite, dans l'ordre
+
+- **`Agapanthe.App`** — le host + le contrat `Game` (`OnLoad`/`OnUpdate`/`OnRender`), extraction de `Program.cs`.
+  *Placé APRÈS MP-0 volontairement* : le split headless fait naître la couture que `App` doit formaliser.
+- **Contenu** : identité d'assets stable (GUID/path — solde la dette VS-1 « ordre de chargement différent casse en
+  silence ») → import/cook + graphe de dépendances → **prefabs & scènes déclaratifs** (⚠️ le snapshot VS-1 est une
+  **sauvegarde**, PAS un format d'authoring) → définitions **data-driven** (items/recettes = données, pas du code —
+  prérequis du Stardew-like).
+- **La 2ᵉ slice, dissemblable** : une mini-slice top-down/orthographique. **Le moteur, c'est ce qui est commun aux deux.**
+  Test de généralité le moins cher qui existe ; exposera violemment tout ce qui est hardcodé pour l'échelle planétaire.
+- **Texte & UI** (§ ci-dessous), audio, **queries physiques** (raycast/formes/layers — aujourd'hui on ne peut même pas
+  demander « qu'y a-t-il sous le curseur ? »), **job system** (tout est mono-thread, `AssertOwnerThread` partout =
+  plafond dur), transparence triée.
+- **Netcode réel** : transport, réplication delta, prediction/reconciliation.
+
+### Hooks « massif/persistant » — à prévoir, PAS à implémenter
+
+- **Relevance / interest management** : prévoir le *point d'insertion* d'un filtre par client dans le chemin de
+  réplication (les structures spatiales existent déjà : grille broadphase, culling, origine quantifiée).
+- **Persistance partielle** : VS-1 sauve le monde **entier en un bloc** ; un univers persistant sauve **par région, en
+  incrémental**. Bonne nouvelle : le format (par entité, masque de composants, trié par GlobalId) **se shard
+  naturellement** — ne pas le laisser se figer en « monde entier seulement ».
+- **Réplication** : le snapshot VS-1 est déjà à ~80 % un snapshot réseau ; il manque le **dirty-tracking par composant**
+  et le **delta contre baseline**.
+
+**Explicitement HORS scope maintenant** : server meshing · transport · prediction/reconciliation · lag compensation ·
+anti-triche · éditeur GUI · skinning/animation (sauf si un jeu-échantillon le tire) · terrain LOD/atmosphère.
+
+### Texte & UI *(brainstorm demandé, session 25 — à instruire)*
+
+Piste humaine : **FreeType** en socle, et une description d'UI **façon XAML/WPF bakée à la compilation**.
+Points à trancher au brainstorm : rasterization **offline (cook) vs runtime** · **MSDF** vs atlas bitmap · **shaping**
+(FreeType ne fait PAS le shaping — HarfBuzz/CJK/bidi) · **deux couches d'UI** (immédiate pour le debug/profiler vs
+retenue pour l'UI de jeu) · **source generator** XAML→C# (AOT-pur, zéro réflexion). Voir la spec dédiée quand elle existe.
 
 ## 5. Confort / qualité d'image (opportuniste)
 

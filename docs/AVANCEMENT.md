@@ -320,13 +320,34 @@ Spec : [2026-07-25-vs2-spawn-runtime-newtonian-gravity-design.md](plans/2026-07-
 > physique) : **[BACKLOG.md](BACKLOG.md)** — chaque item dit *ce qui casse sans lui* et *à quelle échelle il devient
 > obligatoire*.
 
-> ### ▶️ PROCHAIN — Vertical Slice, jalon **VS-4 (HUD minimal)**
-> **VS-1 CLOSE** (S22) · **VS-2 CLOSE** (S23) · **VS-3 CLOSE** (S24 — bloc ci-dessous). Cap :
-> **[Vertical Slice, backlog §4ter](BACKLOG.md)**. Prochain dans l'ordre : **VS-4 — HUD minimal** (lecture d'état à
-> l'écran ; aujourd'hui le défi VS-3 ne parle que par `window.Title` — VS-4 apporte un overlay texte in-view, premier
-> nouveau chemin de rendu depuis P3-M8). Puis VS-5 audio (stretch). **P3-M0 (Linux) non bloquant.**
+> ### ▶️ PROCHAIN — **Cap moteur** (réorientation S25) : jalon **MP-0 — fondations d'autorité**
+> **Vertical Slice CLOSE dans son intention** : VS-1 (S22) · VS-2 (S23) · VS-3 (S24) ont prouvé l'intégration
+> `input → spawn → physique → règle → save/load`. **VS-4 (HUD) et VS-5 (audio) sont EN PAUSE** (décision humaine S25).
+>
+> **Nouveau cap — [backlog §4quater](BACKLOG.md)** : faire d'Agapanthe un **vrai engine** (l'artefact = le moteur, pas
+> un jeu). Ancrages humains : généraliste **mais** spécialement sims spatiales grande échelle (et un Stardew-like doit
+> être faisable) · **multijoueur pensé maintenant, serveur autoritaire** · **massif/persistant visé, petite coop
+> possible** → la topologie est un choix de **déploiement**, jamais d'architecture.
+>
+> **Constat mesuré (S25)** : `Engine` = 10 types publics / 6 fichiers, contre **`Sandbox/Program.cs` = 2 164 lignes**
+> qui contiennent bootstrap + contenu + 5 scènes + 4 caméras + input + gameplay. **La couche « engine » est dans le
+> Sandbox.** Test qui tranche : *peut-on faire un 2ᵉ jeu différent sans éditer le moteur ?* → non, aujourd'hui.
+>
+> **MP-0 (prochain jalon, décisions quasi irréversibles)** — détail et justification dans §4quater :
+> 1. 🔴 **`GlobalId` = compteur local** (`_nextGlobalId = 1`/monde) → collision inter-process, shards inmergeables.
+>    Proposition : **64 bits partitionné** (poids fort = shard, solo = 0).
+> 2. 🔴 **Clé de contact physique** `(_pGid[j] << 32) | (uint)_pGid[k]` **écrase l'ID sur 32 bits** → couplé au point 1,
+>    collision **silencieuse** entre shards. Fix : deux clés parallèles, ordre déterministe préservé.
+> 3. 🟠 **Split headless** : `Engine` référence `Rendering` + `Graphics` → pas de serveur dédié sans Vulkan.
+> 4. 🟠 **Input → commandes horodatées** (aujourd'hui l'input mute directement).
+> 5. 🟠 **Tick de simulation découplé** de la frame (accumulator + interpolation) — dette P3-M3 rendue obligatoire.
+>
+> **Ensuite** : `Agapanthe.App` (host + contrat `Game`, extraction de `Program.cs`) → contenu (identité d'assets stable,
+> cook, prefabs/scènes, data-driven) → **2ᵉ slice dissemblable** (top-down — test de généralité) → texte/UI, audio,
+> queries physiques, job system → netcode réel. **Brainstorm demandé : texte & UI** (FreeType ? MSDF ? XAML baké).
+>
 > Dettes reportées : latch non-monotone au reload (VS-3 A1), lifetime/rest-cull des corps (VS-2 m2), fingerprint
-> d'assets (VS-1). Ouvrir l'interview de conception (absolute-brainstorm) sur VS-4.
+> d'assets (VS-1), **P3-M0 Linux/macOS requalifié en item de crédibilité** du moteur-artefact.
 
 **Point de reprise (2026-07-23, session 20)** : **P3-M7 buffers device-local + réduction du raster d'ombre 4× — CLOS.**
 Double audit PASS (`csharp-lowlevel` PASS · `graphics-3d` PASS with concerns ; 0 🔴/🟠, findings 🟡 appliqués),
