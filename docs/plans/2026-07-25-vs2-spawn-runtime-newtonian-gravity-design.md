@@ -208,6 +208,9 @@ never mutates archetypes under `StepPhysics`'s chunk iteration. That invariant i
 - **Single attractor in `PhysicsSettings`**, not a component — multi-planet / per-entity attractors deferred (YAGNI).
 - **Broadphase cell at planetary scale:** a large cloud of probes clustered near one surface point shares ~1 cell
   (narrowphase O(n²)). Fine for the demo's handful of probes; noted.
+- **No probe lifetime / rest-cull (audit m2):** the `planet-drop` spawner drops indefinitely and never despawns, so a
+  long run grows the entity count (and persistent slots) without bound. Inherent to the "pile of probes" demo; a
+  lifetime / at-rest-cull policy is required before the persistent planetary anchor. *Debt, also in `CLAUDE.md`.*
 - **No body lifetime / at-rest cull** (audit m2): the demo spawner drops probes forever — entity + persistent-slot count
   grows unbounded over a long run. Inherent to a "pile of probes" demo, but the persistent planetary anchor will need a
   lifetime or rest-cull policy for runtime-spawned bodies. Deferred.
