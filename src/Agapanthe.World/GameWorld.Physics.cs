@@ -448,4 +448,50 @@ public sealed partial class GameWorld
 
     /// <summary>Test/inspection accessor: the body's current linear velocity.</summary>
     internal Vector3 GetVelocity(EntityRef entity) => Deref(entity).Get<Velocity>().Linear;
+
+    /// <summary>
+    /// A generic, GPU-free, 0-alloc spatial aggregation over the rigid bodies (VS-3): counts the total, how many are
+    /// <see cref="LandingCounts.Airborne"/> (surface more than <paramref name="surfaceBand"/> above the attractor
+    /// surface), and how many are on the surface AND within <paramref name="zoneRadius"/> of <paramref name="zoneCenter"/>
+    /// (<see cref="LandingCounts.InZone"/>). No velocity threshold: on a frictionless sphere a landed body may keep
+    /// sliding, so "landed" means touching the ground, not stationary. Iterates the same <c>BodyDesc</c> query the
+    /// physics uses; returns a plain int struct, so no Arch type leaks. The landing-challenge rule (app layer) turns
+    /// these counts into a win/lose status — the World never learns what a "challenge" is.
+    /// </summary>
+    public LandingCounts QuerySurfaceContacts(
+        Double3 attractorCenter, double surfaceRadius, double surfaceBand, Double3 zoneCenter, double zoneRadius)
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        AssertOwnerThread();
+
+        var total = 0;
+        var airborne = 0;
+        var inZone = 0;
+        var surfaceCut = surfaceRadius + surfaceBand;
+        var zoneR2 = zoneRadius * zoneRadius;
+        foreach (ref var chunk in _world.Query(in BodyDesc))
+        {
+            var positions = chunk.GetSpan<WorldPosition>();
+            var bodies = chunk.GetSpan<RigidBody>();
+            var n = chunk.Count;
+            for (var i = 0; i < n; i++)
+            {
+                total++;
+                var p = positions[i].Value;
+                var altitude = (p - attractorCenter).Length - bodies[i].Radius; // signed height of the body's surface
+                if (altitude > surfaceCut)
+                {
+                    airborne++;
+                    continue; // still in the air → cannot be "in the zone" (which requires being on the ground)
+                }
+
+                if (Double3.DistanceSquared(p, zoneCenter) <= zoneR2)
+                {
+                    inZone++;
+                }
+            }
+        }
+
+        return new LandingCounts(total, airborne, inZone);
+    }
 }

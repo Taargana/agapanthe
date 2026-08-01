@@ -1,6 +1,6 @@
 # Agapanthe — Plan complet & état d'avancement
 
-**Mis à jour** : 2026-07-26 (session 23 — **VS-2 CLOS** : spawn runtime différé (`SpawnBodyDeferred`) + gravité newtonienne (attracteur radial + sol radial) ; double audit PASS-with-concerns [4,5/5], verdict visuel PASS ; scène `planet-drop`, 355 tests, AOT PASS) · 2026-07-24 (session 22 — **VS-1 CLOS** : sérialisation du World save/load, double audit PASS, verdict humain PASS) · 2026-07-23 (session 20 — **P3-M7 CLOS** : buffers device-local + réduction du raster d'ombre 4×→~1× ; double audit PASS, verdict visuel PASS incl. soleil bas ; A+B ~15,3 → ~8,0 ms ≈ ×2) · 2026-07-23 (session 19 — **P3-M6 CLOS** : slots persistants dirty-trackés + cull d'ombre GPU ; double audit PASS, verdict visuel PASS ; voir « Point de reprise ») · 2026-07-14 (session 14 — **vérifs humaines de la Phase 2 soldées** : banc M4 PASS with concerns [perf → P3-M1], précision M3 PASS, hot reload M1 PASS) · 2026-07-13 (session 13 — **PHASE 2 CLOSE** — frustum culling + montée en charge : 10 000 entités cullées à 10 000 km, 0 alloc/frame, en NativeAOT ; double audit signe la clôture) · **Machines de dev** : macOS (Apple M3, MoltenVK) + Windows 11 (RTX 5070 Ti, Vulkan 1.3 core) · **Cibles** : Windows / Linux / macOS
+**Mis à jour** : 2026-07-26 (session 24 — **VS-3 CLOS** : glu gameplay = défi d'atterrissage planétaire ; `QuerySurfaceContacts` + règle latchée `LandingChallengeRule` + scène `planet-challenge` (input→spawn→règle→save/resume) ; double audit PASS / PASS-with-concerns 4/5, verdict humain PASS ; 372 tests, AOT PASS) · 2026-07-26 (session 23 — **VS-2 CLOS** : spawn runtime différé (`SpawnBodyDeferred`) + gravité newtonienne (attracteur radial + sol radial) ; double audit PASS-with-concerns [4,5/5], verdict visuel PASS ; scène `planet-drop`, 355 tests, AOT PASS) · 2026-07-24 (session 22 — **VS-1 CLOS** : sérialisation du World save/load, double audit PASS, verdict humain PASS) · 2026-07-23 (session 20 — **P3-M7 CLOS** : buffers device-local + réduction du raster d'ombre 4×→~1× ; double audit PASS, verdict visuel PASS incl. soleil bas ; A+B ~15,3 → ~8,0 ms ≈ ×2) · 2026-07-23 (session 19 — **P3-M6 CLOS** : slots persistants dirty-trackés + cull d'ombre GPU ; double audit PASS, verdict visuel PASS ; voir « Point de reprise ») · 2026-07-14 (session 14 — **vérifs humaines de la Phase 2 soldées** : banc M4 PASS with concerns [perf → P3-M1], précision M3 PASS, hot reload M1 PASS) · 2026-07-13 (session 13 — **PHASE 2 CLOSE** — frustum culling + montée en charge : 10 000 entités cullées à 10 000 km, 0 alloc/frame, en NativeAOT ; double audit signe la clôture) · **Machines de dev** : macOS (Apple M3, MoltenVK) + Windows 11 (RTX 5070 Ti, Vulkan 1.3 core) · **Cibles** : Windows / Linux / macOS
 
 ## Vision
 
@@ -267,6 +267,39 @@ Spec : [2026-07-24-vs1-world-serialization-design.md](plans/2026-07-24-vs1-world
 
 **Dette / notée** : source-unique émergente (le triple switch DUPLIQUE l'ordre du registre — gardé par le test d'ordre figé + `Save` qui lève sur index inconnu, mais pas une table unique) · `GlobalId` sérialisé ×2 (clé + composant 0, inoffensif) · **Generation d'Option 1 non exploitée** (un ordre de chargement d'assets différent casse en silence — futur *fingerprint d'assets* fourni par le caller, backlog) · garde fresh-world plus permissive que « fraîchement construit » (inoffensif, `Load` écrase l'état stale).
 
+## VS-3 — Glu gameplay : défi d'atterrissage planétaire (2026-07-26, session 24)
+
+**CLOS.** Double audit **PASS** (`csharp-lowlevel`) / **PASS-with-concerns 4/5** (`engine-architect`), findings
+appliqués ; verdict humain PASS. Livre la **glu de gameplay minimale** de la Vertical Slice : câble **input → spawn
+(VS-2) → règle d'état → save/resume (VS-1)** sous l'ancre planétaire, sans nouveau chemin de rendu (HUD in-view = VS-4).
+
+**Trois couches, layering respecté** : le cœur (`Agapanthe.World`) ne gagne qu'une **requête spatiale générique**
+`QuerySurfaceContacts(C, R, band, zoneC, zoneR) → LandingCounts(Total, Airborne, InZone)` (itère `BodyDesc`, 0-alloc
+prouvé par test, aucun type Arch ne fuit, « posé = SUR la surface » sans seuil de vitesse — robuste au glissement
+frictionless) ; la **règle pure latchée** `LandingChallengeRule.Evaluate(counts, shotsIssued, prev)` vit dans
+`Agapanthe.Engine` (testable GPU-free : Won si `InZone≥N`, Lost si budget épuisé **et** `Airborne==0`, terminal
+monotone intra-session) ; le `LandingChallengeSystem` (Camera + `window.Title`) dans le Sandbox.
+
+**Boucle** (`AGAPANTHE_SCENE=planet-challenge`) : voler au-dessus d'une planète, `B` largue une probe **radiale sous la
+caméra** (`n̂=normalize(camPos−C)`, chute newtonienne VS-2), poser **N=3** dans une zone-cible en **≤ M=6** tirs. Beacon
+émissif drawable (pas un body → jamais compté). Système en **PostSimulation** (positions post-physique) ; `TryShoot`
+gardé par `_shotsIssued<M` (pas la query — un probe droppé est dans `_pendingSpawn` jusqu'au barrier). Titre reconstruit
+**seulement** sur changement `(InZone, shotsIssued, status)` → 0-alloc régime stable.
+
+**Save/resume relaunch-only** (`F5`→`world.Save`, flush intégré ; relaunch `AGAPANTHE_LOAD`) : **zéro octet ajouté au
+snapshot VS-1** — `_shotsIssued` re-semé du body count post-Load (probes jamais despawn → count=tirs), `landed/airborne`
+dérivés de la query, statut re-évalué une fois. Précondition : mêmes constantes de scène — **épinglées dans les profils
+Rider** `planet-challenge` (audit A2).
+
+**Métriques** : **372 tests** (17 VS-3 GPU-free + probe AOT) · 0 warning · scène headless **0 validation / 0 leak**
+(226 resources) · **NativeAOT PASS** (`QuerySurfaceContacts` rooté). Double audit findings : A2 (constantes épinglées)
++ `F5` I/O gardée = corrigés ; A1 (latch non-monotone au reload) + A3 (log non ré-émis) + churn frictionless = réconciliés
+en dette documentée. Spec : [plans/2026-07-26-vs3-landing-challenge-design.md](plans/2026-07-26-vs3-landing-challenge-design.md).
+
+**Dette léguée** : 🟠 **latch Won/Lost non-monotone à travers un reload** (`_status` re-dérivé du monde ; un probe qui
+glisse hors/dans la zone entre save et reload peut un-win/un-lose — faible probabilité ; alternative `.state` 1 octet
+déférée) · 🟡 churn du titre au bord de zone (glissement sans friction) · 🟡 offset radial `≈r` dans `InZone` (by-design).
+
 ## VS-2 — Spawn runtime différé + gravité newtonienne (2026-07-26, session 23)
 
 Spec : [2026-07-25-vs2-spawn-runtime-newtonian-gravity-design.md](plans/2026-07-25-vs2-spawn-runtime-newtonian-gravity-design.md). **Deuxième jalon de la Vertical Slice** — solde la **dette P3-M3** (`SpawnBody` immédiat → impossible de spawner un corps en cours de simulation sans muter les archétypes sous l'itération de `StepPhysics`) et, sur décision humaine en cours d'interview, ajoute une **gravité newtonienne** minimale pour donner une démo d'intégration cohérente (sonde larguée vers une planète).
@@ -287,14 +320,13 @@ Spec : [2026-07-25-vs2-spawn-runtime-newtonian-gravity-design.md](plans/2026-07-
 > physique) : **[BACKLOG.md](BACKLOG.md)** — chaque item dit *ce qui casse sans lui* et *à quelle échelle il devient
 > obligatoire*.
 
-> ### ▶️ PROCHAIN — Vertical Slice, jalon **VS-3 (glu gameplay)**
-> **VS-1 sérialisation CLOSE** (S22) · **VS-2 spawn runtime + gravité newtonienne CLOSE** (S23, double audit
-> PASS-with-concerns + verdict visuel PASS ; section ci-dessus). Cap : **[Vertical Slice, backlog §4ter](BACKLOG.md)** —
-> preuve d'intégration, ancre planétaire, Windows d'abord.
-> Prochain dans l'ordre de dépendance : **VS-3 glu gameplay** (assembler spawn+physique+sérialisation en une boucle
-> jouable minimale), puis **VS-4 HUD** → **VS-5 audio** (stretch). **P3-M0 validation Linux/macOS** toujours dûe (non
-> bloquante). Dettes VS-2 à reprendre le moment venu : **lifetime/rest-cull des corps runtime** (m2), fingerprint
-> d'assets pour la sérialisation (VS-1). Ouvrir l'interview de conception (absolute-brainstorm) sur VS-3.
+> ### ▶️ PROCHAIN — Vertical Slice, jalon **VS-4 (HUD minimal)**
+> **VS-1 CLOSE** (S22) · **VS-2 CLOSE** (S23) · **VS-3 CLOSE** (S24 — bloc ci-dessous). Cap :
+> **[Vertical Slice, backlog §4ter](BACKLOG.md)**. Prochain dans l'ordre : **VS-4 — HUD minimal** (lecture d'état à
+> l'écran ; aujourd'hui le défi VS-3 ne parle que par `window.Title` — VS-4 apporte un overlay texte in-view, premier
+> nouveau chemin de rendu depuis P3-M8). Puis VS-5 audio (stretch). **P3-M0 (Linux) non bloquant.**
+> Dettes reportées : latch non-monotone au reload (VS-3 A1), lifetime/rest-cull des corps (VS-2 m2), fingerprint
+> d'assets (VS-1). Ouvrir l'interview de conception (absolute-brainstorm) sur VS-4.
 
 **Point de reprise (2026-07-23, session 20)** : **P3-M7 buffers device-local + réduction du raster d'ombre 4× — CLOS.**
 Double audit PASS (`csharp-lowlevel` PASS · `graphics-3d` PASS with concerns ; 0 🔴/🟠, findings 🟡 appliqués),

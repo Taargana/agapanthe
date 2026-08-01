@@ -85,6 +85,10 @@ FrameOrchestrator? orchestrator = null;
 // unless AGAPANTHE_SCENE=planet-drop built it.
 ProbeDropSystem? probeDropper = null;
 
+// VS-3 planet-challenge: the landing-challenge system, hoisted so the B keypress can drop an aimed probe and F5 can
+// read its state. Null unless AGAPANTHE_SCENE=planet-challenge built it.
+LandingChallengeSystem? landingChallenge = null;
+
 window.Loaded += () =>
 {
     var requiredExtensions = window.GetRequiredVulkanExtensions();
@@ -168,15 +172,20 @@ window.Loaded += () =>
     var sceneSpec = Environment.GetEnvironmentVariable("AGAPANTHE_SCENE");
     // VS-1: AGAPANTHE_SAVE=<path> snapshots the world after the scene is built; AGAPANTHE_LOAD=<path> restores it
     // instead of spawning. The Option 1 seam contract holds because both runs load the SAME assets in the same order
-    // (the planet/Sun spheres) before applying the snapshot — the serialized handles then still resolve. Load forces
-    // the planet scene (the vertical-slice anchor): the assets are loaded but the entities come from the snapshot.
+    // (planet/Sun, then probe/beacon) before applying the snapshot — the serialized handles then still resolve. Load
+    // defaults to the plain planet scene; set AGAPANTHE_SCENE=planet-challenge alongside AGAPANTHE_LOAD to resume a
+    // challenge (VS-3). The assets are loaded (spawnEntities:false) but the entities come from the snapshot.
     var savePath = Environment.GetEnvironmentVariable("AGAPANTHE_SAVE");
     var loadPath = Environment.GetEnvironmentVariable("AGAPANTHE_LOAD");
     var loadMode = loadPath is { Length: > 0 };
     // VS-2: planet-drop is the Newtonian integration demo — the P3-M8 planet + Sun, plus a runtime probe spawner and
     // radial gravity. It IS a planet scene (same sun-only lighting / black-space env), but with a near-surface camera.
     var planetDrop = string.Equals(sceneSpec, "planet-drop", StringComparison.OrdinalIgnoreCase);
-    var planetScene = loadMode || planetDrop || string.Equals(sceneSpec, "planet", StringComparison.OrdinalIgnoreCase);
+    // VS-3: planet-challenge is the gameplay-glue demo — same planet + Newtonian physics, plus a target zone/beacon and
+    // the aimed landing challenge (fly, B drops radially below the camera, land N in ≤ M shots; F5 saves).
+    var planetChallenge = string.Equals(sceneSpec, "planet-challenge", StringComparison.OrdinalIgnoreCase);
+    var planetScene = loadMode || planetDrop || planetChallenge
+        || string.Equals(sceneSpec, "planet", StringComparison.OrdinalIgnoreCase);
     var (rows, cols) = ParseGrid(sceneSpec);
     var dropCount = ParseDrop(sceneSpec);
     bool multiInstance;
@@ -187,6 +196,15 @@ window.Loaded += () =>
     var probeReady = false;
     var probeRadius = 0f;
     var dropCentre = Double3.Zero;            // world point directly above the +Y surface anchor where probes appear
+    // VS-3 planet-challenge state (filled by SetupPlanetChallenge, consumed by the orchestrator + camera):
+    var challengeReady = false;
+    var challengeTarget = Double3.Zero;       // the target zone centre (a surface point)
+    var challengeBeacon = Double3.Zero;       // the floating beacon position (for camera framing)
+    var challengeTargetRadius = 0d;
+    var challengeSurfaceBand = 0d;
+    var challengeDropHeight = 0d;
+    var challengeN = 0;
+    var challengeShots = 0;
     // P3-M8: the planet scene builds its OWN entities (planet + Sun spheres in Double3), ignoring the loaded glTF —
     // it is the near+far reversed-Z stress bench, not a model viewer. Set below so the camera/light/env branches
     // configure it for sun-only lighting instead of the studio/outdoor defaults.
@@ -211,6 +229,24 @@ window.Loaded += () =>
             (planetPhysics, probeSpec, dropCentre, probeRadius) = SetupPlanetDrop(
                 device, registry, renderer.MaterialSetLayout, worldOrigin, planetRadius);
             probeReady = true;
+        }
+        else if (planetChallenge)
+        {
+            // Loads probe + beacon assets in the same order as the save run (Option 1); spawns the beacon only when
+            // NOT loading (in load mode the beacon entity comes from the snapshot). Physics/probe reuse the drop path.
+            var setup = SetupPlanetChallenge(
+                device, registry, world, renderer.MaterialSetLayout, worldOrigin, planetRadius, spawnEntities: !loadMode);
+            planetPhysics = setup.Physics;
+            probeSpec = setup.ProbeSpec;
+            probeRadius = setup.ProbeRadius;
+            challengeTarget = setup.Target;
+            challengeBeacon = setup.Beacon;
+            challengeTargetRadius = setup.TargetRadius;
+            challengeSurfaceBand = setup.SurfaceBand;
+            challengeDropHeight = setup.DropHeight;
+            challengeN = setup.TargetCount;
+            challengeShots = setup.ShotBudget;
+            challengeReady = true;
         }
 
         multiInstance = true;
@@ -249,7 +285,11 @@ window.Loaded += () =>
     // orient yaw/pitch to look at the centre. The planet scene frames on the PLANET only (its bounds include the
     // Sun at 7.48e10 m, which would push the camera a hundred million km away), and picks a reversed-Z near/far that
     // holds both the planet surface and the distant Sun.
-    if (planetDrop)
+    if (planetChallenge)
+    {
+        FramePlanetChallengeCamera(camera, controller, renderer, worldOrigin, planetSunOrigin, planetRadius, challengeBeacon);
+    }
+    else if (planetDrop)
     {
         FramePlanetDropCamera(camera, controller, renderer, worldOrigin, planetSunOrigin, planetRadius, planetSunTravelDir);
     }
@@ -466,6 +506,20 @@ window.Loaded += () =>
         Log.Info($"Sandbox: [physics] planet-drop enabled — a probe every {dropEvery} ticks, key B drops one.");
     }
 
+    // VS-3 planet-challenge: Newtonian physics + the landing-challenge system (PostSimulation, reads post-physics
+    // positions). B drops an aimed probe (radial, below the camera), F5 saves; land N in ≤ M shots. Enabled by the
+    // scene name. `_shotsIssued`/`_status` seed from the world so a reloaded game resumes at the right state.
+    if (planetChallenge && planetPhysics is { } challengePhysics && challengeReady)
+    {
+        orchestrator.Add(Stage.Simulation, new PhysicsSystem(world!, in challengePhysics));
+        landingChallenge = new LandingChallengeSystem(
+            world!, window, worldOrigin, planetRadius, challengeSurfaceBand, challengeTarget, challengeTargetRadius,
+            in probeSpec, probeRadius, challengeDropHeight, challengeN, challengeShots);
+        orchestrator.Add(Stage.PostSimulation, landingChallenge);
+        Log.Info($"Sandbox: [challenge] planet-challenge enabled — land {challengeN} probes in ≤ {challengeShots} shots; " +
+                 "fly, B drops (aimed radial), F5 saves. Relaunch with AGAPANTHE_LOAD to resume.");
+    }
+
     // Camera-relative proof (spec §3.3): both are world-space doubles, and the GPU sees neither — it only ever
     // sees their difference. Logged so a far-out run is visibly far out, not silently at the origin.
     Log.Info($"Sandbox: model at world origin {worldOrigin}, eye at {camera.Position} " +
@@ -554,10 +608,31 @@ window.KeyPressed += key =>
             renderer.Lights.Directional = d;
             Log.Info($"Key light direction: {d.Direction}");
             break;
-        // B: drop one probe (VS-2 planet-drop only). Edge-triggered, off the deterministic gate — the human's
-        // hands-on verdict. No-op in any other scene. Same owner thread as the tick, so the deferred spawn is safe.
+        // B: drop one probe. Edge-triggered, same owner thread as the tick → the deferred spawn is safe.
+        // planet-challenge = an AIMED radial drop below the camera (budget-checked); planet-drop = the VS-2 spawner.
+        case Key.B when landingChallenge is not null:
+            landingChallenge.TryShoot(camera.Position);
+            break;
         case Key.B when probeDropper is not null:
             probeDropper.DropOne();
+            break;
+        // F5: quicksave the world (VS-3). Reload = relaunch with AGAPANTHE_LOAD (VS-1). Between ticks → safe; Save
+        // flushes pending spawns first, so a just-dropped probe is included.
+        case Key.F5 when landingChallenge is not null && world is not null:
+            var saveTarget = Environment.GetEnvironmentVariable("AGAPANTHE_SAVE") is { Length: > 0 } sp ? sp : "challenge.save";
+            // Guard the I/O: a locked/invalid path must not crash the game mid-play from an input callback (audit 🟡).
+            try
+            {
+                using var fs = File.Create(saveTarget);
+                world.Save(fs);
+                Log.Info($"Sandbox: [challenge] quicksaved to '{saveTarget}'. Relaunch AGAPANTHE_SCENE=planet-challenge " +
+                         $"AGAPANTHE_LOAD={saveTarget} to resume.");
+            }
+            catch (IOException ex)
+            {
+                Log.Warn($"Sandbox: [challenge] quicksave to '{saveTarget}' failed: {ex.Message}");
+            }
+
             break;
     }
 
@@ -655,7 +730,9 @@ window.Rendered += dt =>
     // candidate count (the GPU culls it); draws are the instanced scene+shadow calls.
     hudElapsed += dt;
     hudFrames++;
-    if (hudElapsed >= 0.25 && renderer is not null)
+    // In planet-challenge the LandingChallengeSystem owns the title bar (landed/shots/status) — cede it so the two do
+    // not fight and its 0-alloc-when-unchanged property holds. Everywhere else, the debug FPS/draws line.
+    if (hudElapsed >= 0.25 && renderer is not null && landingChallenge is null)
     {
         var fps = hudFrames / hudElapsed;
         var msPerFrame = hudElapsed / hudFrames * 1000.0;
@@ -1191,6 +1268,74 @@ static (PhysicsSettings Physics, ImportedEntitySpec ProbeSpec, Double3 DropCentr
         $"Sandbox: [scene] planet-drop — probe r={probeRadius:F1} m from {dropHeight:F0} m up, surface g={g:F2} m/s² " +
         $"(μ={mu:E2}); tune with AGAPANTHE_DROP_EVERY / _PLANET_MU / _DROP_HEIGHT / _PROBE_RADIUS, key B drops one.");
     return (physics, probeSpecs[0], dropCentre, probeRadius);
+}
+
+// VS-3 planet-challenge setup: the Newtonian physics (same attractor as planet-drop) + a target zone and a floating
+// emissive beacon. Loads probe + beacon assets in a FIXED order (Option 1 seam) so a save/relaunch resolves the same
+// handles; the beacon is spawned only when spawnEntities (in load mode the beacon entity comes from the snapshot).
+// Returns everything the orchestrator + camera need. GPU assets flow through the normal registry.Load path.
+static ChallengeSetup SetupPlanetChallenge(
+    GraphicsDevice device, ResourceRegistry registry, GameWorld world, DescriptorSetLayout materialLayout,
+    Double3 planetCentre, double planetRadius, bool spawnEntities)
+{
+    var probeRadius = (float)EnvDouble("AGAPANTHE_PROBE_RADIUS", 3.0);
+    var dropHeight = EnvDouble("AGAPANTHE_DROP_HEIGHT", 120.0);
+    var mu = EnvDouble("AGAPANTHE_PLANET_MU", 10.0 * planetRadius * planetRadius); // surface g = μ/R² ≈ 10 m/s²
+    var physics = new PhysicsSettings(Vector3.Zero, groundY: 0f, fixedDt: 1f / 60f)
+        .WithAttractor(planetCentre, mu, planetRadius);
+
+    var targetRadius = EnvDouble("AGAPANTHE_ZONE_RADIUS", 15.0);
+    var surfaceBand = EnvDouble("AGAPANTHE_SURFACE_BAND", 3.0 * probeRadius); // "on the surface" tolerance (feel param)
+    var targetCount = (int)Math.Max(EnvDouble("AGAPANTHE_CHALLENGE_N", 3.0), 1.0);
+    var shotBudget = (int)Math.Max(EnvDouble("AGAPANTHE_CHALLENGE_SHOTS", 6.0), 1.0);
+
+    // Target = a deterministic surface point, an arc of TARGET_DIST metres from the +Y north-pole start anchor in the
+    // TARGET_DIR compass direction (0° = +X). theta ≪ 1 (dist ≪ R) → essentially the pole shifted horizontally.
+    var dist = EnvDouble("AGAPANTHE_TARGET_DIST", 500.0);
+    var phi = EnvDouble("AGAPANTHE_TARGET_DIR", 0.0) * Math.PI / 180.0;
+    var theta = dist / planetRadius;
+    var tdir = new Double3(Math.Sin(theta) * Math.Cos(phi), Math.Cos(theta), Math.Sin(theta) * Math.Sin(phi));
+    var target = planetCentre + (tdir * planetRadius);
+    var markerHeight = EnvDouble("AGAPANTHE_TARGET_MARKER_HEIGHT", 40.0);
+    var beacon = planetCentre + (tdir * (planetRadius + markerHeight));
+
+    // Probe first (fixed asset order), same warm sphere as planet-drop. Not spawned here — the player drops them.
+    var probeMaterial = new MaterialAsset
+    {
+        BaseColorFactor = new Vector4(0.9f, 0.35f, 0.1f, 1f),
+        MetallicFactor = 0.1f,
+        RoughnessFactor = 0.6f,
+        Name = "Probe",
+    };
+    var (_, probeSpecs) = registry.Load(
+        device, BuildSphereModel(probeRadius, probeMaterial, "Probe", 24, 12), materialLayout, target);
+
+    // Beacon: a bright green emissive marker floating over the zone — the aiming aid. A static drawable, NOT a rigid
+    // body (so it is never counted as a shot and never collides), persisted by VS-1 like any drawable.
+    var beaconMaterial = new MaterialAsset
+    {
+        BaseColorFactor = new Vector4(0.02f, 0.02f, 0.02f, 1f),
+        MetallicFactor = 0f,
+        RoughnessFactor = 1f,
+        EmissiveFactor = new Vector3(0.15f, 1f, 0.35f),
+        EmissiveStrength = 30f,
+        Name = "Beacon",
+    };
+    var (_, beaconSpecs) = registry.Load(
+        device, BuildSphereModel((float)targetRadius, beaconMaterial, "Beacon", 32, 16), materialLayout, beacon);
+    if (spawnEntities)
+    {
+        foreach (var s in beaconSpecs)
+        {
+            world.SpawnImported(in s, castsShadow: false);
+        }
+    }
+
+    Log.Info(
+        $"Sandbox: [scene] planet-challenge — target {targetRadius:F0} m zone {dist:F0} m from start, land {targetCount} " +
+        $"in ≤ {shotBudget} shots. Tune AGAPANTHE_CHALLENGE_N/_SHOTS/_ZONE_RADIUS/_TARGET_DIST/_DIR.");
+    return new ChallengeSetup(
+        physics, probeSpecs[0], probeRadius, target, beacon, targetRadius, surfaceBand, dropHeight, targetCount, shotBudget);
 }
 
 // Reads a scalar env var as a double (invariant culture), falling back to a default. For the planet scene's
@@ -1771,6 +1916,29 @@ static void FramePlanetDropCamera(
     controller.MoveSpeed = 20f;   // a walking-scale station, not a planet-crossing flyer
 }
 
+// Frames the VS-3 planet-challenge: the player starts above the +Y north-pole anchor, looking straight at the beacon
+// so the target is visible immediately; they fly toward it (faster MoveSpeed) and `B` drops a probe radially below.
+// World up is +Y (north-pole anchor), so the free camera's up-model stays valid.
+static void FramePlanetChallengeCamera(
+    Camera camera, FreeCameraController controller, Renderer renderer,
+    Double3 planetCentre, Double3 sunOrigin, double planetRadius, Double3 beacon)
+{
+    var startAlt = EnvDouble("AGAPANTHE_CHALLENGE_CAM_ALT", 120.0);
+    var eye = planetCentre + new Double3(0.0, planetRadius + startAlt, 0.0);
+    camera.Position = eye;
+
+    // Look straight at the beacon (ahead + slightly down) so the target frames on the first frame.
+    var forward = Vector3.Normalize((beacon - eye).ToVector3(Double3.Zero));
+    camera.Pitch = MathF.Asin(Math.Clamp(forward.Y, -1f, 1f));
+    camera.Yaw = MathF.Atan2(forward.X, -forward.Z);
+    camera.FovY = (float)(EnvDouble("AGAPANTHE_PLANET_FOV", 70.0) * MathF.PI / 180.0);
+
+    camera.Near = 1f;
+    camera.Far = (float)(Double3.Distance(planetCentre, sunOrigin) * 1.4);
+    renderer.ShadowDistance = 1f;
+    controller.MoveSpeed = (float)EnvDouble("AGAPANTHE_CHALLENGE_MOVE_SPEED", 60.0); // fast enough to reach the target
+}
+
 file static class DebugViews
 {
     public static readonly string[] Names =
@@ -1878,4 +2046,119 @@ file sealed class ProbeDropSystem : ISystem
         _world.SpawnBodyDeferred(in spec, Vector3.Zero, inverseMass: 1f, restitution: 0.4f, radius: _radius);
         _dropped++;
     }
+}
+
+// VS-3 planet-challenge setup bundle (what SetupPlanetChallenge produces): the Newtonian physics, the probe base spec,
+// the target zone + beacon geometry, the "on the surface" band and drop height, and the win/budget numbers (N, M).
+file readonly record struct ChallengeSetup(
+    PhysicsSettings Physics, ImportedEntitySpec ProbeSpec, float ProbeRadius, Double3 Target, Double3 Beacon,
+    double TargetRadius, double SurfaceBand, double DropHeight, int TargetCount, int ShotBudget);
+
+// VS-3 landing-challenge system, as a Stage.PostSimulation system (reads positions AFTER the Simulation-stage physics).
+// Each tick it queries the world (generic spatial counts), evaluates the pure latched rule, and — only when a shown
+// value changed — rewrites the window title (0-alloc in steady state) and logs terminal transitions once. TryShoot()
+// (called by the B keypress) drops an AIMED probe radially below the camera, budget-checked by the authoritative
+// _shotsIssued (NOT the world query, which cannot see a spawn still pending at the barrier). Both counters seed from
+// the world at construction, so a reloaded game resumes at the right state.
+file sealed class LandingChallengeSystem : ISystem
+{
+    private readonly GameWorld _world;
+    private readonly EngineWindow _window;
+    private readonly Double3 _attractorCenter;
+    private readonly double _surfaceRadius;
+    private readonly double _surfaceBand;
+    private readonly Double3 _zoneCenter;
+    private readonly double _zoneRadius;
+    private readonly ImportedEntitySpec _probeSpec;
+    private readonly float _probeRadius;
+    private readonly double _dropHeight;
+    private readonly LandingChallengeRule _rule;
+    private readonly int _targetCount;
+    private readonly int _shotBudget;
+    private int _shotsIssued;
+    private LandingStatus _status;
+    private int _lastInZone = -1;
+    private int _lastShots = -1;
+    private LandingStatus _lastStatus = (LandingStatus)(-1);
+
+    public LandingChallengeSystem(
+        GameWorld world, EngineWindow window, Double3 attractorCenter, double surfaceRadius, double surfaceBand,
+        Double3 zoneCenter, double zoneRadius, in ImportedEntitySpec probeSpec, float probeRadius, double dropHeight,
+        int targetCount, int shotBudget)
+    {
+        _world = world;
+        _window = window;
+        _attractorCenter = attractorCenter;
+        _surfaceRadius = surfaceRadius;
+        _surfaceBand = surfaceBand;
+        _zoneCenter = zoneCenter;
+        _zoneRadius = zoneRadius;
+        _probeSpec = probeSpec;
+        _probeRadius = probeRadius;
+        _dropHeight = dropHeight;
+        _targetCount = targetCount;
+        _shotBudget = shotBudget;
+        _rule = new LandingChallengeRule(targetCount, shotBudget);
+
+        // Seed from the world: fresh = 0 bodies → InProgress; after AGAPANTHE_LOAD = the restored probe count and the
+        // status re-evaluated from the loaded positions (so a resumed game shows the right state immediately).
+        var seed = _world.QuerySurfaceContacts(_attractorCenter, _surfaceRadius, _surfaceBand, _zoneCenter, _zoneRadius);
+        _shotsIssued = seed.Total;
+        _status = _rule.Evaluate(seed, _shotsIssued, LandingStatus.InProgress);
+    }
+
+    public void Execute(in TickContext ctx)
+    {
+        var counts = _world.QuerySurfaceContacts(_attractorCenter, _surfaceRadius, _surfaceBand, _zoneCenter, _zoneRadius);
+        var prev = _status;
+        _status = _rule.Evaluate(counts, _shotsIssued, _status);
+
+        // Rebuild the title ONLY when a shown value changes → 0 alloc/frame in steady state (the gate).
+        if (counts.InZone != _lastInZone || _shotsIssued != _lastShots || _status != _lastStatus)
+        {
+            _window.Title =
+                $"Agapanthe — landed {counts.InZone}/{_targetCount} · shots {_shotsIssued}/{_shotBudget} · {Label(_status)}";
+            _lastInZone = counts.InZone;
+            _lastShots = _shotsIssued;
+            _lastStatus = _status;
+        }
+
+        if (_status != prev && _status is LandingStatus.Won or LandingStatus.Lost)
+        {
+            Log.Info($"Sandbox: [challenge] {Label(_status)} — {counts.InZone}/{_targetCount} landed in {_shotsIssued}/{_shotBudget} shots.");
+        }
+    }
+
+    // Drops one AIMED probe: radially below the camera (on the ray attractor→camera), from a fixed height above the
+    // surface, zero velocity → it falls straight down under radial gravity. Budget-checked against _shotsIssued so a
+    // pending (not-yet-materialised) drop still counts; no-op once the challenge is over or the budget is spent.
+    public void TryShoot(Double3 cameraPosition)
+    {
+        if (_status != LandingStatus.InProgress || _shotsIssued >= _shotBudget)
+        {
+            return;
+        }
+
+        var d = cameraPosition - _attractorCenter;
+        var dist = d.Length;
+        if (dist < 1e-9)
+        {
+            return; // camera at the planet centre — no radial direction
+        }
+
+        var n = d * (1.0 / dist); // outward radial unit (double)
+        var spawn = _attractorCenter + (n * (_surfaceRadius + _dropHeight));
+        var spec = new ImportedEntitySpec(
+            _probeSpec.Mesh, _probeSpec.Material, spawn, _probeSpec.RotationScale,
+            _probeSpec.BoundsCenter, _probeSpec.BoundsRadius, _probeSpec.Order);
+        _world.SpawnBodyDeferred(in spec, Vector3.Zero, inverseMass: 1f, restitution: 0.4f, radius: _probeRadius);
+        _shotsIssued++;
+    }
+
+    private static string Label(LandingStatus s) => s switch
+    {
+        LandingStatus.Won => "WON",
+        LandingStatus.Lost => "LOST",
+        _ => "IN PROGRESS",
+    };
 }

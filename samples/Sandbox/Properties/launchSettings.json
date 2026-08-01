@@ -24,6 +24,37 @@
         "AGAPANTHE_DROP_EVERY": "99999"
       }
     },
+    "planet-challenge (VS-3)": {
+      "commandName": "Project",
+      "environmentVariables": {
+        "AGAPANTHE_SCENE": "planet-challenge",
+        "AGAPANTHE_CHALLENGE_N": "3",
+        "AGAPANTHE_CHALLENGE_SHOTS": "6",
+        "AGAPANTHE_ZONE_RADIUS": "15",
+        "AGAPANTHE_SURFACE_BAND": "9",
+        "AGAPANTHE_TARGET_DIST": "500",
+        "AGAPANTHE_TARGET_DIR": "0",
+        "AGAPANTHE_TARGET_MARKER_HEIGHT": "40",
+        "AGAPANTHE_PROBE_RADIUS": "3",
+        "AGAPANTHE_DROP_HEIGHT": "120"
+      }
+    },
+    "planet-challenge (resume save)": {
+      "commandName": "Project",
+      "environmentVariables": {
+        "AGAPANTHE_SCENE": "planet-challenge",
+        "AGAPANTHE_LOAD": "challenge.save",
+        "AGAPANTHE_CHALLENGE_N": "3",
+        "AGAPANTHE_CHALLENGE_SHOTS": "6",
+        "AGAPANTHE_ZONE_RADIUS": "15",
+        "AGAPANTHE_SURFACE_BAND": "9",
+        "AGAPANTHE_TARGET_DIST": "500",
+        "AGAPANTHE_TARGET_DIR": "0",
+        "AGAPANTHE_TARGET_MARKER_HEIGHT": "40",
+        "AGAPANTHE_PROBE_RADIUS": "3",
+        "AGAPANTHE_DROP_HEIGHT": "120"
+      }
+    },
     "planet-drop (headless capture)": {
       "commandName": "Project",
       "environmentVariables": {

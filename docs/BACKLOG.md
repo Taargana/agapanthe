@@ -7,7 +7,7 @@
 > Règle de tri : chaque item dit **ce qui casse sans lui** et **à quelle échelle il devient obligatoire**. Un item sans
 > déclencheur clair est une idée, pas du backlog.
 
-Dernière mise à jour : 2026-07-26 (session 23 — **VS-2 livrée** : spawn runtime différé + gravité newtonienne ; §4ter à jour) · 2026-07-24 (session 21 — échelle planétaire 1/2 uniforme, **§4ter Vertical Slice** formalisée).
+Dernière mise à jour : 2026-07-26 (session 24 — **VS-3 livrée** : glu gameplay = défi d'atterrissage planétaire ; §4ter à jour) · 2026-07-26 (session 23 — **VS-2 livrée** : spawn runtime différé + gravité newtonienne ; §4ter à jour) · 2026-07-24 (session 21 — échelle planétaire 1/2 uniforme, **§4ter Vertical Slice** formalisée).
 
 ---
 
@@ -327,8 +327,15 @@ path, tests verts, NativeAOT PASS, GPU==CPU) :
   `AGAPANTHE_SCENE=planet-drop`. *Dette léguée* : **pas de lifetime/rest-cull des corps runtime** (croissance non
   bornée) · garde `r2>ε` = accel 0 au barycentre (envisager un échec bruyant pour l'univers persistant). Hors scope
   assumé : orbites (Euler+velocity float), n-body/attraction mutuelle, friction, terrain non-sphérique.
-- **VS-3 — Couche gameplay minimale** : un système `Stage.Simulation` qui câble input → spawn/act → une règle d'état
-  simple sur la scène planétaire. La glu d'intégration, volontairement fine (pas de prefabs/pooling — différés §4).
+- ~~**VS-3 — Couche gameplay minimale**~~ ✅ **livrée session 24** (double audit PASS / PASS-with-concerns [4/5],
+  verdict humain PASS). Défi d'atterrissage planétaire câblant **input → spawn (VS-2) → règle d'état → save/resume
+  (VS-1)** : `GameWorld.QuerySurfaceContacts` (requête spatiale générique 0-alloc, World gameplay-free) + règle pure
+  latchée `LandingChallengeRule` (Engine) + `LandingChallengeSystem` PostSim (Sandbox). `AGAPANTHE_SCENE=planet-challenge`
+  (largage radial visé `B`, poser N=3 en ≤ M=6, `F5` quicksave + relaunch `AGAPANTHE_LOAD`). **Zéro octet ajouté au
+  snapshot VS-1** (état re-dérivé du monde au load). *Dette léguée* : **latch Won/Lost non-monotone à travers un reload**
+  (état re-dérivé ; un-win/un-lose possible si un probe glisse hors/dans la zone entre save et reload — faible proba,
+  `.state` 1 octet déférée) · churn titre au bord de zone (glissement frictionless). Hors scope assumé : quickload
+  en-process, HUD in-view (VS-4), prefabs/pooling, multi-cible.
 - **VS-4 — HUD minimal** : lecture d'état à l'écran (réutilise ou étend la barre de titre debug ; un overlay texte
   simple suffit).
 - **VS-5 — Audio** *(stretch)* : un cue opportuniste.

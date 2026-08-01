@@ -587,6 +587,9 @@ public sealed partial class GameWorld : IDisposable
         StepPhysics(new PhysicsSettings(Vector3.Zero, groundY: -10f, fixedDt: 1f / 60f)
             .WithAttractor(Double3.Zero, mu: 1000.0, surfaceRadius: 700.0));
 
+        // VS-3: root the public surface/zone query (a new chunk-query path) under ILC — cheap insurance.
+        _ = QuerySurfaceContacts(Double3.Zero, 700.0, 5.0, new Double3(600, 0, 0), 50.0);
+
         // Chunk-iteration query (the path the systems use) touching several component arrays. Counts the 8 imported
         // entities, the 2 surviving deferred drawables, and the 3 physics bodies (2 immediate + 1 deferred, all carry
         // WorldTransform + RenderOrder) = 13.
