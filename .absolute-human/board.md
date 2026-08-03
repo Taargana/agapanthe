@@ -24,10 +24,12 @@ visé, petite coop possible** → topologie = choix de **déploiement**, jamais 
 **Puis** : `Agapanthe.App` (host + contrat `Game`) → contenu (assets stables, cook, prefabs/scènes, data-driven) →
 **2ᵉ slice dissemblable** (top-down, test de généralité) → texte/UI, audio, queries physiques, job system → netcode.
 
-## ✅ Brainstorm Texte & UI — TERMINÉ (S25), implémentation non commencée
+## ✅ Brainstorm Texte & UI — TERMINÉ + spec **APPROUVÉE 4,4/5** (S25), implémentation non commencée
 
 **Spec** : [`docs/plans/2026-08-03-text-ui-design.md`](../docs/plans/2026-08-03-text-ui-design.md) — 10 décisions
-verrouillées en interview, confiance 100 %. **Revue scorée pas encore passée.**
+verrouillées en interview. **Revue scorée indépendante passée** : v1 3,6/5 (Needs Work) → 14 findings appliqués →
+**v2 4,4/5 Approved**, 6 résiduels appliqués. Prête pour l'implémentation, **UI-1 exécutable directement via
+absolute-work**.
 
 Décisions clés : périmètre = **texte & overlay SANS interactivité** (l'UI interactive est bloquée derrière l'input →
 MP-0) · cook **hors-ligne** (imposé par le code : Release interdit la compilation runtime des shaders) · atlas **SDF
@@ -42,9 +44,11 @@ binaire mono-fichier · livrable = primitif + **DebugOverlay** + **profiler CPU 
 - **UI-3** — timestamps GPU (`QueryPool`, détection de capacité + dégradation gracieuse, **abandonnable**)
 
 **À faire au démarrage de la prochaine session (automode)** :
-1. Revue scorée de la spec par un agent reviewer (protocole absolute-brainstorm, seuil 4,0/5) + application des findings.
-2. **Arbitrer l'ordre** : MP-0 d'abord (ordre du backlog) ou UI-1 d'abord ? UI-1 est indépendant de MP-0, mais
-   `UiRenderSystem`/`Profiler` iront dans la moitié « render » du split `Agapanthe.Engine` qu'opère MP-0.
+1. ~~Revue scorée~~ ✅ **faite** (4,4/5 Approved, findings appliqués).
+2. **Arbitrer l'ordre** : MP-0 d'abord (ordre du backlog §4quater) ou UI-1 d'abord ? La spec a tranché l'analyse :
+   `Agapanthe.Ui` est **immune** au split headless de MP-0 et `UiRenderSystem`/`Profiler` sont **pré-affectés à la
+   moitié « render »** → **UI-1 avant MP-0 ne crée aucun rework**, et donne des diagnostics à l'écran qui rendront le
+   travail de MP-0 (découplage tick/frame, timing des commandes) bien plus observable. **Décision humaine.**
 3. **absolute-work** sur le jalon retenu → génère le board de session.
 
 ## Pour démarrer un jalon

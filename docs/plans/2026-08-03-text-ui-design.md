@@ -3,7 +3,11 @@
 > First milestone family of the **engine cap** ([backlog §4quater](../BACKLOG.md)). Anchor decisions (S25): the
 > artifact is **the engine** · generalist but especially large-scale space sims (a Stardew-like must stay feasible) ·
 > server-authoritative multiplayer designed in from now.
-> Status: **design approved (human, brainstorm interview S25)** — pending scored spec review.
+> Status: **APPROVED — 4.4/5** (independent scored review, 2 iterations). v1 scored 3.6 "Needs Work" → 14 findings
+> folded in (dependency graph, quad→GPU path, low-level changes, descriptor pools, input-annex correction,
+> kerning/monospace tension, blend regression gate, cooker parameters, UI policies); v2 review found 6 residuals,
+> all folded in here (per-frame descriptor set, premultiply/linear ordering, stale DoD, `Rendering` public surface,
+> kerning fixture, `InternalsVisibleTo`). Ready for implementation.
 
 ## Summary
 
@@ -17,9 +21,12 @@ dependencies**, a GPU-free text layout library, an overlay render pass, a reusab
 profiler covering **CPU and GPU**.
 
 **Structural finding from the codebase scan:** every *interactive* UI is blocked behind an input overhaul that belongs
-to **MP-0** — there is no public mouse position, no button events, no scroll, no `KeyChar`, and **every click captures
-the cursor** (`EngineWindow.cs:252`), so clicking a widget is literally impossible today. **Displaying** text depends
-on none of that. Hence the scope below. The overlay/profiler needs only a toggle key, and `KeyPressed` already exists.
+to **MP-0**. Precisely: the raw capabilities *do* exist — `EngineWindow` publicly exposes `Input`/`Keyboard`/`Mouse`
+(`EngineWindow.cs:118-124`), so `IMouse.Position`, `IMouse.Scroll` and `IKeyboard.KeyChar` are reachable — but only as
+**raw Silk.NET escape hatches**, with no engine-owned abstraction over them. What actually makes a widget unclickable
+today is behavioural, not missing API: **every click captures the cursor** (`EngineWindow.cs:252`) and `MouseDelta` is
+forced to zero while uncaptured (`:132`), so a UI can never have a free mouse. **Displaying** text depends on none of
+this. Hence the scope below. The overlay/profiler needs only a toggle key, and `KeyPressed` already exists.
 
 ## Context — what the codebase already provides
 
@@ -28,7 +35,12 @@ Verified against the code, not assumed:
 - **`TonemapPass`** (`src/Agapanthe.Rendering/Passes/TonemapPass.cs:26-42`) is the exact template for an overlay pass:
   `VertexLayout = null`, vertices from `gl_VertexIndex`, `DepthTest = false`, `Cull = None`, `cmd.Draw(3)`.
 - **`StorageBufferRing<T>`** (`src/Agapanthe.Rendering/StorageBufferRing.cs:12`) — a generic per-frame ring that grows
-  by doubling and never reallocates in steady state. Exactly what a dynamic quad buffer needs.
+  by doubling and never reallocates in steady state. Exactly what a dynamic quad buffer needs. **It is `internal` to
+  `Agapanthe.Rendering`** — which settles the dependency direction below: the quad ring lives in `Rendering`, and
+  `Agapanthe.Ui` only ever produces plain structs.
+- **`DescriptorAllocator`** (`src/Agapanthe.Graphics/DescriptorAllocator.cs:20`) — **public**, pools never reset,
+  grow-on-demand, 64 sets per pool. This is where a *persistent* set (the font atlas) is allocated. `FrameContext`'s
+  pool is reset every frame and is for per-frame sets only.
 - **`IRenderSystem` + `orchestrator.Add(...)`** are **public** (`src/Agapanthe.Engine/Systems.cs:76`), and
   `RenderContext` carries `CommandList` / `FrameContext` / `SwapchainTarget`. **No change to `FrameOrchestrator` or
   `SystemScheduler` is required.** A UI render system registered after `CreateDefault` runs after `SceneViewSystem`,
@@ -37,7 +49,7 @@ Verified against the code, not assumed:
   precompiler, so `text.vert/.frag` requires **no build change** to be pre-cooked.
 - **`tools/ShaderPrecompiler`** is a complete, copyable template for an offline cooker: console exe, non-AOT,
   deliberately **never referenced by a shipping project** ("a ProjectReference would drag shaderc into the AOT
-  closure"), driven by an incremental MSBuild target in `samples/Sandbox/Sandbox.csproj:62-117`. Its **two
+  closure"), driven by incremental MSBuild targets in `samples/Sandbox/Sandbox.csproj:78-131`. Its **two
   already-paid-for pitfalls** are commented in the csproj and must be reproduced verbatim: `RemoveProperties` (to
   isolate the tool from `dotnet publish -r`) and pre-expanding the glob before `<Content>`.
 - **`GpuUploader` / `GpuImage`** already handle staging upload, mip generation and layout transition
@@ -103,7 +115,52 @@ Two gaps that must be filled in `Agapanthe.Graphics`:
 | `src/Agapanthe.Rendering` | `UiPass` (mirrors `TonemapPass`) · `FontResources` (atlas → `GpuImage`) |
 | `src/Agapanthe.Engine` | `UiRenderSystem` (`IRenderSystem`) · `FrameStats`/`Profiler` · `DebugOverlaySystem` |
 | **`tools/FontCooker`** *(new)* | Non-AOT console → `StbTrueTypeSharp`; never referenced by a shipping project |
-| `fonts/` *(new)* | One OFL/Apache monospace face (aligned digits = a HUD that does not jitter). Default charset: ASCII + Latin-1 Supplement (~220 glyphs) |
+| `fonts/` *(new)* | **JetBrains Mono Regular** (OFL 1.1) vendored with its `OFL.txt`, aligned digits = a HUD that does not jitter. Default charset: ASCII + Latin-1 Supplement (~220 glyphs), listed in a `charset.txt` next to it |
+
+### Dependency graph (F2 — the load-bearing decision)
+
+```
+Ui ──► Assets ──► Core          Ui is GPU-free: it never references Graphics or Rendering
+Rendering ──► Ui                Rendering CONSUMES the draw list (it owns the GPU ring)
+Engine ──► Rendering ──► Ui     Engine wires the two; it already references Rendering
+```
+
+`Agapanthe.Ui` references **`Assets` + `Core` only** (it needs `FontAsset` to measure/lay out text). **`Rendering`
+references `Ui`** — the same relationship it already has with `Assets`: it consumes plain DTOs produced by a GPU-free
+library. This direction is forced by `StorageBufferRing<T>` being `internal` to `Rendering`: the GPU-side ring cannot
+leave that assembly, so the quads must travel *into* it, never the reverse. `Ui` stays testable with no device, and
+`Rendering` gains no GPU-free logic. `Engine`'s `UiRenderSystem` owns the wiring and holds the shared `UiDrawList`.
+
+### Quad → GPU path (F3)
+
+**SSBO of quads + `gl_VertexIndex`, no vertex buffer, no index buffer** — consistent with `TonemapPass`
+(`VertexLayout = null`) and with `StorageBufferRing<T>` already existing for exactly this shape.
+
+```
+readonly record struct UiQuad(Vector4 Rect, Vector4 UvRect, uint RgbaPremultiplied, uint Flags);
+// Flags bit 0: 0 = solid (sample the white texel) | 1 = SDF glyph (apply the distance threshold + AA)
+```
+
+- `UiDrawList` (in `Ui`) accumulates `UiQuad` into a pooled array and exposes `ReadOnlySpan<UiQuad>`.
+- `UiPass` (in `Rendering`) copies that span into a per-frame `StorageBufferRing<UiQuad>` slice and issues **one**
+  `cmd.Draw(quadCount * 6, 1, 0, 0)`.
+- `ui.vert` derives the corner from `gl_VertexIndex % 6` and the quad from `gl_VertexIndex / 6`, reading the SSBO.
+- **Descriptor layout — one *per-frame* set from `FrameContext`** (`binding 0` = combined image sampler for the atlas,
+  `binding 1` = storage buffer for the frame's quad slice). Push constant: `vec2 invScreenSize` + `float sdfPixelRange`.
+  This follows the established pattern verbatim — `Renderer.cs:1145-1162` allocates one per-frame set and writes UBOs,
+  combined image samplers **and** a storage buffer into it. A `VkDescriptorSet` is allocated from **one** pool, so a
+  set cannot mix a persistent binding with a per-frame one; and rebinding a ring buffer into a persistent set each
+  frame would race the frames still in flight. Cost is negligible: the atlas image/sampler handles are stable, only
+  the descriptor write repeats, and the budget (`MaxCombinedImageSamplers=64`, `MaxStorageBuffers=16`) has room.
+
+Result: **one pipeline, one atlas, one draw call** for all UI in a frame — text and rects alike.
+
+**Ownership and public surface (R4).** `UiPass` and `FontResources` stay **`internal` to `Rendering`** and are owned by
+`Renderer`, exactly like `TonemapPass` and the other `ReloadablePass`es — including registration in the
+`_reloadablePasses` array (`Renderer.cs:445`) so hot reload comes for free. `Renderer` exposes a small public surface:
+`LoadFont(FontAsset)` (creates `FontResources`) and `DrawUi(CommandList, FrameContext, SwapchainTarget,
+ReadOnlySpan<UiQuad>)`. `Engine`'s `UiRenderSystem` holds the shared `UiDrawList` and simply forwards its span. No GPU
+type crosses into `Ui`, and `Engine` needs no knowledge of the pass internals.
 
 ### Data flow
 
@@ -138,10 +195,22 @@ ImGui model, and it keeps GPU types out of gameplay code.
 
 ### Details that must not be missed
 
-- **Color space.** The pass draws after tonemap into an **sRGB** swapchain, and Vulkan blending operates in linear
-  space. The shader must convert **sRGB → linear** before output, or UI colors will be wrong.
+- **Color space.** The swapchain is `B8G8R8A8Srgb` (`Swapchain.cs:257`) and fixed-function blending operates after the
+  EOTF decode, i.e. in **linear** space. The shader must therefore convert its sRGB UI colors **to linear** before
+  output. Two consequences to expect, not to be surprised by:
+  - **Gamma-correct text AA thins light-on-dark text.** Blending coverage in linear space is *physically* right but
+    perceptually makes light glyphs on a dark background look thinner than expected. The classic remedy is a small
+    coverage adjustment (a gamma tweak on the SDF alpha); budget for tuning this rather than treating it as a bug.
+  - `Swapchain.cs:263` **falls back to a non-sRGB format** when `B8G8R8A8Srgb` is unavailable, in which case the
+    conversion would be wrong. The tonemap pass has the same blind spot today, so this is an **inherited debt**, not a
+    new one — but the UI shader should read the target format rather than assume sRGB if it is ever hit.
 - **Premultiplied alpha** for UI (avoids filtering halos). `Opaque` stays the default → **no existing pipeline is
   affected** by the `BlendMode` addition.
+  **Order of operations (must not be left to chance):** `UiQuad.RgbaPremultiplied` stores the colour **as authored,
+  in sRGB, NOT premultiplied** — the name refers to the *blend mode it feeds*, not to the stored encoding. The shader
+  does, in this order: unpack → **convert RGB sRGB→linear** → **then multiply RGB by alpha** (alpha stays linear
+  throughout, it is coverage, never gamma-encoded) → multiply by the SDF coverage → output. Premultiplying before the
+  linear conversion would tint semi-transparent text; this is the classic halo bug and it is why the order is fixed here.
 - **One atlas, one pipeline.** Reserve a **white texel** in the font atlas so solid rectangles (profiler graphs,
   backgrounds) draw with no second texture and no pipeline switch.
 - **`LoadOp = Load`** on the swapchain — the tonemap uses `DontCare`; leaving it would erase the tonemapped image.
@@ -154,20 +223,84 @@ ImGui model, and it keeps GPU types out of gameplay code.
   **positional**; routing fonts through it would add to the VS-1 asset-identity debt. Follow the
   `IblGenerator`/`IblMaps` pattern instead: a small `FontResources : IDisposable` owned by the renderer. Extract
   `SceneBuilder.UploadTexture` (currently `private static`) into a reusable helper.
-- **Small-size SDF contingency.** Around ~13 px, SDF can be less crisp than a hinted bitmap — and that is exactly
-  where debug text lives. Mitigations: bake at em 64 px with padding, `fwidth`-based AA, snap quads to the pixel grid.
-  Documented fallback: `StbTrueTypeSharp` can also emit bitmap coverage → same format, one flag.
-- **Descriptor budget.** `FrameContext` caps `MaxSets=64` / `MaxCombinedImageSamplers=64` (`FrameContext.cs:27-34`).
-  One persistent set for the atlas keeps the UI well inside budget.
-- **MP-0 interaction.** `UiRenderSystem`/`Profiler` live in `Engine`, which MP-0 will split for headless; they belong
-  in the "render" half. `Agapanthe.Ui` is unaffected (it is GPU-free by construction).
+- **Small-size SDF contingency — realistic expectations.** Around ~13 px, SDF is *legible and stable* but will not
+  match hinted bitmap crispness: stems read slightly soft and contrast is lower. That is acceptable for debug text,
+  and it is the accepted price of one atlas serving every size. Mitigations: bake at em 64 px with padding,
+  `fwidth`-based AA, snap quads to the pixel grid.
+  **Fallback, costed honestly**: `StbTrueTypeSharp` can also emit bitmap coverage, and the `.agfont` container is
+  unchanged — but coverage and distance are **not decoded the same way** in the fragment shader. So the fallback is a
+  cooker flag **plus** a shader variant (or a `SdfPixelRange == 0` sentinel selecting the coverage branch). Writing
+  that sentinel into the format from day one keeps the fallback cheap on the day it is needed.
+- **Descriptor pools.** The UI uses **one per-frame set** from `FrameContext` (see the quad path above): a set is
+  allocated from a single pool, so the atlas sampler and the frame's quad buffer must share the per-frame set.
+  `DescriptorAllocator` (`src/Agapanthe.Graphics/DescriptorAllocator.cs:20`, pools never reset) remains the right tool
+  for genuinely persistent, never-rewritten sets — it is simply not what this pass needs.
+- **Low-level changes the atlas actually requires (F5)** — beyond `R8Unorm` and `BlendMode`:
+  - Adding `R8Unorm` means touching **three** exhaustive switches, not one:
+    `PixelFormatExtensions.ToVk` (`PixelFormat.cs:48` throws on an unmapped format), `FromVk` (`:62`, returns
+    `Undefined`), and `GpuUploader.BytesPerTexel` (`GpuUploader.cs:471-477`, **throws** on any unlisted format) →
+    `PixelFormat.R8Unorm => 1`.
+  - The atlas must be **`MipLevels = 1`**. `SceneBuilder.UploadTexture` (`SceneBuilder.cs:140-163`) builds a **full mip
+    chain** and requires linear-blit support; mips would smooth the distance field into mush. So the "extract a
+    reusable helper" step is more than a move: the helper must take an explicit mip count and usage.
+  - **Sampler**: linear filter, `ClampToEdge`, **no mips, no anisotropy**. Linear is required — SDF interpolation *is*
+    the antialiasing.
+- **Kerning vs monospace (F8) — resolved: v1 ships kerning as a no-op path.** Two facts collide: a monospace face is
+  wanted (aligned digits = a HUD that does not jitter) and has zero kerning by construction; and `StbTrueTypeSharp`
+  reads only the **legacy `kern` table**, not **GPOS**, which is all most modern libre fonts ship. So the cooker
+  *extracts* kern pairs when a `kern` table exists and writes an empty array otherwise — the format, the lookup and the
+  seam all stay in place, and a proportional face with a `kern` table gets kerning for free later. **The unit test
+  therefore asserts the lookup and its application on a synthetic in-memory `FontAsset`**, never on the shipped
+  monospace face — against which it would assert nothing. Real GPOS kerning arrives with the shaping seam (HarfBuzz),
+  not before.
+- **MP-0 interaction — sequencing decided (F10).** `Agapanthe.Ui` is **immune** to MP-0's headless split (GPU-free by
+  construction, no `Engine` dependency), and `UiRenderSystem`/`Profiler` are **pre-assigned to the "render" half** of
+  the split, which is where they would land anyway. Therefore **UI-1 may run before MP-0 without creating rework**,
+  and doing so is *recommended*: it delivers on-screen diagnostics that make MP-0's own work (tick/frame decoupling,
+  command timing) far easier to observe. **The order remains the human's call** — the backlog §4quater sequence places
+  Text & UI later, so this spec records the analysis, not a unilateral reordering.
+
+### Cooker parameters (F4 — fixed, not left to the implementer)
+
+| Parameter | Value | Why |
+|---|---|---|
+| Em size baked | **64 px** | High enough that the SDF holds up when scaled down to ~13 px |
+| SDF spread (`SdfPixelRange`) | **4 px** | Standard; stored in the header and pushed to the shader. `0` = coverage-bitmap sentinel |
+| Glyph padding | **spread + 1 px** | Prevents neighbouring glyphs bleeding into each other's distance field |
+| Atlas size | **computed, power-of-two, square, capped at 2048** | Deterministic given the charset; fail loudly if the charset overflows the cap rather than silently truncating |
+| Packing | **shelf (row-based), glyphs sorted by descending height** | Simple, deterministic, good enough for ~220 glyphs. Skyline is unnecessary here |
+| Iteration order | **codepoint ascending** | Required for the byte-identical output guarantee |
+| White texel | **reserved at (0,0)**, 2×2 opaque | Lets solid rects share the atlas, the pipeline and the draw call |
+
+CLI: `FontCooker <font.ttf> <charset-file> <out.agfont> [--dump-atlas <png>]`. Exit codes 0 / 1 (cook failure) / 2
+(bad arguments), mirroring `ShaderPrecompiler`.
+
+### UI policies (F6 — decided here so nobody invents them)
+
+- **Missing glyph**: fall back to a `?`-shaped tofu if present, otherwise **skip the glyph and advance by the space
+  width**. Never throw at draw time; log once per missing codepoint at load, not per frame.
+- **Draw order / z**: strictly **submission order** (painter's algorithm). The draw list is a flat, append-only span
+  and quads are drawn in the order pushed — no sorting, no z field. Later layers can add explicit layer indices.
+- **Clipping**: **out of scope for v1.** No scissor stack; an overlay HUD does not need one. Noted as the first thing
+  a retained UI will require.
+- **Multiple fonts**: **one `FontResources` (one atlas, one persistent set) in v1.** A second font would mean a second
+  set and a second draw call — supported by the design (the pass is trivially re-runnable per atlas) but not built.
+- **Window resize**: the draw list is rebuilt every frame and coordinates are in framebuffer pixels, so resize needs
+  nothing beyond the push-constant `invScreenSize`, which is read from `SwapchainTarget` each frame.
+- **`UiDrawList` ownership**: owned by `UiRenderSystem` (Engine), **cleared at the start of the frame's Tick**,
+  appended to by any stage, consumed and rendered in `Render`. Single-threaded, same owner thread as the tick — the
+  existing whole-engine assumption. Its backing array grows by doubling and is never freed → 0 alloc in steady state.
+- **`.agfont` failure mode**: a dedicated `FontAssetException` thrown on bad magic, unknown version, truncated payload
+  or inconsistent counts — mirroring VS-1's `WorldSerializationException` rather than overloading a generic type.
 
 ## Milestones
 
 **UI-1 — Text on screen.** `R8Unorm` + `BlendMode` (Graphics) · `FontCooker` + `.agfont` + MSBuild target ·
 `FontAsset` (Assets) · `Agapanthe.Ui` (draw list, shaping, layout, measure) · `UiPass` + `FontResources` (Rendering) ·
 `UiRenderSystem` (Engine).
-**DoD:** text renders in the Sandbox, 0 alloc/frame, GPU-free layout tests green.
+**DoD:** a fixed scene + fixed string produce a **reproducible capture hash** (recorded in the milestone notes) plus a
+human legibility verdict · **an existing scene's capture is bit-identical before and after the `BlendMode` change** ·
+0 alloc/frame · GPU-free layout tests green · AOT run loads the `.agfont`.
 
 **UI-2 — DebugOverlay + CPU profiler.** `FrameStats` (frame-time ring via `Stopwatch`; bytes allocated per frame via
 `GC.GetTotalAllocatedBytes(precise: true)` — **the 0-alloc gate made continuously visible on screen**), existing
@@ -180,13 +313,29 @@ the profiler, **capability detection + graceful degradation**.
 
 ## Testing / verification
 
-- **GPU-free tests (`Agapanthe.Ui`)**: kerning applied, `Measure` of a known string, multi-line, alignments, quad
-  generation, and a **0-alloc-after-warmup** test (exact precedent: `QuerySurfaceContacts_AllocatesNothingAfterWarmup`).
-- **Cooker**: byte-identical output for identical input; `.agfont` write/read round-trip.
-- **Integration**: headless capture (`AGAPANTHE_CAPTURE`) showing rendered text; human visual verdict.
+- **GPU-free tests (`Agapanthe.Ui`)**: `Measure` of a known string, multi-line, alignments, quad generation, missing
+  glyph, and a **0-alloc-after-warmup** test (exact precedent:
+  `tests/Agapanthe.Tests/SurfaceContactsTests.cs:97`). **Kerning is tested against a synthetic in-memory `FontAsset`**
+  — the lookup and the layout application are what must be proven, and a synthetic fixture proves them regardless of
+  which tables the shipped face happens to carry (see the kerning decision above).
+- **Cooker**: byte-identical output for identical input; `.agfont` write/read round-trip; **robustness battery**
+  (bad magic, unknown version, truncated payload, inconsistent counts → `FontAssetException`), mirroring VS-1's suite.
+  The round-trip test needs the `internal` writer → a **second `InternalsVisibleTo("Agapanthe.Tests")`** alongside the
+  `FontCooker` one (the repo already does this, e.g. `GltfSchema.cs`).
+- **Blend regression gate (F12, blocking).** Adding `BlendMode` touches **every existing pipeline**, so the DoD for
+  UI-1 includes: a headless capture of an existing scene is **bit-identical before and after** the change (the repo
+  already does exactly this — e.g. the `9790D95D` hash in P3-M2). `Opaque` being the default must be *proven*, not
+  assumed.
+- **Text capture hash (F13).** "Text renders in the Sandbox" is not objectively verifiable. The DoD is instead: a
+  fixed scene + a fixed string produce a **reproducible capture hash**, recorded in the milestone notes — plus a human
+  visual verdict for legibility (which a hash cannot judge).
+- **Release/AOT path (F14).** An AOT run must prove the `.agfont` is copied as `Content` and loads correctly — this is
+  precisely where the shader pipeline already bit (Release is cache-only, a miss throws).
 - **Project gates**: 0 warning · 0 validation message · 0 leak · 0 alloc/frame · **NativeAOT PASS** — explicitly verify
   that `StbTrueTypeSharp` **does not enter the AOT closure** (it must exist only in `tools/FontCooker`) ·
-  **double audit** (`csharp-lowlevel` + `graphics-3d`).
+  **double audit**: `csharp-lowlevel` + **`graphics-3d`** for UI-1/UI-3 (a new render pass and Vulkan query pools are
+  squarely graphics work), reverting to the project-standard `csharp-lowlevel` + `engine-architect` for UI-2 (F9 — a
+  deliberate, milestone-scoped deviation from `CLAUDE.md`, not an oversight).
 
 ## Out of scope / debts (anti-creep)
 
@@ -201,19 +350,26 @@ the profiler, **capability detection + graceful degradation**.
 
 ## Appendix — input requirements handed to MP-0
 
-To be designed **once** in MP-0, not here. Today's `EngineWindow` cannot support an interactive UI:
+To be designed **once** in MP-0, not here. **Framing correction (review F1): the raw capabilities mostly exist** —
+`EngineWindow` publicly exposes `Input`, `Keyboard` and `Mouse` (`EngineWindow.cs:118-124`), so `IMouse.Position`,
+`IMouse.Scroll`, `IMouse.MouseUp` and `IKeyboard.KeyChar` are all reachable. **What is missing is an engine-owned
+abstraction over them**, plus one behavioural blocker. Concretely, MP-0 must provide:
 
-- **Mouse position** (window *and* framebuffer space) — none is exposed publicly.
-- **Button events** (down/up) — `MouseDown` is private and only triggers capture (`EngineWindow.cs:248`).
-- **Scroll wheel** — absent.
-- **Capture decoupling** — every click captures the cursor (`EngineWindow.cs:252`) and `MouseDelta` is forced to zero
-  when uncaptured (`:132`). A UI needs the mouse **free**.
-- **`KeyChar`/codepoint** — absent; without it, no text field is possible at all.
-- **`KeyReleased`, key repeat, modifiers** (Ctrl/Shift/Alt) — absent; needed for held Backspace/arrows and shortcuts.
+- **An engine-owned input abstraction** — today every one of the above is a **raw Silk.NET escape hatch**, and
+  `Silk.NET.Input.Key` **leaks** through the public API (`KeyPressed`, `IsKeyDown`) even though `EngineWindow`'s header
+  comment claims the opposite. This is the core of the work: an engine `Key` enum, mouse/keyboard state owned by the
+  engine, and Silk confined to `Agapanthe.Platform`.
+- **Capture decoupling** *(the real blocker for widgets)* — every click captures the cursor (`EngineWindow.cs:252`) and
+  `MouseDelta` is forced to zero while uncaptured (`:132`). A UI needs a **free** mouse; capture must become a mode the
+  application chooses, not an automatic consequence of clicking.
+- **Engine-surfaced mouse state**: position in **both** window and framebuffer space, button down/up **edge events**
+  (`MouseDown` is currently private and only triggers capture, `:248`), and scroll.
+- **Keyboard completeness**: `KeyReleased`, key repeat and modifiers (Ctrl/Shift/Alt) — needed for held
+  Backspace/arrows and shortcuts; and `KeyChar` surfaced through the engine abstraction for text fields.
 - **DPI scale factor** — `FramebufferSize` is in pixels while Silk mouse positions are in window coordinates;
   hit-testing will be wrong on HiDPI without it.
-- **An engine-owned `Key` enum** — `Silk.NET.Input.Key` currently **leaks** through the public API (`KeyPressed`,
-  `IsKeyDown`) even though `EngineWindow`'s header comment claims the opposite.
+- **Timestamped commands** (MP-0's own item 4) — the UI's needs and the netcode's needs are the *same* abstraction;
+  designing them together is the entire point of deferring this out of the text spec.
 
 ## Rollback point
 

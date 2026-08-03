@@ -346,8 +346,13 @@ Spec : [2026-07-25-vs2-spawn-runtime-newtonian-gravity-design.md](plans/2026-07-
 > cook, prefabs/scènes, data-driven) → **2ᵉ slice dissemblable** (top-down — test de généralité) → texte/UI, audio,
 > queries physiques, job system → netcode réel.
 >
-> ### ✅ Brainstorm **Texte & UI** terminé (S25) — spec écrite, implémentation NON commencée
-> Spec : **[plans/2026-08-03-text-ui-design.md](plans/2026-08-03-text-ui-design.md)** (revue scorée pas encore passée).
+> ### ✅ Brainstorm **Texte & UI** terminé (S25) — spec **APPROUVÉE 4,4/5**, implémentation NON commencée
+> Spec : **[plans/2026-08-03-text-ui-design.md](plans/2026-08-03-text-ui-design.md)** — revue scorée indépendante,
+> 2 itérations (v1 **3,6/5** Needs Work → 14 findings appliqués → v2 **4,4/5 Approved**, 6 résiduels appliqués).
+> Le reviewer a vérifié chaque affirmation technique **contre le code** ; une erreur factuelle de la v1 a été
+> corrigée (l'annexe input surestimait les manques : `EngineWindow` expose bien `Input`/`Keyboard`/`Mouse`, le vrai
+> manque est l'**abstraction possédée** + la **capture inconditionnelle au clic**) — important, cet argumentaire
+> alimente MP-0.
 > 10 décisions verrouillées en interview. Les plus structurantes :
 > - **Périmètre = texte & overlay, SANS interactivité.** Découverte du scan : toute UI interactive est bloquée derrière
 >   l'input (pas de position souris, pas d'événements boutons, pas de `KeyChar`, et **tout clic capture le curseur**)
