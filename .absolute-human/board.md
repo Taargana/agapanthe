@@ -24,12 +24,33 @@ visé, petite coop possible** → topologie = choix de **déploiement**, jamais 
 **Puis** : `Agapanthe.App` (host + contrat `Game`) → contenu (assets stables, cook, prefabs/scènes, data-driven) →
 **2ᵉ slice dissemblable** (top-down, test de généralité) → texte/UI, audio, queries physiques, job system → netcode.
 
-**Brainstorm demandé en parallèle (S25)** : **texte & UI** — piste humaine FreeType + XAML baké à la compilation ;
-points à trancher : cook offline vs runtime, MSDF vs bitmap, shaping (FreeType n'en fait pas), deux couches d'UI
-(immédiate/debug vs retenue/jeu), source generator XAML→C# (AOT-pur).
+## ✅ Brainstorm Texte & UI — TERMINÉ (S25), implémentation non commencée
 
-**Pour démarrer** : **absolute-brainstorm** (lira `docs/AVANCEMENT.md` § Reprise + `docs/BACKLOG.md` §4quater),
-puis absolute-work générera le board de session.
+**Spec** : [`docs/plans/2026-08-03-text-ui-design.md`](../docs/plans/2026-08-03-text-ui-design.md) — 10 décisions
+verrouillées en interview, confiance 100 %. **Revue scorée pas encore passée.**
+
+Décisions clés : périmètre = **texte & overlay SANS interactivité** (l'UI interactive est bloquée derrière l'input →
+MP-0) · cook **hors-ligne** (imposé par le code : Release interdit la compilation runtime des shaders) · atlas **SDF
+via `StbTrueTypeSharp`** = **zéro dépendance native même dans l'outil** (FreeType écarté) · **Latin + kerning avec
+seam de shaping** (`Rune`) · nouveau projet **`Agapanthe.Ui` GPU-free** + **`tools/FontCooker`** + format **`.agfont`**
+binaire mono-fichier · livrable = primitif + **DebugOverlay** + **profiler CPU & GPU**.
+
+**3 jalons séquencés** (feu vert humain entre chacun) :
+- **UI-1** — texte à l'écran (`R8Unorm` + `BlendMode` dans Graphics, FontCooker, `.agfont`, `Agapanthe.Ui`, `UiPass`)
+- **UI-2** — DebugOverlay + profiler CPU (frame time, **alloc/frame = le gate 0-alloc visible en continu**) ;
+  remplace le HUD `window.Title` et supprime le hack de cession de titre
+- **UI-3** — timestamps GPU (`QueryPool`, détection de capacité + dégradation gracieuse, **abandonnable**)
+
+**À faire au démarrage de la prochaine session (automode)** :
+1. Revue scorée de la spec par un agent reviewer (protocole absolute-brainstorm, seuil 4,0/5) + application des findings.
+2. **Arbitrer l'ordre** : MP-0 d'abord (ordre du backlog) ou UI-1 d'abord ? UI-1 est indépendant de MP-0, mais
+   `UiRenderSystem`/`Profiler` iront dans la moitié « render » du split `Agapanthe.Engine` qu'opère MP-0.
+3. **absolute-work** sur le jalon retenu → génère le board de session.
+
+## Pour démarrer un jalon
+
+**absolute-brainstorm** si le jalon n'a pas de spec (lira `docs/AVANCEMENT.md` § Reprise + `docs/BACKLOG.md` §4quater),
+sinon **absolute-work** directement sur la spec existante.
 
 ## Dettes reportées (à garder en vue)
 

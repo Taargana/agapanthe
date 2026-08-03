@@ -1,6 +1,6 @@
 # Agapanthe — Plan complet & état d'avancement
 
-**Mis à jour** : 2026-07-26 (session 24 — **VS-3 CLOS** : glu gameplay = défi d'atterrissage planétaire ; `QuerySurfaceContacts` + règle latchée `LandingChallengeRule` + scène `planet-challenge` (input→spawn→règle→save/resume) ; double audit PASS / PASS-with-concerns 4/5, verdict humain PASS ; 372 tests, AOT PASS) · 2026-07-26 (session 23 — **VS-2 CLOS** : spawn runtime différé (`SpawnBodyDeferred`) + gravité newtonienne (attracteur radial + sol radial) ; double audit PASS-with-concerns [4,5/5], verdict visuel PASS ; scène `planet-drop`, 355 tests, AOT PASS) · 2026-07-24 (session 22 — **VS-1 CLOS** : sérialisation du World save/load, double audit PASS, verdict humain PASS) · 2026-07-23 (session 20 — **P3-M7 CLOS** : buffers device-local + réduction du raster d'ombre 4×→~1× ; double audit PASS, verdict visuel PASS incl. soleil bas ; A+B ~15,3 → ~8,0 ms ≈ ×2) · 2026-07-23 (session 19 — **P3-M6 CLOS** : slots persistants dirty-trackés + cull d'ombre GPU ; double audit PASS, verdict visuel PASS ; voir « Point de reprise ») · 2026-07-14 (session 14 — **vérifs humaines de la Phase 2 soldées** : banc M4 PASS with concerns [perf → P3-M1], précision M3 PASS, hot reload M1 PASS) · 2026-07-13 (session 13 — **PHASE 2 CLOSE** — frustum culling + montée en charge : 10 000 entités cullées à 10 000 km, 0 alloc/frame, en NativeAOT ; double audit signe la clôture) · **Machines de dev** : macOS (Apple M3, MoltenVK) + Windows 11 (RTX 5070 Ti, Vulkan 1.3 core) · **Cibles** : Windows / Linux / macOS
+**Mis à jour** : 2026-08-03 (session 25 — **RÉORIENTATION cap « vrai engine »** [backlog §4quater] : artefact = le moteur, multijoueur serveur autoritaire, MP-0 = prochain jalon ; VS-4/VS-5 en pause · **brainstorm Texte & UI terminé**, spec `plans/2026-08-03-text-ui-design.md`, 3 jalons UI-1/2/3) · 2026-07-26 (session 24 — **VS-3 CLOS** : glu gameplay = défi d'atterrissage planétaire ; `QuerySurfaceContacts` + règle latchée `LandingChallengeRule` + scène `planet-challenge` (input→spawn→règle→save/resume) ; double audit PASS / PASS-with-concerns 4/5, verdict humain PASS ; 372 tests, AOT PASS) · 2026-07-26 (session 23 — **VS-2 CLOS** : spawn runtime différé (`SpawnBodyDeferred`) + gravité newtonienne (attracteur radial + sol radial) ; double audit PASS-with-concerns [4,5/5], verdict visuel PASS ; scène `planet-drop`, 355 tests, AOT PASS) · 2026-07-24 (session 22 — **VS-1 CLOS** : sérialisation du World save/load, double audit PASS, verdict humain PASS) · 2026-07-23 (session 20 — **P3-M7 CLOS** : buffers device-local + réduction du raster d'ombre 4×→~1× ; double audit PASS, verdict visuel PASS incl. soleil bas ; A+B ~15,3 → ~8,0 ms ≈ ×2) · 2026-07-23 (session 19 — **P3-M6 CLOS** : slots persistants dirty-trackés + cull d'ombre GPU ; double audit PASS, verdict visuel PASS ; voir « Point de reprise ») · 2026-07-14 (session 14 — **vérifs humaines de la Phase 2 soldées** : banc M4 PASS with concerns [perf → P3-M1], précision M3 PASS, hot reload M1 PASS) · 2026-07-13 (session 13 — **PHASE 2 CLOSE** — frustum culling + montée en charge : 10 000 entités cullées à 10 000 km, 0 alloc/frame, en NativeAOT ; double audit signe la clôture) · **Machines de dev** : macOS (Apple M3, MoltenVK) + Windows 11 (RTX 5070 Ti, Vulkan 1.3 core) · **Cibles** : Windows / Linux / macOS
 
 ## Vision
 
@@ -344,7 +344,29 @@ Spec : [2026-07-25-vs2-spawn-runtime-newtonian-gravity-design.md](plans/2026-07-
 >
 > **Ensuite** : `Agapanthe.App` (host + contrat `Game`, extraction de `Program.cs`) → contenu (identité d'assets stable,
 > cook, prefabs/scènes, data-driven) → **2ᵉ slice dissemblable** (top-down — test de généralité) → texte/UI, audio,
-> queries physiques, job system → netcode réel. **Brainstorm demandé : texte & UI** (FreeType ? MSDF ? XAML baké).
+> queries physiques, job system → netcode réel.
+>
+> ### ✅ Brainstorm **Texte & UI** terminé (S25) — spec écrite, implémentation NON commencée
+> Spec : **[plans/2026-08-03-text-ui-design.md](plans/2026-08-03-text-ui-design.md)** (revue scorée pas encore passée).
+> 10 décisions verrouillées en interview. Les plus structurantes :
+> - **Périmètre = texte & overlay, SANS interactivité.** Découverte du scan : toute UI interactive est bloquée derrière
+>   l'input (pas de position souris, pas d'événements boutons, pas de `KeyChar`, et **tout clic capture le curseur**)
+>   → ce chantier appartient à **MP-0**. L'affichage de texte, lui, n'en dépend pas.
+> - **Cook hors-ligne imposé par le code** (Release interdit la compilation runtime des shaders, `shaderc` est strippée).
+> - **Atlas SDF via `StbTrueTypeSharp`** (MIT, pur managé, sœur de `StbImageSharp` déjà utilisé) → **zéro dépendance
+>   native, y compris dans l'outil**. FreeType écarté (n'apporte que du hinting, inutile en SDF).
+> - **Latin + kerning avec seam de shaping** (`Rune`, pas `char`) → HarfBuzz insérable plus tard sans refonte d'API.
+> - **Nouveau projet `Agapanthe.Ui` GPU-free** + **`tools/FontCooker`** (patron `ShaderPrecompiler`) + format
+>   **`.agfont`** binaire mono-fichier (patron VS-1, sortie déterministe).
+> - **3 jalons séquencés** : **UI-1** texte à l'écran · **UI-2** DebugOverlay + profiler CPU (remplace le HUD
+>   `window.Title`) · **UI-3** timestamps GPU (`QueryPool`, dégradation gracieuse, abandonnable).
+>
+> Deux manques bas niveau confirmés dans `Agapanthe.Graphics` : **aucun format mono-canal** (`R8Unorm` à ajouter) et
+> **blending câblé en dur à `false`** (`GraphicsPipeline.cs:208`) — cette 2ᵉ correction débloque aussi la dette
+> « 2ᵉ verrou transparence ». La spec porte en annexe les **exigences d'input à concevoir une seule fois dans MP-0**.
+>
+> **Arbitrage à faire** : MP-0 d'abord (ordre du backlog) ou UI-1 d'abord ? UI-1 est indépendant de MP-0, mais
+> `UiRenderSystem`/`Profiler` atterriront dans la moitié « render » du split `Agapanthe.Engine` qu'opère MP-0.
 >
 > Dettes reportées : latch non-monotone au reload (VS-3 A1), lifetime/rest-cull des corps (VS-2 m2), fingerprint
 > d'assets (VS-1), **P3-M0 Linux/macOS requalifié en item de crédibilité** du moteur-artefact.

@@ -424,12 +424,32 @@ Tout ici coûte **peu maintenant** et est **catastrophique à rétrofitter**.
 **Explicitement HORS scope maintenant** : server meshing · transport · prediction/reconciliation · lag compensation ·
 anti-triche · éditeur GUI · skinning/animation (sauf si un jeu-échantillon le tire) · terrain LOD/atmosphère.
 
-### Texte & UI *(brainstorm demandé, session 25 — à instruire)*
+### Texte & UI ✅ *(brainstorm fait, session 25 — spec écrite)*
 
-Piste humaine : **FreeType** en socle, et une description d'UI **façon XAML/WPF bakée à la compilation**.
-Points à trancher au brainstorm : rasterization **offline (cook) vs runtime** · **MSDF** vs atlas bitmap · **shaping**
-(FreeType ne fait PAS le shaping — HarfBuzz/CJK/bidi) · **deux couches d'UI** (immédiate pour le debug/profiler vs
-retenue pour l'UI de jeu) · **source generator** XAML→C# (AOT-pur, zéro réflexion). Voir la spec dédiée quand elle existe.
+**Spec : [plans/2026-08-03-text-ui-design.md](plans/2026-08-03-text-ui-design.md)** (revue scorée à passer).
+
+Décisions verrouillées : périmètre = **texte & overlay SANS interactivité** — le scan a montré que toute UI
+interactive est bloquée derrière l'input (**pas de position souris, pas d'événements boutons, pas de `KeyChar`, et
+tout clic capture le curseur**), chantier qui appartient à **MP-0** ; la spec porte en annexe les exigences d'input à
+concevoir **une seule fois** là-bas. Cook **hors-ligne** (imposé par le code : Release interdit la compilation runtime
+des shaders et strippe `shaderc`). Atlas **SDF via `StbTrueTypeSharp`** (MIT, pur managé) → **zéro dépendance native,
+y compris dans l'outil** ; FreeType écarté (n'apporte que du hinting, inutile en SDF, contre 3 OS × 2 arch de
+binaires) ; `SixLabors.Fonts` écarté (licence Split payante). **Latin + kerning avec seam de shaping** (`Rune`, pas
+`char`) → HarfBuzz insérable sans refonte d'API ; CJK/écritures complexes hors scope. Nouveau projet **`Agapanthe.Ui`
+GPU-free**, **`tools/FontCooker`** (patron `ShaderPrecompiler`), format **`.agfont`** binaire mono-fichier (patron
+VS-1, sortie déterministe).
+
+**3 jalons séquencés** : **UI-1** texte à l'écran · **UI-2** DebugOverlay + profiler CPU (remplace le HUD
+`window.Title`, rend le **gate 0-alloc visible en continu**) · **UI-3** timestamps GPU (`QueryPool`, dégradation
+gracieuse, abandonnable).
+
+*Prérequis bas niveau découverts* : `Agapanthe.Graphics` n'a **aucun format mono-canal** (`R8Unorm` à ajouter,
+précédent `Rg16Sfloat`) et son **blending est câblé en dur à `false`** (`GraphicsPipeline.cs:208`) — ajouter
+`BlendMode` débloque aussi la dette « 2ᵉ verrou transparence ». Aucun `QueryPool` n'existe (UI-3).
+
+**Le XAML retenu reste à instruire** (spec séparée, bien plus tard) : source generator XAML→C# (la réflexion est
+hostile à NativeAOT ; précédents BAML/Avalonia/NoesisGUI), avec un v1 **brutalement restreint** — le volume de surface
+(layout, styling, templates, binding, animations, routage d'input, focus) est un chantier de la taille du renderer.
 
 ## 5. Confort / qualité d'image (opportuniste)
 
