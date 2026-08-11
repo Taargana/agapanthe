@@ -508,12 +508,27 @@ public readonly unsafe struct CommandList
     private static (ImageLayout Layout, PipelineStageFlags2 Stage, AccessFlags2 Access) MapState(
         ImageLayoutState state, ImageAspectFlags aspect) => state switch
     {
+        // Undefined as a SOURCE means "discard the contents", but the discard is itself a write: it must be ordered
+        // after whatever wrote the image last, which needs a real access mask, not just a stage. Setting only the
+        // stage (as this did) gives an execution dependency with no memory dependency — the shared depth target was
+        // reported as WRITE_AFTER_WRITE against the previous frame's storeOp. Undefined is never a destination, so
+        // giving it write access here cannot over-constrain anything.
         ImageLayoutState.Undefined => (
             ImageLayout.Undefined,
             (aspect & ImageAspectFlags.DepthBit) != 0
                 ? PipelineStageFlags2.EarlyFragmentTestsBit | PipelineStageFlags2.LateFragmentTestsBit
-                : PipelineStageFlags2.TopOfPipeBit,
-            AccessFlags2.None),
+                // COLOR_ATTACHMENT_OUTPUT, not TOP_OF_PIPE. The frame's first transition discards the acquired
+                // swapchain image, and the submit waits on the image-available semaphore at
+                // COLOR_ATTACHMENT_OUTPUT: a barrier sourced at TOP_OF_PIPE sits BEFORE that wait, so it could
+                // execute while the presentation engine still owned the image. Synchronization validation reports
+                // it as WRITE_AFTER_READ against vkAcquireNextImageKHR — and it went unseen for the whole project
+                // until that checker was switched on (UI-2). Matching the semaphore's stage is the standard fix;
+                // for non-swapchain images the source access is None, so this only costs a tighter execution
+                // dependency, never correctness.
+                : PipelineStageFlags2.ColorAttachmentOutputBit,
+            (aspect & ImageAspectFlags.DepthBit) != 0
+                ? AccessFlags2.DepthStencilAttachmentWriteBit
+                : AccessFlags2.ColorAttachmentWriteBit),
         ImageLayoutState.ColorAttachment => (
             ImageLayout.ColorAttachmentOptimal,
             PipelineStageFlags2.ColorAttachmentOutputBit,

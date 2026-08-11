@@ -19,14 +19,14 @@ qui écrase l'ID sur 32 bits → deux clés parallèles · 🟠 split headless (
 **UI-2 — DebugOverlay + profiler CPU** (spec **déjà écrite et approuvée**, prêt pour `absolute-work`)
 `FrameStats` (ring de frame time, **octets alloués par frame = le gate 0-alloc rendu visible en continu**), graphes
 en rects, bascule `F3`, remplace le HUD `window.Title` et supprime le hack de cession de titre.
-*Prérequis recommandé* : activer la **synchronization validation** (voir dette ci-dessous) — UI-2 ajoute des passes.
+*Prérequis* : ✅ **fait** — la synchronization validation est active, donc toute passe ajoutée par UI-2 sera vérifiée.
 
 ## Dettes reportées (à garder en vue)
 
-- 🟠 **Synchronization validation non activée** (legs UI-1) — le gate « 0 message de validation » ne peut
-  **structurellement pas voir** les hazards de synchro : une barrière manquante entre le tonemap et la passe UI est
-  passée inaperçue jusqu'à l'audit. À activer via `VK_VALIDATION_FEATURE_ENABLE_SYNCHRONIZATION_VALIDATION`, en
-  s'attendant à révéler des hazards **préexistants** ailleurs dans le moteur.
+- ~~🟠 Synchronization validation non activée~~ ✅ **soldée (S25)** : active par défaut en Debug
+  (`AGAPANTHE_SYNC_VALIDATION=0` pour l'éteindre). A révélé et fait corriger **3 hazards préexistants** de la boucle
+  de frame (acquire au mauvais stage · signal de présent trop tôt · `Undefined` sans access mask sur le depth
+  partagé). Captures inchangées → aucun pixel affecté.
 - 🟠 `MaxStorageBuffers` : 12 des 16 descripteurs per-frame consommés — UI-2/UI-3 déborderont.
 - 🟠 **latch Won/Lost VS-3 non-monotone à travers un reload** · **pas de lifetime/rest-cull des corps runtime** (VS-2).
 - 🟡 Pas d'échec bruyant si aucun format sRGB de swapchain · troncature silencieuse > 256 glyphes par appel ·

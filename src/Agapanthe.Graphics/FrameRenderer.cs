@@ -266,7 +266,12 @@ public sealed unsafe class FrameRenderer : IDisposable
         {
             SType = StructureType.SemaphoreSubmitInfo,
             Semaphore = renderFinished,
-            StageMask = PipelineStageFlags2.ColorAttachmentOutputBit,
+            // ALL_COMMANDS, not COLOR_ATTACHMENT_OUTPUT. The last thing the command buffer does is transition the
+            // image to PresentSrc, and that barrier completes at BOTTOM_OF_PIPE — i.e. AFTER colour output. Signaling
+            // at COLOR_ATTACHMENT_OUTPUT therefore released the present before the transition had finished, which
+            // synchronization validation reports as PRESENT_AFTER_WRITE. The signal has to cover every stage the
+            // command buffer touched (UI-2; found the moment sync validation was switched on).
+            StageMask = PipelineStageFlags2.AllCommandsBit,
         };
         var cmdInfo = new CommandBufferSubmitInfo
         {

@@ -25,6 +25,15 @@ public sealed unsafe partial class GraphicsDevice : IDisposable
     private const string PortabilityEnumerationExtensionName = "VK_KHR_portability_enumeration";
     private const string PortabilitySubsetExtensionName = "VK_KHR_portability_subset";
 
+    /// <summary>
+    /// Instance extension carrying <c>VkValidationFeaturesEXT</c>, which is how synchronization validation is turned
+    /// on (UI-2). Worth stating plainly: the standard validation layers check API <i>usage</i>, not memory hazards —
+    /// a missing barrier between two passes writing and reading the same image raises nothing. UI-1 shipped exactly
+    /// that bug (tonemap → UI overlay) and the "0 validation messages" gate stayed green throughout. Without this,
+    /// that gate does not mean what the project assumes it means.
+    /// </summary>
+    private const string ValidationFeaturesExtensionName = "VK_EXT_validation_features";
+
     private static readonly bool EnableValidation =
 #if DEBUG
         true;
@@ -360,6 +369,30 @@ public sealed unsafe partial class GraphicsDevice : IDisposable
             extensions.Add(ExtDebugUtils.ExtensionName);
         }
 
+        // Synchronization validation (UI-2). Opt-out via AGAPANTHE_SYNC_VALIDATION=0: it is a heavy checker (it
+        // tracks every resource access), so a perf bench may legitimately want it off — but it is ON by default in
+        // Debug, because a hazard that no gate can see is a hazard that ships.
+        // The extension is shipped BY the validation layer, so it is invisible to an implementation-only query —
+        // it has to be looked up under the layer's own name.
+        var validationLayerExtensions = layers.Contains(ValidationLayerName)
+            ? GetLayerExtensionNames(ValidationLayerName)
+            : [];
+        var syncValidationAvailable = validationLayerExtensions.Contains(ValidationFeaturesExtensionName)
+                                      || availableExtensions.Contains(ValidationFeaturesExtensionName);
+        var syncValidation = EnableValidation
+                             && syncValidationAvailable
+                             && Environment.GetEnvironmentVariable("AGAPANTHE_SYNC_VALIDATION") is not "0";
+        if (syncValidation)
+        {
+            extensions.Add(ValidationFeaturesExtensionName);
+        }
+        else if (EnableValidation && !syncValidationAvailable)
+        {
+            Log.Warn(
+                $"GraphicsDevice: {ValidationFeaturesExtensionName} not available; synchronization hazards "
+                + "(missing barriers) will NOT be detected.");
+        }
+
         var appName = (byte*)SilkMarshal.StringToPtr(applicationName);
         var engineName = (byte*)SilkMarshal.StringToPtr("Agapanthe");
         var layerNames = layers.Count > 0 ? (byte**)SilkMarshal.StringArrayToPtr(layers) : null;
@@ -392,6 +425,21 @@ public sealed unsafe partial class GraphicsDevice : IDisposable
             if (_debugUtilsEnabled)
             {
                 createInfo.PNext = &debugCreateInfo;
+            }
+
+            // Synchronization validation rides in front of the messenger in the same pNext chain, so its findings
+            // reach the same callback (and therefore the same fail-fast) as every other validation message.
+            var syncFeature = ValidationFeatureEnableEXT.SynchronizationValidationExt;
+            var validationFeatures = new ValidationFeaturesEXT
+            {
+                SType = StructureType.ValidationFeaturesExt,
+                PNext = createInfo.PNext,
+                EnabledValidationFeatureCount = 1,
+                PEnabledValidationFeatures = &syncFeature,
+            };
+            if (syncValidation)
+            {
+                createInfo.PNext = &validationFeatures;
             }
 
             Instance instance;
@@ -847,6 +895,39 @@ public sealed unsafe partial class GraphicsDevice : IDisposable
         }
 
         return ExtensionNames(extensions);
+    }
+
+    /// <summary>
+    /// Extensions provided by a <b>layer</b> rather than by the implementation. Querying with a null layer name (as
+    /// above) does not return these, which is why <c>VK_EXT_validation_features</c> — shipped by the validation
+    /// layer itself — appears absent unless it is asked for by name.
+    /// </summary>
+    private HashSet<string> GetLayerExtensionNames(string layerName)
+    {
+        var namePtr = (byte*)SilkMarshal.StringToPtr(layerName);
+        try
+        {
+            uint count = 0;
+            if (_vk.EnumerateInstanceExtensionProperties(namePtr, &count, null) != Result.Success || count == 0)
+            {
+                return [];
+            }
+
+            var extensions = new ExtensionProperties[count];
+            fixed (ExtensionProperties* p = extensions)
+            {
+                if (_vk.EnumerateInstanceExtensionProperties(namePtr, &count, p) != Result.Success)
+                {
+                    return [];
+                }
+            }
+
+            return ExtensionNames(extensions);
+        }
+        finally
+        {
+            SilkMarshal.Free((nint)namePtr);
+        }
     }
 
     private HashSet<string> GetDeviceExtensionNames(PhysicalDevice device)
