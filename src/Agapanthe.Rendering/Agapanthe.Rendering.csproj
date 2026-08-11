@@ -4,6 +4,9 @@
     <ProjectReference Include="..\Agapanthe.Graphics\Agapanthe.Graphics.csproj" />
     <ProjectReference Include="..\Agapanthe.Assets\Agapanthe.Assets.csproj" />
     <ProjectReference Include="..\Agapanthe.Core\Agapanthe.Core.csproj" />
+    <!-- UI-1: Rendering CONSUMES the GPU-free draw list. The direction is forced — StorageBufferRing<T>, the
+         per-frame ring the quads are copied into, is internal to this assembly and cannot leave it. -->
+    <ProjectReference Include="..\Agapanthe.Ui\Agapanthe.Ui.csproj" />
   </ItemGroup>
 
   <PropertyGroup>

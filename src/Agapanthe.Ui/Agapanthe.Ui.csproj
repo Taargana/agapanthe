@@ -1,0 +1,24 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <!-- Phase 2 rule 1: trim/AOT analyzers at build time (permanent gate, see Agapanthe.Core.csproj). -->
+    <IsAotCompatible>true</IsAotCompatible>
+  </PropertyGroup>
+
+  <!-- Ui is GPU-FREE by design (UI-1): text shaping, layout and the draw list are pure logic, unit-testable with no
+       device — exactly the argument that keeps Assets GPU-free. It must never reference Agapanthe.Graphics,
+       Agapanthe.Rendering or any Silk.NET package.
+
+       The dependency runs the OTHER way: Agapanthe.Rendering references THIS project to consume the quads, because
+       StorageBufferRing<T> (the per-frame GPU ring the quads are copied into) is internal to Rendering and cannot
+       leave that assembly. -->
+  <ItemGroup>
+    <ProjectReference Include="..\Agapanthe.Core\Agapanthe.Core.csproj" />
+    <ProjectReference Include="..\Agapanthe.Assets\Agapanthe.Assets.csproj" />
+  </ItemGroup>
+
+</Project>

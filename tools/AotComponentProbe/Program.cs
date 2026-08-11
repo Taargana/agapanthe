@@ -1,4 +1,7 @@
+using System.Numerics;
 using System.Runtime.CompilerServices;
+using Agapanthe.Assets.Font;
+using Agapanthe.Ui;
 using Agapanthe.World;
 
 // AOT component-rooting probe (spec §6.1). Published as NativeAOT and run: it constructs a GameWorld (which
@@ -43,6 +46,52 @@ catch (Exception ex)
     Console.Error.WriteLine($"AotComponentProbe: FAIL — {ex.GetType().FullName}: {ex.Message}");
     return 1;
 }
+
+// UI-1: the text path under NativeAOT. Two things are being proven here.
+//
+// 1. The .agfont reader and the layout work: the format is blittable and read through MemoryMarshal, and the
+//    layout is plain struct maths, so both SHOULD be AOT-safe by construction — but "should" is exactly what the
+//    probe exists to replace. This is also the Release shape (cache-only assets), which is where the shader
+//    pipeline has bitten before.
+// 2. StbTrueTypeSharp is ABSENT. The font is rasterised offline by tools/FontCooker, which no shipping project
+//    references, so the runtime links no font library at all. A stray ProjectReference would silently drag it
+//    into the AOT closure — the same mistake the shaderc comments warn about.
+try
+{
+    // The probe does not cook fonts (it has no CookFonts target and must not gain one — that would be build
+    // duplication). The path is passed in, typically the Sandbox's cooked output; falling back to a local copy.
+    var fontPath = args.Length > 0
+        ? args[0]
+        : Path.Combine(AppContext.BaseDirectory, "fonts", "JetBrainsMono-Regular.agfont");
+    if (File.Exists(fontPath))
+    {
+        var font = FontAssetFormat.Read(File.ReadAllBytes(fontPath));
+        var extent = TextLayout.Measure("Agapanthe 0123", font, pixelSize: 16f);
+        var list = new UiDrawList();
+        TextLayout.DrawText(list, "Agapanthe 0123\nsecond line", font, Vector2.Zero, 16f, 0xFFFFFFFFu);
+
+        Console.WriteLine(
+            $"AotTextSmoke: {font.Glyphs.Length} glyph(s), atlas {font.AtlasWidth}×{font.AtlasHeight}, "
+            + $"measured {extent.Width:F1}×{extent.Height:F1} px, {list.Count} quad(s).");
+
+        if (list.Count == 0 || extent.Width <= 0f)
+        {
+            Console.Error.WriteLine("AotComponentProbe: FAIL — text layout produced nothing under AOT.");
+            return 1;
+        }
+    }
+    else
+    {
+        // Not fatal: the probe is not the Sandbox and does not cook fonts. Say so rather than pass silently.
+        Console.WriteLine($"AotTextSmoke: SKIPPED — no cooked font at '{fontPath}'.");
+    }
+}
+catch (Exception ex)
+{
+    Console.Error.WriteLine($"AotComponentProbe: FAIL (text) — {ex.GetType().FullName}: {ex.Message}");
+    return 1;
+}
+
 
 Console.WriteLine("AotComponentProbe: PASS — component rooting sufficient under this configuration.");
 return 0;

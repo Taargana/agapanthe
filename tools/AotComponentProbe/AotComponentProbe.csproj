@@ -15,6 +15,9 @@
   <ItemGroup>
     <ProjectReference Include="..\..\src\Agapanthe.World\Agapanthe.World.csproj" />
     <ProjectReference Include="..\..\src\Agapanthe.Core\Agapanthe.Core.csproj" />
+    <!-- UI-1: proves the .agfont reader and the text layout survive NativeAOT, and — just as important — that
+         StbTrueTypeSharp does NOT come along: it lives only in tools/FontCooker, which nothing shipped references. -->
+    <ProjectReference Include="..\..\src\Agapanthe.Ui\Agapanthe.Ui.csproj" />
   </ItemGroup>
 
 </Project>

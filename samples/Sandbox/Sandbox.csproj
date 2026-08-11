@@ -109,6 +109,60 @@
     </ItemGroup>
   </Target>
 
+  <!-- ============================ Font cooking (UI-1) ============================
+       Twin of the shader pre-cook above, and for the same reason: the RUNTIME must never parse a .ttf nor link a
+       font library. tools/FontCooker rasterises the face into an SDF atlas + metrics and writes a .agfont, which
+       ships as Content. FontCooker is deliberately NOT a ProjectReference — that would drag StbTrueTypeSharp into
+       the AOT closure, exactly the mistake the shaderc comment above describes. -->
+  <PropertyGroup>
+    <FontSourceDir>$([MSBuild]::NormalizeDirectory('$(MSBuildThisFileDirectory)..\..\fonts'))</FontSourceDir>
+    <FontCookerProject>$([MSBuild]::NormalizePath('$(MSBuildThisFileDirectory)..\..\tools\FontCooker\FontCooker.csproj'))</FontCookerProject>
+    <FontCacheStageDir>$([MSBuild]::NormalizeDirectory('$(MSBuildProjectDirectory)\obj\fontcache'))</FontCacheStageDir>
+    <FontCacheStamp>$(FontCacheStageDir).cooked.stamp</FontCacheStamp>
+  </PropertyGroup>
+
+  <!-- Every file under fonts/ is an input: the .ttf obviously, but also charset.txt — changing the charset changes
+       the atlas even though the face did not. -->
+  <ItemGroup>
+    <FontSourceFile Include="$(FontSourceDir)**\*" />
+    <!-- The COOKER'S OWN SOURCES are inputs too. Unlike the shader cache — whose key is a hash of the source, so it
+         self-heals — the .agfont is stamp-based: without this, changing the SDF spread or the packing algorithm
+         would leave a stale atlas shipped, silently. -->
+    <FontSourceFile Include="$(MSBuildThisFileDirectory)..\..\tools\FontCooker\**\*.cs"
+                    Exclude="$(MSBuildThisFileDirectory)..\..\tools\FontCooker\obj\**;$(MSBuildThisFileDirectory)..\..\tools\FontCooker\bin\**" />
+  </ItemGroup>
+
+  <!-- Same two hard-won details as PrecompileShaders: RemoveProperties keeps the tool a plain managed net10.0
+       assembly under an outer `dotnet publish -r`, and paths lose their trailing backslash so a quoted "...\"
+       cannot escape the quote and merge the arguments. -->
+  <Target Name="CookFonts"
+          Inputs="@(FontSourceFile)"
+          Outputs="$(FontCacheStamp)">
+    <MSBuild Projects="$(FontCookerProject)"
+             Targets="Build"
+             Properties="Configuration=$(Configuration)"
+             RemoveProperties="RuntimeIdentifier;SelfContained;PublishAot;PublishTrimmed;PublishSingleFile">
+      <Output TaskParameter="TargetOutputs" ItemName="_FontCookerAssembly" />
+    </MSBuild>
+    <MakeDir Directories="$(FontCacheStageDir)" />
+    <Exec Command="dotnet exec &quot;@(_FontCookerAssembly)&quot; &quot;$(FontSourceDir)JetBrainsMono-Regular.ttf&quot; &quot;$(FontSourceDir)charset.txt&quot; &quot;$(FontCacheStageDir)JetBrainsMono-Regular.agfont&quot;" />
+    <Touch Files="$(FontCacheStamp)" AlwaysCreate="true" />
+  </Target>
+
+  <!-- Always runs (after CookFonts, before Content target-paths are assigned) so the .agfont ships even when the
+       cook above was up to date and skipped. The wildcard is pre-expanded into concrete items first — a wildcard
+       handed straight to <Content Include> inside a target is not reliably re-globbed and ships nothing. -->
+  <Target Name="IncludeCookedFonts"
+          DependsOnTargets="CookFonts"
+          BeforeTargets="AssignTargetPaths">
+    <ItemGroup>
+      <_CookedFont Include="$(FontCacheStageDir)*.agfont" />
+      <Content Include="@(_CookedFont)" Link="fonts\%(Filename)%(Extension)">
+        <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      </Content>
+    </ItemGroup>
+  </Target>
+
   <!-- A Release build ships pre-cooked SPIR-V and runs ShaderCompiler in cache-only mode, so the native shaderc
        library is never loaded (rule §2.1-2, proven: an AOT run with cache-only never logs a cache miss). Drop
        the 6.6 MB shaderc_shared.dll from Release output and publish so it is not shipped at all — the literal

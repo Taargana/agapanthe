@@ -7,7 +7,7 @@
 > Règle de tri : chaque item dit **ce qui casse sans lui** et **à quelle échelle il devient obligatoire**. Un item sans
 > déclencheur clair est une idée, pas du backlog.
 
-Dernière mise à jour : 2026-07-26 (session 24 — **VS-3 livrée** : glu gameplay = défi d'atterrissage planétaire ; §4ter à jour) · 2026-07-26 (session 23 — **VS-2 livrée** : spawn runtime différé + gravité newtonienne ; §4ter à jour) · 2026-07-24 (session 21 — échelle planétaire 1/2 uniforme, **§4ter Vertical Slice** formalisée).
+Dernière mise à jour : 2026-08-11 (session 25 — **UI-1 livré** : texte à l'écran, §4quater à jour) · 2026-08-03 (session 25 — **réorientation cap « vrai engine »**, §4quater créée) · 2026-07-26 (session 24 — **VS-3 livrée** : glu gameplay = défi d'atterrissage planétaire ; §4ter à jour) · 2026-07-26 (session 23 — **VS-2 livrée** : spawn runtime différé + gravité newtonienne ; §4ter à jour) · 2026-07-24 (session 21 — échelle planétaire 1/2 uniforme, **§4ter Vertical Slice** formalisée).
 
 ---
 
@@ -439,9 +439,16 @@ binaires) ; `SixLabors.Fonts` écarté (licence Split payante). **Latin + kernin
 GPU-free**, **`tools/FontCooker`** (patron `ShaderPrecompiler`), format **`.agfont`** binaire mono-fichier (patron
 VS-1, sortie déterministe).
 
-**3 jalons séquencés** : **UI-1** texte à l'écran · **UI-2** DebugOverlay + profiler CPU (remplace le HUD
-`window.Title`, rend le **gate 0-alloc visible en continu**) · **UI-3** timestamps GPU (`QueryPool`, dégradation
-gracieuse, abandonnable).
+**3 jalons séquencés** : ~~**UI-1** texte à l'écran~~ ✅ **livré session 25** · **UI-2** DebugOverlay + profiler CPU
+(remplace le HUD `window.Title`, rend le **gate 0-alloc visible en continu**) · **UI-3** timestamps GPU (`QueryPool`,
+dégradation gracieuse, abandonnable).
+
+*UI-1 livré* (double audit PASS-with-concerns ×2, verdict humain PASS) : `tools/FontCooker` (SDF hors-ligne, pur
+managé) · `.agfont` déterministe · `Agapanthe.Ui` GPU-free · `BlendMode` + `R8Unorm` · `UiPass` + `Renderer.LoadFont`/
+`DrawUi` · `UiRenderSystem` · **capture swapchain** `AGAPANTHE_CAPTURE_UI` (la capture HDR ne pouvait pas voir un
+overlay dessiné après le tonemap). *Dette léguée* : **synchronization validation non activée** — le gate « 0 message
+de validation » ne voit structurellement pas les hazards de synchro (une barrière manquante tonemap→UI l'a prouvé) ;
+`MaxStorageBuffers` 12/16 ; pas d'échec bruyant sans format sRGB de swapchain ; troncature silencieuse > 256 glyphes.
 
 *Prérequis bas niveau découverts* : `Agapanthe.Graphics` n'a **aucun format mono-canal** (`R8Unorm` à ajouter,
 précédent `Rg16Sfloat`) et son **blending est câblé en dur à `false`** (`GraphicsPipeline.cs:208`) — ajouter

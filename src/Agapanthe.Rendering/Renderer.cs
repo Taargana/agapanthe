@@ -1,9 +1,12 @@
 using System.Diagnostics;
 using System.Numerics;
 using System.Runtime.CompilerServices;
+using System.Runtime.InteropServices;
+using Agapanthe.Assets.Font;
 using Agapanthe.Core;
 using Agapanthe.Graphics;
 using Agapanthe.Rendering.Passes;
+using Agapanthe.Ui;
 
 namespace Agapanthe.Rendering;
 
@@ -107,6 +110,7 @@ public sealed class Renderer : IDisposable
     private const string ScenePassLabel = "Scene";
     private const string SkyboxLabel = "Skybox";
     private const string TonemapPassLabel = "Tonemap";
+    private const string UiPassLabel = "UI";
 
     // Per-frame-slot camera UBOs: host-visible, rewritten every frame (Write<T> is correct — no staging).
     private readonly GpuBuffer?[] _cameraUbos = new GpuBuffer?[GraphicsDevice.FramesInFlight];
@@ -208,6 +212,13 @@ public sealed class Renderer : IDisposable
     // image is sampled through this sampler and resolved to the swapchain.
     private DescriptorSetLayout? _tonemapSetLayout;
     private Sampler? _tonemapSampler;
+
+    // UI overlay (UI-1). The pass and its set layout exist from construction; the font and its quad ring only once
+    // an application calls LoadFont — a headless or font-less run pays nothing.
+    private UiPass? _uiPass;
+    private DescriptorSetLayout? _uiSetLayout;
+    private FontResources? _fontResources;
+    private StorageBufferRing<UiQuad>? _uiQuads;
 
     // Swapchain-sized attachments owned here now that the frame loop is attachment-agnostic: the HDR scene
     // color target (rendered then sampled by the tonemap pass) and the depth target. Both are (re)created
@@ -391,6 +402,16 @@ public sealed class Renderer : IDisposable
             _skyboxPass = new SkyboxPass(
                 device, shaderDirectory, _shaderCompiler,
                 _skyboxSetLayout, HdrFormat, DepthFormat);
+            // UI overlay (UI-1): one per-frame set holding the font atlas (fragment) and the frame's quads (vertex).
+            _uiSetLayout = new DescriptorSetLayout(
+                device,
+                [
+                    new DescriptorBinding(0, DescriptorKind.CombinedImageSampler, ShaderStages.Fragment),
+                    new DescriptorBinding(1, DescriptorKind.StorageBuffer, ShaderStages.Vertex),
+                ]);
+            _uiPass = new UiPass(
+                device, shaderDirectory, _shaderCompiler,
+                _uiSetLayout, swapchain.ColorFormat);
 
             // --- GPU scene cull compute (P3-M4 W1) ----------------------------------------------------------
             // Not a graphics pass (not hot-reloadable, like the IBL kernels): compiled once here. Four storage
@@ -442,7 +463,7 @@ public sealed class Renderer : IDisposable
             // Their SourceFiles (root shader + resolved #includes, populated by Build above) are exactly the
             // files to watch. The reloader spins up FileSystemWatcher(s) on their source directories; the
             // resulting change flag is drained in PollShaderReload at the frame boundary.
-            _reloadablePasses = [_shadowPass, _scenePass, _skyboxPass, _tonemapPass];
+            _reloadablePasses = [_shadowPass, _scenePass, _skyboxPass, _tonemapPass, _uiPass];
 #if DEBUG
             // Hot reload is a Debug-only luxury (Phase 2 rule §2.1-2): a shipping build spins up no watcher thread
             // and _reloader stays null, so PollShaderReload is a no-op. Only Debug watches the source files.
@@ -1256,6 +1277,96 @@ public sealed class Renderer : IDisposable
     }
 
     /// <summary>
+    /// Uploads a baked font so <see cref="DrawUi"/> can render text with it (UI-1). Load-time only — it creates a
+    /// GPU image and blocks on the staging upload. Calling it again replaces the current font.
+    /// <para>
+    /// UI-1 keeps exactly one font live: a second one would mean a second atlas, a second descriptor set and a
+    /// second draw call. The pass is trivially re-runnable per atlas when that day comes.
+    /// </para>
+    /// </summary>
+    public void LoadFont(FontAsset font)
+    {
+        ArgumentNullException.ThrowIfNull(font);
+        ObjectDisposedException.ThrowIf(_disposed, this);
+
+        var replaced = _fontResources;
+        using (var uploader = new GpuUploader(_device))
+        {
+            _fontResources = new FontResources(_device, uploader, font);
+        }
+
+        _uiQuads ??= new StorageBufferRing<UiQuad>(_device);
+        replaced?.Dispose(); // deferred N+2 frames by the deletion queue, so a frame in flight is safe
+    }
+
+    /// <summary>
+    /// Draws the frame's UI quads over the swapchain image (UI-1). Call it after the scene has been drawn — it
+    /// loads the existing contents rather than clearing them.
+    /// <para>
+    /// No-op when no font is loaded or the list is empty, so an application that draws no UI pays nothing. The quads
+    /// arrive as a span of plain structs from <c>Agapanthe.Ui</c>: no GPU type ever reaches the code that decided
+    /// what to draw.
+    /// </para>
+    /// </summary>
+    public void DrawUi(CommandList cmd, FrameContext frame, SwapchainTarget target, ReadOnlySpan<UiQuad> quads)
+    {
+        ArgumentNullException.ThrowIfNull(frame);
+        ObjectDisposedException.ThrowIf(_disposed, this);
+
+        if (quads.IsEmpty || _fontResources is null || _uiQuads is null || _uiPass is null)
+        {
+            return;
+        }
+
+        using var _ = cmd.PushDebugLabel(UiPassLabel);
+
+        var quadBuffer = _uiQuads.Upload(frame.Slot, quads);
+
+        // The tonemap just WROTE this image in its own render pass instance, and this pass READS it back
+        // (LoadOp = Load + blending). Rasterization order is only guaranteed inside one instance, so the
+        // dependency between the two has to be explicit. It is not supplied incidentally by a layout change here:
+        // the image stays in ColorAttachmentOptimal throughout, unlike every other pass boundary in the frame.
+        cmd.ColorAttachmentBarrier(target.View);
+
+        cmd.BeginRendering(new RenderingAttachments
+        {
+            Color = new ColorAttachmentInfo
+            {
+                Target = target.View,
+                // LOAD, not DontCare: the tonemap has already written the scene here and the UI blends over it.
+                LoadOp = AttachmentLoadAction.Load,
+            },
+            Width = target.Width,
+            Height = target.Height,
+        });
+        cmd.SetViewportScissor(target.Width, target.Height);
+
+        // One per-frame set: a descriptor set comes from a single pool, so the (stable) atlas and the (per-frame)
+        // quad buffer share this one. Only the descriptor write repeats; the image and sampler handles do not move.
+        var uiSet = frame.AllocateSet(_uiSetLayout!);
+        frame.WriteCombinedImageSampler(uiSet, 0, _fontResources.Atlas, _fontResources.Sampler);
+        frame.WriteStorageBuffer(uiSet, 1, quadBuffer);
+
+        var pipeline = _uiPass.Pipeline;
+        cmd.BindPipeline(pipeline);
+        cmd.BindDescriptorSet(pipeline, 0, uiSet);
+
+        var push = new UiPushConstants(
+            new Vector2(1f / target.Width, 1f / target.Height),
+            _fontResources.Font.SdfPixelRange);
+        cmd.PushConstants(pipeline, ShaderStages.Vertex | ShaderStages.Fragment, in push);
+
+        // Six vertices per quad, generated in the vertex shader — no vertex or index buffer anywhere.
+        cmd.Draw((uint)quads.Length * 6);
+
+        cmd.EndRendering();
+    }
+
+    // Mirrors the push-constant block in ui.vert / ui.frag: vec2 + float, 12 bytes.
+    [StructLayout(LayoutKind.Sequential)]
+    private readonly record struct UiPushConstants(Vector2 InvScreenSize, float SdfPixelRange);
+
+    /// <summary>
     /// Ensures the owned HDR-color and depth targets match <paramref name="width"/>×<paramref name="height"/>.
     /// Both are swapchain-sized and always created/recreated together, so the HDR extent is the single source
     /// of truth for the check. On the first call it creates both; when the extent changes (resize) it waits for
@@ -1535,6 +1646,17 @@ public sealed class Renderer : IDisposable
         _tonemapSampler?.Dispose();
         _tonemapSetLayout = null;
         _tonemapSampler = null;
+
+        // UI overlay (UI-1). The pass owns its pipeline; FontResources owns the atlas image + sampler; the quad
+        // ring owns its per-slot buffers. All three are null on a run that never loaded a font.
+        _uiPass?.Dispose();
+        _uiSetLayout?.Dispose();
+        _fontResources?.Dispose();
+        _uiQuads?.Dispose();
+        _uiPass = null;
+        _uiSetLayout = null;
+        _fontResources = null;
+        _uiQuads = null;
 
         _materialSetLayout?.Dispose();
         _frameSetLayout?.Dispose();

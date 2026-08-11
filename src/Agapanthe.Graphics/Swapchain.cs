@@ -52,6 +52,13 @@ public sealed unsafe class Swapchain : IDisposable
     /// <summary>Color attachment format (for pipeline creation).</summary>
     public PixelFormat ColorFormat => PixelFormatExtensions.FromVk(ImageFormat);
 
+    /// <summary>
+    /// Whether the presented image can be read back for a debug capture, i.e. whether the surface advertised
+    /// <c>TRANSFER_SRC</c> support (UI-1). False on an exotic surface that does not; capture then degrades to a
+    /// clean "unsupported" rather than a broken swapchain.
+    /// </summary>
+    public bool CanCapture { get; private set; }
+
     internal SwapchainKHR Handle => _swapchain;
     internal Format ImageFormat { get; private set; }
     internal Extent2D Extent { get; private set; }
@@ -162,6 +169,20 @@ public sealed unsafe class Swapchain : IDisposable
         var concurrent = _device.GraphicsQueueFamily != _device.PresentQueueFamily;
         var queueFamilies = stackalloc uint[2] { _device.GraphicsQueueFamily, _device.PresentQueueFamily };
 
+        // TransferSrc lets a debug capture read back the PRESENTED image — i.e. what the user actually sees,
+        // overlays included. The HDR capture cannot: it reads the scene target, which by construction predates the
+        // tonemap and every overlay drawn after it (UI-1).
+        //
+        // Strictly optional and capability-checked: a surface that does not advertise TransferSrc simply keeps the
+        // plain colour-attachment usage and CanCapture reports false, so the swapchain is never made unpresentable
+        // for the sake of a debug feature. In practice every desktop driver supports it.
+        var usage = ImageUsageFlags.ColorAttachmentBit;
+        CanCapture = (caps.SupportedUsageFlags & ImageUsageFlags.TransferSrcBit) != 0;
+        if (CanCapture)
+        {
+            usage |= ImageUsageFlags.TransferSrcBit;
+        }
+
         var createInfo = new SwapchainCreateInfoKHR
         {
             SType = StructureType.SwapchainCreateInfoKhr,
@@ -171,7 +192,7 @@ public sealed unsafe class Swapchain : IDisposable
             ImageColorSpace = surfaceFormat.ColorSpace,
             ImageExtent = extent,
             ImageArrayLayers = 1,
-            ImageUsage = ImageUsageFlags.ColorAttachmentBit,
+            ImageUsage = usage,
             ImageSharingMode = concurrent ? SharingMode.Concurrent : SharingMode.Exclusive,
             QueueFamilyIndexCount = concurrent ? 2u : 0u,
             PQueueFamilyIndices = concurrent ? queueFamilies : null,

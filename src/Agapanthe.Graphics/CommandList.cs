@@ -402,6 +402,68 @@ public readonly unsafe struct CommandList
     internal void TransitionImage(RenderTargetView target, ImageLayoutState from, ImageLayoutState to)
         => TransitionImage(target.Image, target.Aspect, 1, 1, from, to);
 
+    /// <summary>
+    /// Copies mip 0 of one colour image into another of the same extent and format (UI-1). Used to snapshot the
+    /// swapchain image into an owned image <b>while it is still acquired</b> — a presented image may not be touched
+    /// again until it is re-acquired, so the copy has to happen inside the frame and the readback afterwards.
+    /// Source must be in <c>TransferSrc</c>, destination in <c>TransferDst</c>.
+    /// </summary>
+    internal void CopyColorImage(Image source, Image destination, uint width, uint height)
+    {
+        var region = new ImageCopy
+        {
+            SrcSubresource = new ImageSubresourceLayers(ImageAspectFlags.ColorBit, 0, 0, 1),
+            DstSubresource = new ImageSubresourceLayers(ImageAspectFlags.ColorBit, 0, 0, 1),
+            Extent = new Extent3D(width, height, 1),
+        };
+        _device.Api.CmdCopyImage(
+            _buffer,
+            source, ImageLayout.TransferSrcOptimal,
+            destination, ImageLayout.TransferDstOptimal,
+            1, &region);
+    }
+
+    /// <summary>
+    /// Orders a previous colour-attachment write before a following render pass instance that <b>reads</b> the same
+    /// attachment — an overlay drawn with <c>LoadOp = Load</c> and blending (UI-1).
+    /// <para>
+    /// Vulkan only guarantees rasterization order <i>within</i> one render pass instance. Between two instances a
+    /// dependency must be explicit. Everywhere else in this engine consecutive passes change layout, and the
+    /// transition supplies that dependency incidentally; the UI overlay is the first case where the layout stays
+    /// <c>ColorAttachmentOptimal</c> throughout, so nothing would be emitted at all. A plain
+    /// <see cref="TransitionImage(GpuImage, ImageLayoutState, ImageLayoutState)"/> with equal states would not do:
+    /// its destination access is write-only, which misses the read half of the hazard.
+    /// </para>
+    /// <para>
+    /// Note that the standard validation layers cannot see this class of bug — only synchronization validation can.
+    /// </para>
+    /// </summary>
+    public void ColorAttachmentBarrier(RenderTargetView target)
+    {
+        var barrier = new ImageMemoryBarrier2
+        {
+            SType = StructureType.ImageMemoryBarrier2,
+            SrcStageMask = PipelineStageFlags2.ColorAttachmentOutputBit,
+            SrcAccessMask = AccessFlags2.ColorAttachmentWriteBit,
+            DstStageMask = PipelineStageFlags2.ColorAttachmentOutputBit,
+            // Both halves: LoadOp = Load and blending READ the attachment, then write it back.
+            DstAccessMask = AccessFlags2.ColorAttachmentReadBit | AccessFlags2.ColorAttachmentWriteBit,
+            OldLayout = ImageLayout.ColorAttachmentOptimal,
+            NewLayout = ImageLayout.ColorAttachmentOptimal,
+            SrcQueueFamilyIndex = Vk.QueueFamilyIgnored,
+            DstQueueFamilyIndex = Vk.QueueFamilyIgnored,
+            Image = target.Image,
+            SubresourceRange = new ImageSubresourceRange(target.Aspect, 0, 1, 0, 1),
+        };
+        var dependency = new DependencyInfo
+        {
+            SType = StructureType.DependencyInfo,
+            ImageMemoryBarrierCount = 1,
+            PImageMemoryBarriers = &barrier,
+        };
+        _device.CmdPipelineBarrier2(_buffer, &dependency);
+    }
+
     private void TransitionImage(
         Image image, ImageAspectFlags aspect, uint mipLevels, uint arrayLayers, ImageLayoutState from, ImageLayoutState to)
     {

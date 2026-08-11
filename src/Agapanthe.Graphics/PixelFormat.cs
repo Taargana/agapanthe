@@ -22,6 +22,10 @@ public enum PixelFormat
     // Two-channel half-float (M7 IBL BRDF integration LUT: RG = scale/bias for the split-sum approximation)
     Rg16Sfloat,
 
+    // Single-channel 8-bit unorm (UI-1 font atlas: an SDF coverage/distance field is DATA, not colour, so it must
+    // never be sRGB-encoded — the shader reads the raw distance and thresholds it).
+    R8Unorm,
+
     // Depth
     D32Sfloat,
 
@@ -40,6 +44,7 @@ internal static class PixelFormatExtensions
         PixelFormat.Rgba8Unorm => Format.R8G8B8A8Unorm,
         PixelFormat.Rgba16Sfloat => Format.R16G16B16A16Sfloat,
         PixelFormat.Rg16Sfloat => Format.R16G16Sfloat,
+        PixelFormat.R8Unorm => Format.R8Unorm,
         PixelFormat.D32Sfloat => Format.D32Sfloat,
         PixelFormat.R32G32Sfloat => Format.R32G32Sfloat,
         PixelFormat.R32G32B32Sfloat => Format.R32G32B32Sfloat,
@@ -55,6 +60,7 @@ internal static class PixelFormatExtensions
         Format.R8G8B8A8Unorm => PixelFormat.Rgba8Unorm,
         Format.R16G16B16A16Sfloat => PixelFormat.Rgba16Sfloat,
         Format.R16G16Sfloat => PixelFormat.Rg16Sfloat,
+        Format.R8Unorm => PixelFormat.R8Unorm,
         Format.D32Sfloat => PixelFormat.D32Sfloat,
         Format.R32G32Sfloat => PixelFormat.R32G32Sfloat,
         Format.R32G32B32Sfloat => PixelFormat.R32G32B32Sfloat,

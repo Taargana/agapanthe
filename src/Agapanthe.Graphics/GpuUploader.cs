@@ -468,8 +468,11 @@ public sealed unsafe class GpuUploader : IDisposable
 
     /// <summary>Bytes per texel for the uploadable color formats.</summary>
     /// <exception cref="GraphicsException">The format is not a color format that can be uploaded as texels.</exception>
-    private static ulong BytesPerTexel(PixelFormat format) => format switch
+    // internal (not private) so the GPU-free format tests can prove every PixelFormat is mapped here: this switch
+    // throws on an unlisted format, and the failure would otherwise only surface inside a staging upload at runtime.
+    internal static ulong BytesPerTexel(PixelFormat format) => format switch
     {
+        PixelFormat.R8Unorm => 1, // UI-1 font atlas (single-channel SDF)
         PixelFormat.Rgba8Srgb or PixelFormat.Rgba8Unorm or PixelFormat.Bgra8Srgb => 4,
         PixelFormat.Rgba16Sfloat => 8,
         PixelFormat.R32G32B32A32Sfloat => 16,

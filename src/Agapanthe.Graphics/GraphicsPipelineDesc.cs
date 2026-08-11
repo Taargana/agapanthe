@@ -63,6 +63,11 @@ public sealed class GraphicsPipelineDesc
     public CullMode Cull { get; init; } = CullMode.Back;
     public FrontFace FrontFace { get; init; } = FrontFace.CounterClockwise;
 
+    /// <summary>Colour-blend equation. Defaults to <see cref="BlendMode.Opaque"/>, which reproduces the blending
+    /// behaviour that was hardcoded before UI-1 — so every pre-existing pipeline is bit-for-bit unchanged. The UI
+    /// overlay opts into <see cref="BlendMode.PremultipliedAlpha"/>.</summary>
+    public BlendMode Blend { get; init; } = BlendMode.Opaque;
+
     /// <summary>
     /// Constant depth-bias factor (<c>depthBiasConstantFactor</c>). Non-zero enables depth bias. Used with
     /// <see cref="DepthBiasSlope"/> for slope-scaled bias to fight shadow acne. <c>0</c> (default) = off.

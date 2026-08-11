@@ -1,0 +1,17 @@
+# Charset baked into the .agfont atlas (UI-1).
+# One entry per line: a single character, a U+XXXX codepoint, or a U+XXXX-U+YYYY range.
+# Blank lines and lines starting with '#' are ignored. Order does not matter — the cooker sorts and de-duplicates,
+# which is what makes its output deterministic.
+#
+# Keep this list tight: every glyph costs atlas area, and the atlas is capped at 2048x2048 (the cooker fails loudly
+# rather than truncating). CJK and complex scripts are out of scope for UI-1 by design.
+
+# Basic Latin: printable ASCII (space through tilde). Covers English and all the engine's debug output.
+U+0020-U+007E
+
+# Latin-1 Supplement: printable range, i.e. accented letters for French, German, Spanish, Italian...
+# (U+00A0 is a non-breaking space and U+00AD a soft hyphen; both are invisible but harmless to bake.)
+U+00A0-U+00FF
+
+# Replacement character: the "tofu" the layout falls back to for a codepoint the atlas does not carry.
+U+FFFD

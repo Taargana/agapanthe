@@ -30,6 +30,12 @@ public sealed unsafe class FrameRenderer : IDisposable
 
     private int _frameSlot;
     private bool _resizeRequested;
+
+    // Debug capture of the presented image (UI-1). The owned destination is created on demand and only exists in a
+    // run that actually asks for a capture.
+    private GpuImage? _captureImage;
+    private bool _captureRequested;
+    private bool _captureReady;
     private bool _disposed;
 
     public FrameRenderer(GraphicsDevice device, Swapchain swapchain, Func<(int Width, int Height)> framebufferSizeProvider)
@@ -119,6 +125,56 @@ public sealed unsafe class FrameRenderer : IDisposable
         _device.AdvanceFrame();
     }
 
+    /// <summary>
+    /// Extent of the swapchain image the last recorded frame drew into (UI-1) — what a debug capture needs to
+    /// interpret the bytes <see cref="ReadCapture"/> hands back.
+    /// <para>
+    /// Deliberately the EXTENT only, not the <c>SwapchainTarget</c>: that would publish an image view and image
+    /// handle which are destroyed on the next swapchain recreation, inviting a use-after-free from a caller that
+    /// held on to it.
+    /// </para>
+    /// </summary>
+    public (uint Width, uint Height) LastPresentedExtent { get; private set; }
+
+    /// <summary>
+    /// Asks the NEXT recorded frame to snapshot the presented image (UI-1) — what the user actually sees, overlays
+    /// included, which the HDR capture structurally cannot show (it reads the scene target, drawn before the tonemap
+    /// and before every overlay).
+    /// <para>
+    /// One-shot: draw one more frame, then <see cref="WaitIdle"/> and call <see cref="ReadCapture"/>. Debug only —
+    /// it adds a full-image copy to that frame.
+    /// </para>
+    /// </summary>
+    /// <returns><c>false</c> when the surface does not advertise <c>TRANSFER_SRC</c>, so no capture is possible.</returns>
+    public bool RequestCapture()
+    {
+        if (!_swapchain.CanCapture)
+        {
+            return false;
+        }
+
+        // Only the flag: the destination is created (or resized) by the frame that records the copy, where the
+        // extent in force is known for certain.
+        _captureRequested = true;
+        _captureReady = false;
+        return true;
+    }
+
+    /// <summary>
+    /// Reads back the snapshot taken by the last <see cref="RequestCapture"/>, as tightly packed 4-byte texels in
+    /// the swapchain's own format (already sRGB-encoded — no tonemap, no gamma to apply). Call with the GPU idle.
+    /// </summary>
+    /// <returns><c>null</c> when no capture has completed since the last request.</returns>
+    public byte[]? ReadCapture()
+    {
+        if (!_captureReady || _captureImage is null)
+        {
+            return null;
+        }
+
+        return GpuReadback.ReadImage(_device, _captureImage, ImageLayoutState.TransferSrc, bytesPerTexel: 4);
+    }
+
     /// <summary>Waits for the GPU to idle. Call before tearing down resources the loop used.</summary>
     public void WaitIdle() => _device.WaitIdle();
 
@@ -146,6 +202,9 @@ public sealed unsafe class FrameRenderer : IDisposable
         var cmdList = new CommandList(_device, cmd);
         var target = new SwapchainTarget(
             new RenderTargetView(view, image, ImageAspectFlags.ColorBit), extent.Width, extent.Height);
+        // Remembered so a post-frame debug capture can read back the image that was actually presented (UI-1).
+        // It stays valid until the swapchain is recreated, and a capture always runs on an idle GPU.
+        LastPresentedExtent = (extent.Width, extent.Height);
 
         // The loop owns only the swapchain image's acquire/present layout transitions; the callback opens its
         // own rendering scope (and owns any depth/HDR attachment) against the target between them.
@@ -153,7 +212,42 @@ public sealed unsafe class FrameRenderer : IDisposable
 
         record(cmdList, context, target);
 
-        cmdList.TransitionImage(target.View, ImageLayoutState.ColorAttachment, ImageLayoutState.PresentSrc);
+        // Debug capture of the PRESENTED image (UI-1). The snapshot has to be taken HERE, inside the frame, because
+        // a presentable image may not be touched again once vkQueuePresentKHR has released it — reading it back
+        // afterwards trips a validation error. So the image is copied into an owned one while it is still acquired,
+        // and that copy is read at leisure by ReadCapture after the GPU goes idle.
+        // The destination is sized HERE, from the extent this frame actually uses — not in RequestCapture. A resize
+        // can land in between (DrawFrame bails out early on an out-of-date swapchain, leaving the request pending),
+        // and copying the new extent into an image sized for the old one is out of bounds: a validation error, on a
+        // debug path, which this project treats as a bug like any other.
+        if (_captureRequested)
+        {
+            if (_captureImage is null || _captureImage.Width != extent.Width || _captureImage.Height != extent.Height)
+            {
+                _captureImage?.Dispose();
+                // Sampled is unused by the capture path, but GpuImage always creates an image view and a view is
+                // only legal on an image whose usage includes one of Sampled/Storage/*Attachment — transfer usages
+                // alone are not enough (VUID-VkImageViewCreateInfo-image-04441).
+                _captureImage = new GpuImage(
+                    _device, extent.Width, extent.Height, _swapchain.ColorFormat,
+                    ImageUsage.TransferDst | ImageUsage.TransferSrc | ImageUsage.Sampled, mipLevels: 1);
+            }
+        }
+
+        if (_captureRequested && _captureImage is not null)
+        {
+            cmdList.TransitionImage(target.View, ImageLayoutState.ColorAttachment, ImageLayoutState.TransferSrc);
+            cmdList.TransitionImage(_captureImage, ImageLayoutState.Undefined, ImageLayoutState.TransferDst);
+            cmdList.CopyColorImage(target.View.Image, _captureImage.Handle, extent.Width, extent.Height);
+            cmdList.TransitionImage(_captureImage, ImageLayoutState.TransferDst, ImageLayoutState.TransferSrc);
+            cmdList.TransitionImage(target.View, ImageLayoutState.TransferSrc, ImageLayoutState.PresentSrc);
+            _captureRequested = false;
+            _captureReady = true;
+        }
+        else
+        {
+            cmdList.TransitionImage(target.View, ImageLayoutState.ColorAttachment, ImageLayoutState.PresentSrc);
+        }
 
         VkCheck.ThrowIfFailed(vk.EndCommandBuffer(cmd), "vkEndCommandBuffer");
     }
@@ -272,6 +366,11 @@ public sealed unsafe class FrameRenderer : IDisposable
     private void DestroyResources()
     {
         var vk = _device.Api;
+
+        // Debug capture destination (UI-1): null in any run that never asked for a capture.
+        _captureImage?.Dispose();
+        _captureImage = null;
+
         for (var i = 0; i < _frameContexts.Length; i++)
         {
             _frameContexts[i]?.Dispose();

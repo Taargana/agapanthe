@@ -205,11 +205,25 @@ public sealed unsafe class GraphicsPipeline : IDisposable
             // A depth-only pipeline (no color format) declares zero blend attachments; the color-blend state
             // stays present but empty, which is legal when there are no color attachments.
             var hasColor = desc.ColorFormat != PixelFormat.Undefined;
+            // Blending (UI-1). Opaque is the DEFAULT, and it reproduces the previous hardcoded BlendEnable = false
+            // byte for byte — every pre-existing pipeline is unaffected (proven by a bit-identical capture gate).
+            // Both blend modes assume the destination is opaque (an overlay drawn onto a finished frame), so the
+            // alpha channel is written as src + dst*(1-srcA), which keeps the target's alpha sane either way.
             var blendAttachment = new PipelineColorBlendAttachmentState
             {
                 ColorWriteMask = ColorComponentFlags.RBit | ColorComponentFlags.GBit
                                  | ColorComponentFlags.BBit | ColorComponentFlags.ABit,
-                BlendEnable = false,
+                BlendEnable = desc.Blend != BlendMode.Opaque,
+                // AlphaBlend: src*srcA + dst*(1-srcA). PremultipliedAlpha: src*1 + dst*(1-srcA) — the shader has
+                // already multiplied RGB by alpha, which is what avoids filtering halos on glyph edges.
+                SrcColorBlendFactor = desc.Blend == BlendMode.AlphaBlend
+                    ? BlendFactor.SrcAlpha
+                    : BlendFactor.One,
+                DstColorBlendFactor = BlendFactor.OneMinusSrcAlpha,
+                ColorBlendOp = BlendOp.Add,
+                SrcAlphaBlendFactor = BlendFactor.One,
+                DstAlphaBlendFactor = BlendFactor.OneMinusSrcAlpha,
+                AlphaBlendOp = BlendOp.Add,
             };
             var colorBlend = new PipelineColorBlendStateCreateInfo
             {

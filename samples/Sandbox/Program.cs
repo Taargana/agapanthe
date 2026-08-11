@@ -1,11 +1,13 @@
 using System.Numerics;
 using Agapanthe.Assets;
+using Agapanthe.Assets.Font;
 using Agapanthe.Assets.Model;
 using Agapanthe.Core;
 using Agapanthe.Engine;
 using Agapanthe.Graphics;
 using Agapanthe.Platform;
 using Agapanthe.Rendering;
+using Agapanthe.Ui;
 using Agapanthe.World;
 using Silk.NET.Input;
 
@@ -88,6 +90,9 @@ ProbeDropSystem? probeDropper = null;
 // VS-3 planet-challenge: the landing-challenge system, hoisted so the B keypress can drop an aimed probe and F5 can
 // read its state. Null unless AGAPANTHE_SCENE=planet-challenge built it.
 LandingChallengeSystem? landingChallenge = null;
+
+// UI-1: the text overlay. Null when no cooked font shipped alongside the executable.
+UiRenderSystem? uiSystem = null;
 
 window.Loaded += () =>
 {
@@ -467,6 +472,32 @@ window.Loaded += () =>
     renderer!.VerifyCull = Environment.GetEnvironmentVariable("AGAPANTHE_CULL_VERIFY") is "1";
 
     orchestrator = FrameOrchestrator.CreateDefault(world!, renderer!, registry!, camera, renderList);
+
+    // UI-1: load the cooked font and register the overlay. The .agfont is produced at BUILD time by
+    // tools/FontCooker (MSBuild target CookFonts) and shipped as Content, so nothing here parses a .ttf — the
+    // runtime links no font library at all, the same stance the shader pipeline takes with shaderc.
+    // Registered AFTER CreateDefault so it renders after the scene view system, i.e. over the tonemapped image.
+    var fontPath = Path.Combine(AppContext.BaseDirectory, "fonts", "JetBrainsMono-Regular.agfont");
+    if (File.Exists(fontPath))
+    {
+        var uiFont = FontAssetFormat.Read(File.ReadAllBytes(fontPath));
+        renderer!.LoadFont(uiFont);
+        uiSystem = new UiRenderSystem(renderer!);
+        // Stage.Input clears last frame's quads BEFORE any system draws into them.
+        orchestrator.Add(Stage.Input, uiSystem);
+        orchestrator.Add(uiSystem);
+
+        // A FIXED demo string, drawn every frame in PostSimulation (after Input cleared the list). Fixed on
+        // purpose: it makes the headless capture reproducible, which is what turns "text renders" into an
+        // objectively verifiable gate instead of a human impression. UI-2 replaces it with the real debug overlay.
+        orchestrator.Add(Stage.PostSimulation, new UiDemoTextSystem(uiSystem.DrawList, uiFont));
+        Log.Info($"Sandbox: [ui] font loaded from '{fontPath}'.");
+    }
+    else
+    {
+        Log.Warn($"Sandbox: [ui] no cooked font at '{fontPath}' — text overlay disabled.");
+    }
+
     if (benchMode)
     {
         // The spin (animate every drawable + drift the yaw, deterministic by frame count) was the first thing the
@@ -762,10 +793,41 @@ window.Rendered += dt =>
         }
     }
 
+    // UI-1: arm the presented-image snapshot ONE frame early. The copy has to be recorded inside a frame (a
+    // presented image may not be touched once released), so the request must land before the final frame is drawn.
+    if (maxFrames > 1 && renderedFrames == maxFrames - 2
+        && Environment.GetEnvironmentVariable("AGAPANTHE_CAPTURE_UI") is { Length: > 0 })
+    {
+        frameRenderer.RequestCapture();
+    }
+
     if (maxFrames > 0 && ++renderedFrames >= maxFrames)
     {
         // Headless debug capture: AGAPANTHE_CAPTURE=<path.ppm> dumps the tonemapped HDR target
         // on the last frame, so rendering issues can be inspected without a windowed session.
+        // UI-1: AGAPANTHE_CAPTURE_UI=<path.ppm> dumps the PRESENTED image — the only capture that can show overlays,
+        // since the HDR target predates the tonemap and everything drawn after it. The snapshot was taken inside the
+        // frame (a presented image may not be read afterwards), so here we only read the copy back.
+        if (Environment.GetEnvironmentVariable("AGAPANTHE_CAPTURE_UI") is { Length: > 0 } uiCapturePath)
+        {
+            frameRenderer.WaitIdle();
+            var captured = frameRenderer.ReadCapture();
+            if (captured is not null)
+            {
+                var (capW, capH) = frameRenderer.LastPresentedExtent;
+                WriteSwapchainPpm(uiCapturePath, captured, (int)capW, (int)capH, swapchain!.ColorFormat);
+                Log.Info($"Sandbox: [ui] swapchain capture saved to '{uiCapturePath}' ({capW}x{capH}).");
+            }
+            else
+            {
+                // ReadCapture returns null both when the surface lacks TRANSFER_SRC and when no capture was ever
+                // armed (AGAPANTHE_MAX_FRAMES <= 1, since arming happens one frame early). Do not blame the surface.
+                Log.Warn(
+                    "Sandbox: [ui] no swapchain capture available — either the surface lacks TRANSFER_SRC, "
+                    + "or AGAPANTHE_MAX_FRAMES is too small to arm one (needs at least 2).");
+            }
+        }
+
         if (Environment.GetEnvironmentVariable("AGAPANTHE_CAPTURE") is { Length: > 0 } capturePath && renderer is not null)
         {
             frameRenderer.WaitIdle();
@@ -921,6 +983,30 @@ static void RunIblTest(GraphicsDevice device, string shaderDir, string modelsDir
 }
 
 // Writes an RGBA16F texel buffer as an 8-bit PPM with a simple Reinhard tonemap + sRGB encode (viewable).
+// Writes a presented-image snapshot as a binary PPM (UI-1). The swapchain image is ALREADY sRGB-encoded (the
+// format's OETF ran when the fragment was stored), so the bytes go through untouched — no exposure, no tonemap, no
+// gamma. Only the channel order is fixed up, since the surface format is usually BGRA rather than RGBA.
+static void WriteSwapchainPpm(string path, byte[] bytes, int width, int height, PixelFormat format)
+{
+    var bgra = format == PixelFormat.Bgra8Srgb;
+    using var output = new FileStream(path, FileMode.Create, FileAccess.Write);
+    output.Write(System.Text.Encoding.ASCII.GetBytes($"P6\n{width} {height}\n255\n"));
+
+    var row = new byte[width * 3];
+    for (var y = 0; y < height; y++)
+    {
+        for (var x = 0; x < width; x++)
+        {
+            var i = ((y * width) + x) * 4;
+            row[(x * 3) + 0] = bgra ? bytes[i + 2] : bytes[i + 0];
+            row[(x * 3) + 1] = bytes[i + 1];
+            row[(x * 3) + 2] = bgra ? bytes[i + 0] : bytes[i + 2];
+        }
+
+        output.Write(row);
+    }
+}
+
 static void WriteHalfPpm(string path, byte[] bytes, uint width, uint height)
 {
     var halfs = System.Runtime.InteropServices.MemoryMarshal.Cast<byte, Half>(bytes);
@@ -1937,6 +2023,39 @@ static void FramePlanetChallengeCamera(
     camera.Far = (float)(Double3.Distance(planetCentre, sunOrigin) * 1.4);
     renderer.ShadowDistance = 1f;
     controller.MoveSpeed = (float)EnvDouble("AGAPANTHE_CHALLENGE_MOVE_SPEED", 60.0); // fast enough to reach the target
+}
+
+// UI-1 demo: draws a fixed text block every frame so the milestone has something to look at and, more importantly,
+// something to HASH. A fixed string + a fixed scene make the headless capture reproducible, which is what turns
+// "text renders" into an objectively verifiable gate rather than a human impression.
+//
+// It also exercises the parts that matter: several sizes (does ONE SDF atlas really serve every size?), alignment,
+// a semi-transparent panel behind the text (does premultiplied blending avoid halos?), and accented characters (is
+// the Latin-1 part of the charset actually baked?).
+//
+// Runs in PostSimulation, i.e. after Stage.Input cleared the list. Allocation-free: every string is a literal and
+// TextLayout writes into the draw list's pooled array.
+file sealed class UiDemoTextSystem(UiDrawList drawList, FontAsset font) : ISystem
+{
+    private const uint White = 0xF5F5F5FFu;
+    private const uint Amber = 0xFFB030FFu;
+    private const uint PanelBackground = 0x101018A0u; // semi-transparent: exercises the blend path
+
+    public void Execute(in TickContext ctx)
+    {
+        // Panel behind the text, drawn FIRST — draw order is submission order (painter's algorithm).
+        drawList.AddRect(new Vector4(16f, 16f, 560f, 190f), font.WhiteTexelUv, PanelBackground);
+
+        TextLayout.DrawText(drawList, "Agapanthe UI-1", font, new Vector2(32f, 28f), 34f, White);
+        TextLayout.DrawText(drawList, "SDF text: one atlas, every size.", font, new Vector2(32f, 74f), 20f, Amber);
+        TextLayout.DrawText(
+            drawList, "Accents: éàçüñ · Symbols: {}[]<>#@&", font, new Vector2(32f, 104f), 16f, White);
+        // Hyphen-minus, not an em dash: U+2014 is outside the ASCII + Latin-1 charset, so it would render as tofu.
+        // (Which is exactly what the fallback is meant to do — but a reference capture should not enshrine it.)
+        TextLayout.DrawText(drawList, "tiny 11 px - legibility check", font, new Vector2(32f, 130f), 11f, White);
+        TextLayout.DrawText(
+            drawList, "multi-line\nand aligned", font, new Vector2(544f, 148f), 14f, Amber, TextAlign.Right);
+    }
 }
 
 file static class DebugViews

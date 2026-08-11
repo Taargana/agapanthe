@@ -1,0 +1,32 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- Build-time font cooker (UI-1). Rasterises a .ttf into a single-channel SDF atlas + metrics and writes a
+       .agfont, so the RUNTIME never parses a font file and never links a font library — the same stance the shader
+       pipeline takes with shaderc (Release forbids runtime compilation and strips the native library outright).
+
+       Like tools/ShaderPrecompiler, this project is deliberately NOT referenced by any shipping project: a
+       ProjectReference would drag StbTrueTypeSharp into the AOT closure. It is invoked by an MSBuild target via
+       `dotnet exec`. Hence no PublishAot / IsAotCompatible here — it is a dev-machine tool. -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <AssemblyName>FontCooker</AssemblyName>
+    <!-- stb's API is pointer-based (byte* SDF bitmaps, stbtt_fontinfo by pointer). Confined to this tool. -->
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+  </PropertyGroup>
+
+  <!-- Assets only (for FontAsset + the internal .agfont writer, reachable via InternalsVisibleTo("FontCooker")).
+       Never Agapanthe.Graphics: the cooker has no business knowing about a GPU. -->
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\Agapanthe.Assets\Agapanthe.Assets.csproj" />
+    <ProjectReference Include="..\..\src\Agapanthe.Core\Agapanthe.Core.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="StbTrueTypeSharp" Version="1.26.12" />
+  </ItemGroup>
+
+</Project>
