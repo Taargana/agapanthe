@@ -351,7 +351,29 @@ Spec : [2026-07-25-vs2-spawn-runtime-newtonian-gravity-design.md](plans/2026-07-
 > 🟡 renommage `Engine.Render` → `Engine.Presentation` et `FrameIndex` → `TickIndex` non faits (le second appartient
 > à MP-0c, qui redéfinira ce qu'est un index de tick).
 >
-> ### ▶️ PROCHAIN — **MP-0b / MP-0c / MP-0d** (specs à écrire, une par sous-jalon)
+> ### ⏸️ **MP-0b EN COURS (S26)** — identité d'entité : **brainstorm terminé, spec NON écrite**
+> Aucun code écrit. 4 décisions verrouillées par interview. Détail complet et point de reprise :
+> **[.absolute-human/board.md](../.absolute-human/board.md)** § REPRISE.
+>
+> **Décisions** : (1) **identité seule**, pas d'autorité — l'id nomme la **naissance**, jamais l'autorité courante ·
+> (2) l'id reste un **`u64` opaque, aucun découpage de bits figé dans le format** — *motivé par la cible meshing
+> dynamique* : les nœuds y sont éphémères, un préfixe 16 bits s'épuiserait en ~4,5 jours à 100 nœuds recyclés
+> toutes les 10 min ; les bits hauts deviennent un **bloc de bail** et **solo = compteur depuis 1, bit-pour-bit ce
+> que fait le moteur aujourd'hui** · (3) l'état de l'allocateur **reste dans l'en-tête mais devient surchargeable au
+> `Load`** (un nœud reçoit des entités qu'il n'a pas créées et ne doit pas avancer son allocateur en les acceptant) ·
+> (4) l'en-tête gagne une **identité d'univers**, format **v1 → v2**, v1 refusé — c'est *ça* qui referme le 🔴
+> « deux mondes inmergeables », pas le partitionnement des ids.
+>
+> **À valider à la revue** : identité d'univers par défaut **vide et non aléatoire** (un `Guid` tiré à la création
+> casserait le déterminisme des snapshots et le hash JIT-vs-AOT de `HeadlessSim`) · allocation = **plage
+> `[start, end)`**, pas une interface · clé de contact = struct 128 bits comparable, **0-alloc à prouver**.
+>
+> **4 vagues** : W1 la clé de contact **seule** (captures inchangées + le test qui échoue aujourd'hui : `1` et
+> `2³²+1` ne doivent pas former la même paire) · W2 la plage d'allocation · W3 le snapshot v2 · W4 tail.
+>
+> **Reprise** : écrire la spec anglaise → revue scorée (seuil 4,0/5) → `absolute-work` sur W1.
+>
+> ### ▶️ ENSUITE — **MP-0c / MP-0d** (specs à écrire, une par sous-jalon)
 > **MP-0b identité** (🔴 `GlobalId` 64 bits partitionné + clé de contact physique ; entièrement contenu dans `World`,
 > non affecté par le split — et `RenderStageNeutralityTests` lui offre un harnais de régression gratuit) ·
 > **MP-0c autorité du temps** (accumulator ; ⚠️ **invalide les baselines de capture**, c'est un échange de modèle de
