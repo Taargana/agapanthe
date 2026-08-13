@@ -1,6 +1,6 @@
 # Agapanthe — Plan complet & état d'avancement
 
-**Mis à jour** : 2026-08-11 (session 25 — **UI-1 CLOS** : texte à l'écran ; FontCooker SDF hors-ligne + `.agfont` + `Agapanthe.Ui` GPU-free + passe UI ; double audit PASS-with-concerns ×2, verdict humain PASS ; 435 tests, AOT PASS) · 2026-08-03 (session 25 — **RÉORIENTATION cap « vrai engine »** [backlog §4quater] : artefact = le moteur, multijoueur serveur autoritaire, MP-0 = prochain jalon ; VS-4/VS-5 en pause · **brainstorm Texte & UI terminé**, spec `plans/2026-08-03-text-ui-design.md`, 3 jalons UI-1/2/3) · 2026-07-26 (session 24 — **VS-3 CLOS** : glu gameplay = défi d'atterrissage planétaire ; `QuerySurfaceContacts` + règle latchée `LandingChallengeRule` + scène `planet-challenge` (input→spawn→règle→save/resume) ; double audit PASS / PASS-with-concerns 4/5, verdict humain PASS ; 372 tests, AOT PASS) · 2026-07-26 (session 23 — **VS-2 CLOS** : spawn runtime différé (`SpawnBodyDeferred`) + gravité newtonienne (attracteur radial + sol radial) ; double audit PASS-with-concerns [4,5/5], verdict visuel PASS ; scène `planet-drop`, 355 tests, AOT PASS) · 2026-07-24 (session 22 — **VS-1 CLOS** : sérialisation du World save/load, double audit PASS, verdict humain PASS) · 2026-07-23 (session 20 — **P3-M7 CLOS** : buffers device-local + réduction du raster d'ombre 4×→~1× ; double audit PASS, verdict visuel PASS incl. soleil bas ; A+B ~15,3 → ~8,0 ms ≈ ×2) · 2026-07-23 (session 19 — **P3-M6 CLOS** : slots persistants dirty-trackés + cull d'ombre GPU ; double audit PASS, verdict visuel PASS ; voir « Point de reprise ») · 2026-07-14 (session 14 — **vérifs humaines de la Phase 2 soldées** : banc M4 PASS with concerns [perf → P3-M1], précision M3 PASS, hot reload M1 PASS) · 2026-07-13 (session 13 — **PHASE 2 CLOSE** — frustum culling + montée en charge : 10 000 entités cullées à 10 000 km, 0 alloc/frame, en NativeAOT ; double audit signe la clôture) · **Machines de dev** : macOS (Apple M3, MoltenVK) + Windows 11 (RTX 5070 Ti, Vulkan 1.3 core) · **Cibles** : Windows / Linux / macOS
+**Mis à jour** : 2026-08-13 (session 25 — **UI-2 CLOS** : overlay debug in-view + profiler CPU ; `FrameStats`/`Sparkline`/`TextBuilder` + `DebugOverlaySystem`, le HUD `window.Title` et son hack de cession disparaissent, **gate 0-alloc visible en continu à l'écran**, bascule `F3` ; double audit PASS-with-concerns ×2 ; 468 tests, AOT PASS · **synchronization validation activée** et 3 hazards préexistants corrigés) · 2026-08-11 (session 25 — **UI-1 CLOS** : texte à l'écran ; FontCooker SDF hors-ligne + `.agfont` + `Agapanthe.Ui` GPU-free + passe UI ; double audit PASS-with-concerns ×2, verdict humain PASS ; 435 tests, AOT PASS) · 2026-08-03 (session 25 — **RÉORIENTATION cap « vrai engine »** [backlog §4quater] : artefact = le moteur, multijoueur serveur autoritaire, MP-0 = prochain jalon ; VS-4/VS-5 en pause · **brainstorm Texte & UI terminé**, spec `plans/2026-08-03-text-ui-design.md`, 3 jalons UI-1/2/3) · 2026-07-26 (session 24 — **VS-3 CLOS** : glu gameplay = défi d'atterrissage planétaire ; `QuerySurfaceContacts` + règle latchée `LandingChallengeRule` + scène `planet-challenge` (input→spawn→règle→save/resume) ; double audit PASS / PASS-with-concerns 4/5, verdict humain PASS ; 372 tests, AOT PASS) · 2026-07-26 (session 23 — **VS-2 CLOS** : spawn runtime différé (`SpawnBodyDeferred`) + gravité newtonienne (attracteur radial + sol radial) ; double audit PASS-with-concerns [4,5/5], verdict visuel PASS ; scène `planet-drop`, 355 tests, AOT PASS) · 2026-07-24 (session 22 — **VS-1 CLOS** : sérialisation du World save/load, double audit PASS, verdict humain PASS) · 2026-07-23 (session 20 — **P3-M7 CLOS** : buffers device-local + réduction du raster d'ombre 4×→~1× ; double audit PASS, verdict visuel PASS incl. soleil bas ; A+B ~15,3 → ~8,0 ms ≈ ×2) · 2026-07-23 (session 19 — **P3-M6 CLOS** : slots persistants dirty-trackés + cull d'ombre GPU ; double audit PASS, verdict visuel PASS ; voir « Point de reprise ») · 2026-07-14 (session 14 — **vérifs humaines de la Phase 2 soldées** : banc M4 PASS with concerns [perf → P3-M1], précision M3 PASS, hot reload M1 PASS) · 2026-07-13 (session 13 — **PHASE 2 CLOSE** — frustum culling + montée en charge : 10 000 entités cullées à 10 000 km, 0 alloc/frame, en NativeAOT ; double audit signe la clôture) · **Machines de dev** : macOS (Apple M3, MoltenVK) + Windows 11 (RTX 5070 Ti, Vulkan 1.3 core) · **Cibles** : Windows / Linux / macOS
 
 ## Vision
 
@@ -377,8 +377,37 @@ Spec : [2026-07-25-vs2-spawn-runtime-newtonian-gravity-design.md](plans/2026-07-
 > format sRGB de swapchain · troncature silencieuse au-delà de 256 glyphes par appel · test d'alignement `UiQuad`
 > qui verrouille la taille mais pas les offsets.
 >
-> **Prochain** : arbitrage **MP-0 vs UI-2** (les deux sont prêts à démarrer ; MP-0 a le cahier des charges d'entrée
-> pour l'input que la spec UI-1 lui a transmis, UI-2 a besoin de la synchronization validation).
+> ### ✅ **UI-2 CLOS (S25)** — overlay debug in-view + profiler CPU
+> Deuxième des 3 jalons Texte & UI ; **UI-3 (timestamps GPU) reste à faire**. Double audit **PASS-with-concerns ×2**
+> (`csharp-lowlevel` · `engine-architect` **3,8/5**, aucun 🔴 ; tous les 🟠 appliqués) + feu vert humain.
+> Détail de session archivé : **[archive/board-session25-UI2.md](../.absolute-human/archive/board-session25-UI2.md)**.
+>
+> **Livré** : `FrameStats`/`FrameSeries` (ring circulaire, agrégats) et `DebugOverlaySystem` dans `Engine` ·
+> `Sparkline` + `TextBuilder` (0-alloc, public) dans `Ui` · overlay in-view **remplaçant le HUD `window.Title`**
+> (et son hack de cession VS-3), bascule **`F3`** · `AGAPANTHE_OVERLAY=0` pour démarrer masqué.
+> **Le gate 0-alloc est désormais visible en continu à l'écran** : `alloc 0 B/frame` en vert, rouge dès qu'une frame
+> alloue.
+>
+> **Ce que l'overlay a trouvé sur lui-même** : il affichait 272-288 B/frame là où le banc rapportait 0 B — sa fenêtre
+> de mesure englobait le pump d'événements Silk.NET/GLFW. Puis l'audit a montré que la correction fermait le bracket
+> **dans** `RecordCommandBuffer`, donc avant submit/present, et **jamais** sur les frames où `DrawFrame` sort tôt
+> (resize) : « 0 B » en vert pendant qu'une swapchain était recréée par frame. → `FrameOrchestrator.EndFrame()`
+> appelé **après** `DrawFrame`, exactement le bracket du banc.
+>
+> **Gates** : **468 tests** (3 runs) · 0 warning · **HDR `12638edd` inchangé** (non-régression scène) · capture UI
+> overlay-masqué `03421357` reproductible · 0 leak · 0 validation · **0 hazard** (sync validation active) ·
+> **NativeAOT PASS** (`AotProfilerSmoke` ajouté, `StbTrueTypeSharp` absent du publish).
+> ⚠️ **La capture UI overlay-visible ne peut pas être byte-identique** (timings réels) — décision humaine : le gate
+> déterministe porte sur l'overlay masqué, l'overlay est validé par verdict humain ; diff inter-runs mesuré à
+> 432 px / 921 600, tous dans le panneau.
+>
+> **Dette déclarée** : seam `FrameProfiler` reporté à **UI-3** — les timestamps GPU arrivent à N+2 et casseront
+> `Record(float, long)` ; le refactor appartient au jalon qui en connaîtra la forme. `DebugOverlaySystem` reste sans
+> tests pour la même raison (dépendance à l'orchestrator concret). 🟡 le coût propre de l'overlay est inclus dans le
+> `ms` qu'il affiche · `UiDrawList` 2048 quads = 80 Kio, à 6 % du seuil LOH — ne pas doubler sans y penser.
+>
+> ### ▶️ **Ensuite** : **UI-3** (timestamps GPU, `QueryPool`, dégradation gracieuse — abandonnable sans rien casser)
+> ou **MP-0** (fondations d'autorité — **sans spec, brainstorm à faire d'abord**). Arbitrage humain.
 
 **Point de reprise (2026-07-23, session 20)** : **P3-M7 buffers device-local + réduction du raster d'ombre 4× — CLOS.**
 Double audit PASS (`csharp-lowlevel` PASS · `graphics-3d` PASS with concerns ; 0 🔴/🟠, findings 🟡 appliqués),

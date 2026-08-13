@@ -1,4 +1,5 @@
 using System.Numerics;
+using System.Diagnostics;
 using Agapanthe.Core;
 using Agapanthe.Graphics;
 using Agapanthe.Rendering;
@@ -59,6 +60,12 @@ public sealed class FrameOrchestrator
     private Double3Bounds _sceneBounds = Double3Bounds.Empty;
     private float _dt;
 
+    // Frame self-measurement (UI-2): opened in Tick, closed in EndFrame.
+    private long _frameAllocStart;
+    private long _frameTimestampStart;
+    private int _bracketThreadId;
+    private bool _measurementOpen;
+
     private FrameOrchestrator(
         GameWorld world, Renderer renderer, ResourceRegistry registry, Camera camera, RenderList render)
     {
@@ -116,9 +123,87 @@ public sealed class FrameOrchestrator
     /// </summary>
     public void Tick(float deltaSeconds)
     {
+        // Belt and braces: if the previous frame never called EndFrame, close it here rather than silently dropping
+        // its cost. Otherwise a caller who forgets the call gets a profiler frozen on one stale sample.
+        if (_measurementOpen)
+        {
+            EndFrame();
+        }
+
         _dt = deltaSeconds;
+        // Open the frame's self-measurement (UI-2). Both reads are allocation-free.
+        _frameAllocStart = GC.GetAllocatedBytesForCurrentThread();
+        _frameTimestampStart = Stopwatch.GetTimestamp();
+        _bracketThreadId = Environment.CurrentManagedThreadId;
+        _measurementOpen = true;
         _scheduler.Tick(deltaSeconds);
     }
+
+    /// <summary>
+    /// Closes the frame's self-measurement and files it into <see cref="Stats"/>. Call it once per frame, right
+    /// after handing <see cref="RenderDelegate"/> to <c>FrameRenderer.DrawFrame</c>.
+    /// <para>
+    /// <b>Why here and not at the end of the render delegate.</b> That delegate runs INSIDE command-buffer
+    /// recording, so closing there would exclude <c>vkEndCommandBuffer</c>, the submit and the present — a blind
+    /// spot on exactly the layer where a per-frame allocation is most likely to hide, in the readout whose entire
+    /// job is to catch one. Closing here reproduces the bracket the cull-stats bench has always used, and it still
+    /// excludes the host's windowing and input pump, which allocates and which the engine does not control.
+    /// </para>
+    /// <para>
+    /// It also covers the frames where <c>DrawFrame</c> returns early (out-of-date swapchain, failed acquire) and
+    /// never invokes the delegate at all: those are precisely the frames that recreate the swapchain, the most
+    /// allocating path in the engine.
+    /// </para>
+    /// </summary>
+    public void EndFrame()
+    {
+        if (!_measurementOpen)
+        {
+            return;
+        }
+
+        _measurementOpen = false;
+
+        // GetAllocatedBytesForCurrentThread is a PER-THREAD counter: opening and closing the bracket on two
+        // different threads yields an arbitrary delta, and a negative one reads as a perfectly healthy empty graph.
+        // The engine is single-threaded today; MP-0 (tick decoupled from the frame) is the milestone that could
+        // break this, so the invariant is anchored now while it costs nothing.
+        Debug.Assert(
+            Environment.CurrentManagedThreadId == _bracketThreadId,
+            "Frame measurement must open and close on the same thread — the allocation counter is per-thread.");
+
+        LastFrameAllocatedBytes = Math.Max(0L, GC.GetAllocatedBytesForCurrentThread() - _frameAllocStart);
+        LastFrameMs = (float)Stopwatch.GetElapsedTime(_frameTimestampStart).TotalMilliseconds;
+        Stats.Record(LastFrameMs, LastFrameAllocatedBytes);
+    }
+
+    /// <summary>
+    /// The engine's own frame metrics, recorded every frame whether or not anything displays them.
+    /// <para>
+    /// Owned HERE rather than by the debug overlay: metrics are an engine concern, and hanging them off the overlay
+    /// made them depend on a cooked font being present on disk — no font, no measurements at all.
+    /// </para>
+    /// </summary>
+    public FrameStats Stats { get; } = new();
+
+    /// <summary>
+    /// Managed bytes the ENGINE allocated during the last completed frame — tick plus the whole of DrawFrame.
+    /// <para>
+    /// The bracket matters. Measuring from one tick to the next would also sweep up the host's windowing and input
+    /// pump (Silk.NET/GLFW allocate there), which the engine does not control: the readout would sit permanently
+    /// non-zero through no fault of the engine, and a permanently red indicator hides the regression it exists to
+    /// catch. This bracket is exactly the one the cull-stats bench has always used.
+    /// </para>
+    /// </summary>
+    public long LastFrameAllocatedBytes { get; private set; }
+
+    /// <summary>
+    /// Wall-clock duration of the last completed frame, same bracket as <see cref="LastFrameAllocatedBytes"/>.
+    /// <b>Not a pure CPU cost</b>: the bracket spans the fence wait and the present, so under vsync this tracks the
+    /// display period — which is what makes it the right number for an fps readout, and the wrong one for
+    /// attributing a spike to engine code.
+    /// </summary>
+    public float LastFrameMs { get; private set; }
 
     /// <summary>The Render-stage callback, allocated once. Hand it to <c>FrameRenderer.DrawFrame</c>; it is a no-op
     /// on a frame the renderer skips.</summary>

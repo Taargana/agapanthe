@@ -439,16 +439,28 @@ binaires) ; `SixLabors.Fonts` écarté (licence Split payante). **Latin + kernin
 GPU-free**, **`tools/FontCooker`** (patron `ShaderPrecompiler`), format **`.agfont`** binaire mono-fichier (patron
 VS-1, sortie déterministe).
 
-**3 jalons séquencés** : ~~**UI-1** texte à l'écran~~ ✅ **livré session 25** · **UI-2** DebugOverlay + profiler CPU
-(remplace le HUD `window.Title`, rend le **gate 0-alloc visible en continu**) · **UI-3** timestamps GPU (`QueryPool`,
-dégradation gracieuse, abandonnable).
+**3 jalons séquencés** : ~~**UI-1** texte à l'écran~~ ✅ **livré session 25** · ~~**UI-2** DebugOverlay + profiler
+CPU~~ ✅ **livré session 25** · **UI-3** timestamps GPU (`QueryPool`, dégradation gracieuse, abandonnable).
+
+*UI-2 livré* (double audit PASS-with-concerns ×2, aucun 🔴) : `FrameStats`/`FrameSeries` + `DebugOverlaySystem`
+(Engine) · `Sparkline` + `TextBuilder` public 0-alloc (Ui) · overlay in-view remplaçant le HUD `window.Title` **et**
+son hack de cession VS-3, bascule `F3`, `AGAPANTHE_OVERLAY=0`. **Le gate 0-alloc est visible en continu à l'écran.**
+*Leçon* : la fenêtre de mesure est le sujet, pas le compteur — l'overlay a d'abord mesuré le pump d'événements GLFW
+(272 B/frame fantômes), puis fermé son bracket avant submit/present et **jamais** sur les frames à sortie précoce
+(resize) → « 0 B » en vert pendant une recréation de swapchain par frame. Le bracket vit maintenant dans
+`FrameOrchestrator` (`Tick` → `EndFrame()` après `DrawFrame`), exactement celui du banc.
+*Dette léguée* : **seam `FrameProfiler` reporté à UI-3** — les timestamps GPU arrivent à N+2 et casseront
+`Record(float, long)` (séries désalignées) ; le refactor appartient au jalon qui en connaîtra la forme, et
+`DebugOverlaySystem` reste sans tests pour la même raison (il dépend de l'orchestrator concret).
 
 *UI-1 livré* (double audit PASS-with-concerns ×2, verdict humain PASS) : `tools/FontCooker` (SDF hors-ligne, pur
 managé) · `.agfont` déterministe · `Agapanthe.Ui` GPU-free · `BlendMode` + `R8Unorm` · `UiPass` + `Renderer.LoadFont`/
 `DrawUi` · `UiRenderSystem` · **capture swapchain** `AGAPANTHE_CAPTURE_UI` (la capture HDR ne pouvait pas voir un
-overlay dessiné après le tonemap). *Dette léguée* : **synchronization validation non activée** — le gate « 0 message
-de validation » ne voit structurellement pas les hazards de synchro (une barrière manquante tonemap→UI l'a prouvé) ;
-`MaxStorageBuffers` 12/16 ; pas d'échec bruyant sans format sRGB de swapchain ; troncature silencieuse > 256 glyphes.
+overlay dessiné après le tonemap). *Dette léguée* : ~~**synchronization validation non activée**~~ ✅ **soldée en
+tête d'UI-2** (`141e374`) — activée par défaut en Debug, elle a immédiatement révélé **3 hazards préexistants** de la
+boucle de frame, invisibles depuis le début du projet ; le gate « 0 message de validation » couvre désormais la
+synchro. Restent : `MaxStorageBuffers` 12/16 ; pas d'échec bruyant sans format sRGB de swapchain ; troncature
+silencieuse > 256 glyphes.
 
 *Prérequis bas niveau découverts* : `Agapanthe.Graphics` n'a **aucun format mono-canal** (`R8Unorm` à ajouter,
 précédent `Rg16Sfloat`) et son **blending est câblé en dur à `false`** (`GraphicsPipeline.cs:208`) — ajouter

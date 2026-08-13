@@ -29,11 +29,17 @@ public readonly record struct TextExtent(float Width, float Height, int LineCoun
 /// </summary>
 public static class TextLayout
 {
-    // Scratch capacity for one call. 256 glyphs × 48 bytes = 12 KiB of stack — deliberately NOT larger: C# emits
-    // `.locals init`, so the buffer is zero-filled on EVERY call, and that cost is invisible to the project's
-    // 0-alloc gate (which measures the managed heap, not the stack). A HUD line is a few dozen glyphs; text longer
-    // than this is truncated rather than made to cost a quarter of a megabyte of memset per frame.
+    // Hard cap on glyphs per call. The buffer is sized from the INPUT, not from this cap: C# emits `.locals init`,
+    // so a fixed 256-glyph buffer (12 KiB) would be zero-filled on every call — the debug overlay makes three calls
+    // per frame for ~35 glyphes' worth of text, which would be ~36 KiB of memset per frame for nothing. That cost is
+    // invisible to the 0-alloc gate (it measures the managed heap, not the stack), which is exactly why it is worth
+    // being deliberate about. Text longer than the cap is truncated rather than allowed to grow the stack frame.
     private const int MaxGlyphsPerCall = 256;
+
+    // Upper bound on glyphs a string can produce: one per char (a surrogate pair yields ONE glyph from two chars,
+    // so this only ever over-estimates). Clamped to at least 1 — stackalloc of 0 is legal but pointless.
+    private static int GlyphCapacityFor(ReadOnlySpan<char> text)
+        => Math.Clamp(text.Length, 1, MaxGlyphsPerCall);
 
     // Line-width scratch. Also bounded, for the same reason.
     private const int MaxLines = 64;
@@ -45,7 +51,7 @@ public static class TextLayout
     {
         ArgumentNullException.ThrowIfNull(font);
 
-        Span<PositionedGlyph> glyphs = stackalloc PositionedGlyph[MaxGlyphsPerCall];
+        Span<PositionedGlyph> glyphs = stackalloc PositionedGlyph[GlyphCapacityFor(text)];
         Span<float> lineWidths = stackalloc float[MaxLines];
         TextShaper.Shape(text, font, glyphs, out var glyphCount, out var lineCount);
         return MeasureShaped(glyphs[..glyphCount], lineWidths, font, pixelSize, ref lineCount);
@@ -68,7 +74,7 @@ public static class TextLayout
         ArgumentNullException.ThrowIfNull(drawList);
         ArgumentNullException.ThrowIfNull(font);
 
-        Span<PositionedGlyph> glyphs = stackalloc PositionedGlyph[MaxGlyphsPerCall];
+        Span<PositionedGlyph> glyphs = stackalloc PositionedGlyph[GlyphCapacityFor(text)];
         Span<float> lineWidths = stackalloc float[MaxLines];
         TextShaper.Shape(text, font, glyphs, out var glyphCount, out var lineCount);
         var shaped = glyphs[..glyphCount];

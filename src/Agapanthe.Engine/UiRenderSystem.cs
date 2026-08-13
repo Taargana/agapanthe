@@ -30,8 +30,13 @@ public sealed class UiRenderSystem : ISystem, IRenderSystem
     /// <summary>
     /// The list to append this frame's quads to. Cleared at the start of every tick, so callers always draw into a
     /// fresh list and never have to remember to clear it themselves.
+    /// <para>
+    /// Pre-sized generously (UI-2): the debug overlay alone emits several hundred quads once its graphs fill, and
+    /// the list grows by doubling. Starting small meant a burst of array growth spread over the first seconds —
+    /// harmless, but it showed up as allocation in the very readout that exists to police allocation.
+    /// </para>
     /// </summary>
-    public UiDrawList DrawList { get; } = new();
+    public UiDrawList DrawList { get; } = new(initialCapacity: 2048);
 
     /// <summary>
     /// Clears last frame's quads. Registered in <see cref="Stage.Input"/> — the FIRST tick stage — so every later

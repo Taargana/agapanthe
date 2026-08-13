@@ -7,7 +7,6 @@ using Agapanthe.Engine;
 using Agapanthe.Graphics;
 using Agapanthe.Platform;
 using Agapanthe.Rendering;
-using Agapanthe.Ui;
 using Agapanthe.World;
 using Silk.NET.Input;
 
@@ -93,6 +92,9 @@ LandingChallengeSystem? landingChallenge = null;
 
 // UI-1: the text overlay. Null when no cooked font shipped alongside the executable.
 UiRenderSystem? uiSystem = null;
+
+// UI-2: the engine's debug overlay, hoisted so the F3 keypress can toggle it.
+DebugOverlaySystem? debugOverlay = null;
 
 window.Loaded += () =>
 {
@@ -487,10 +489,16 @@ window.Loaded += () =>
         orchestrator.Add(Stage.Input, uiSystem);
         orchestrator.Add(uiSystem);
 
-        // A FIXED demo string, drawn every frame in PostSimulation (after Input cleared the list). Fixed on
-        // purpose: it makes the headless capture reproducible, which is what turns "text renders" into an
-        // objectively verifiable gate instead of a human impression. UI-2 replaces it with the real debug overlay.
-        orchestrator.Add(Stage.PostSimulation, new UiDemoTextSystem(uiSystem.DrawList, uiFont));
+        // UI-2: the engine's debug overlay replaces UI-1's fixed demo string AND the old title-bar HUD. It runs in
+        // PostSimulation, after Stage.Input cleared the draw list, and it records its statistics every frame even
+        // while hidden (see DebugOverlaySystem).
+        debugOverlay = new DebugOverlaySystem(uiSystem.DrawList, uiFont, renderer!, renderList, orchestrator)
+        {
+            // AGAPANTHE_OVERLAY=0 starts hidden: a perf bench wants the frame to itself, and it is also how the
+            // overlay's own per-frame cost is isolated (hidden, it still records stats but draws nothing).
+            Visible = Environment.GetEnvironmentVariable("AGAPANTHE_OVERLAY") is not "0",
+        };
+        orchestrator.Add(Stage.PostSimulation, debugOverlay);
         Log.Info($"Sandbox: [ui] font loaded from '{fontPath}'.");
     }
     else
@@ -647,6 +655,11 @@ window.KeyPressed += key =>
         case Key.B when probeDropper is not null:
             probeDropper.DropOne();
             break;
+        // F3: toggle the engine's debug overlay (UI-2). Statistics keep being recorded while it is hidden, so the
+        // graphs stay truthful across a toggle instead of showing a gap that never happened.
+        case Key.F3 when debugOverlay is not null:
+            debugOverlay.Toggle();
+            break;
         // F5: quicksave the world (VS-3). Reload = relaunch with AGAPANTHE_LOAD (VS-1). Between ticks → safe; Save
         // flushes pending spawns first, so a just-dropped probe is included.
         case Key.F5 when landingChallenge is not null && world is not null:
@@ -721,11 +734,6 @@ window.Updated += dt =>
     controller.Update(camera, (float)dt, in input);
 };
 
-// Debug HUD in the title bar (no in-view text rendering exists — that would need a font atlas + overlay pass).
-// Accumulated over ~0.25 s so the fps reading is stable and the OS title update is not spammed every frame.
-var hudElapsed = 0.0;
-var hudFrames = 0;
-
 window.Rendered += dt =>
 {
     if (frameRenderer is null || swapchain is null || orchestrator is null)
@@ -755,25 +763,14 @@ window.Rendered += dt =>
     // Render stage, and skips it when the swapchain is out of date — the simulation must not skip with it.
     orchestrator.Tick((float)dt);
     frameRenderer.DrawFrame(orchestrator.RenderDelegate);
+    // Closes the engine's frame measurement (UI-2). Deliberately AFTER DrawFrame, so the bracket covers submit and
+    // present too — and so a frame where DrawFrame bailed out early (resize) is still measured rather than lost.
+    orchestrator.EndFrame();
 
-    // Title-bar debug HUD (throttled). GC.GetTotalMemory is the managed heap — the number that matters for the
-    // 0-alloc-per-frame goal: it should sit FLAT while flying around a static scene. renderList.Count is the scene
-    // candidate count (the GPU culls it); draws are the instanced scene+shadow calls.
-    hudElapsed += dt;
-    hudFrames++;
-    // In planet-challenge the LandingChallengeSystem owns the title bar (landed/shots/status) — cede it so the two do
-    // not fight and its 0-alloc-when-unchanged property holds. Everywhere else, the debug FPS/draws line.
-    if (hudElapsed >= 0.25 && renderer is not null && landingChallenge is null)
-    {
-        var fps = hudFrames / hudElapsed;
-        var msPerFrame = hudElapsed / hudFrames * 1000.0;
-        var managedMb = GC.GetTotalMemory(false) / (1024.0 * 1024.0);
-        window.Title =
-            $"Agapanthe — {fps:F0} fps ({msPerFrame:F1} ms) · draws {renderer.LastSceneDrawCalls}+{renderer.LastShadowDrawCalls} " +
-            $"· candidates {renderList.Count} · GC {managedMb:F1} MB";
-        hudElapsed = 0;
-        hudFrames = 0;
-    }
+    // The title-bar HUD is gone (UI-2): fps/ms/draws/candidates now render IN VIEW through the engine's
+    // DebugOverlaySystem, every frame rather than throttled to 4 Hz, and with per-frame ALLOCATION shown alongside —
+    // the 0-alloc gate made continuously visible. Its removal also retires the title-cession hack that kept it from
+    // fighting LandingChallengeSystem, which now owns the title bar unopposed.
 
     if (benchMode)
     {
@@ -2023,39 +2020,6 @@ static void FramePlanetChallengeCamera(
     camera.Far = (float)(Double3.Distance(planetCentre, sunOrigin) * 1.4);
     renderer.ShadowDistance = 1f;
     controller.MoveSpeed = (float)EnvDouble("AGAPANTHE_CHALLENGE_MOVE_SPEED", 60.0); // fast enough to reach the target
-}
-
-// UI-1 demo: draws a fixed text block every frame so the milestone has something to look at and, more importantly,
-// something to HASH. A fixed string + a fixed scene make the headless capture reproducible, which is what turns
-// "text renders" into an objectively verifiable gate rather than a human impression.
-//
-// It also exercises the parts that matter: several sizes (does ONE SDF atlas really serve every size?), alignment,
-// a semi-transparent panel behind the text (does premultiplied blending avoid halos?), and accented characters (is
-// the Latin-1 part of the charset actually baked?).
-//
-// Runs in PostSimulation, i.e. after Stage.Input cleared the list. Allocation-free: every string is a literal and
-// TextLayout writes into the draw list's pooled array.
-file sealed class UiDemoTextSystem(UiDrawList drawList, FontAsset font) : ISystem
-{
-    private const uint White = 0xF5F5F5FFu;
-    private const uint Amber = 0xFFB030FFu;
-    private const uint PanelBackground = 0x101018A0u; // semi-transparent: exercises the blend path
-
-    public void Execute(in TickContext ctx)
-    {
-        // Panel behind the text, drawn FIRST — draw order is submission order (painter's algorithm).
-        drawList.AddRect(new Vector4(16f, 16f, 560f, 190f), font.WhiteTexelUv, PanelBackground);
-
-        TextLayout.DrawText(drawList, "Agapanthe UI-1", font, new Vector2(32f, 28f), 34f, White);
-        TextLayout.DrawText(drawList, "SDF text: one atlas, every size.", font, new Vector2(32f, 74f), 20f, Amber);
-        TextLayout.DrawText(
-            drawList, "Accents: éàçüñ · Symbols: {}[]<>#@&", font, new Vector2(32f, 104f), 16f, White);
-        // Hyphen-minus, not an em dash: U+2014 is outside the ASCII + Latin-1 charset, so it would render as tofu.
-        // (Which is exactly what the fallback is meant to do — but a reference capture should not enshrine it.)
-        TextLayout.DrawText(drawList, "tiny 11 px - legibility check", font, new Vector2(32f, 130f), 11f, White);
-        TextLayout.DrawText(
-            drawList, "multi-line\nand aligned", font, new Vector2(544f, 148f), 14f, Amber, TextAlign.Right);
-    }
 }
 
 file static class DebugViews

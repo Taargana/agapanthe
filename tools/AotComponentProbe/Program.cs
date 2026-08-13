@@ -1,6 +1,7 @@
 using System.Numerics;
 using System.Runtime.CompilerServices;
 using Agapanthe.Assets.Font;
+using Agapanthe.Engine;
 using Agapanthe.Ui;
 using Agapanthe.World;
 
@@ -73,6 +74,19 @@ try
         Console.WriteLine(
             $"AotTextSmoke: {font.Glyphs.Length} glyph(s), atlas {font.AtlasWidth}×{font.AtlasHeight}, "
             + $"measured {extent.Width:F1}×{extent.Height:F1} px, {list.Count} quad(s).");
+
+        // UI-2: the profiler's pure types travel the same AOT path. No reflection, no dynamic generics — but the
+        // probe IS the declared AOT gate, so they are exercised rather than assumed.
+        var series = new FrameSeries(8);
+        for (var i = 0; i < 12; i++)
+        {
+            series.Record(i);
+        }
+
+        Span<float> graph = stackalloc float[8];
+        var samples = series.CopyChronological(graph);
+        Sparkline.Draw(list, samples, new System.Numerics.Vector4(0f, 0f, 8f, 8f), font.WhiteTexelUv, 0xFFFFFFFFu, 16f);
+        Console.WriteLine($"AotProfilerSmoke: {samples.Length} sample(s), {list.Count} quad(s) after graph.");
 
         if (list.Count == 0 || extent.Width <= 0f)
         {
