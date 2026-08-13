@@ -1,21 +1,21 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
-  <!-- The thin layer that MARRIES simulation and rendering (P3-M2, decision D0). It is the ONLY project that
-       references both World and Rendering, and it exists precisely so that neither has to reference the other:
-       World stays GPU-free (a headless server can run it), Rendering stays ECS-free (it can draw something that is
-       not a GameWorld — a tool, a test). The frame order lived in the Sandbox's closure for want of a home; this
-       is that home.
+  <!-- THE SIMULATION. Since MP-0a this project references neither Rendering nor Graphics: the whole point is that a
+       dedicated server can run it with no Vulkan on the machine, which is what makes topology a DEPLOYMENT choice
+       rather than an architecture one (backlog §4quater). The render half — RenderContext, IRenderSystem,
+       FrameOrchestrator, the UI and overlay systems — lives in Agapanthe.Engine.Render.
 
-       It deliberately does NOT reference Platform: dragging GLFW in here would kill the "simulation runs headless"
-       argument that justifies the whole split. The Input stage is therefore empty on the engine side — the
-       application fills it. -->
+       DO NOT ADD Agapanthe.Rendering, Agapanthe.Graphics, Agapanthe.Platform OR ANY Silk.NET PACKAGE HERE.
+       Two tests enforce it (EngineIsHeadlessTests): one asserts this file's ProjectReference set is exactly
+       {Core, World} — which bites at the commit that adds the reference, before any type is used and while the
+       compiler would still elide it from the manifest — and one walks the built assembly's reference closure.
+
+       Platform was already excluded before the split, for the same reason: dragging GLFW in would kill the
+       "simulation runs headless" argument. The Input stage is therefore empty on the engine side — the application
+       fills it. -->
   <ItemGroup>
     <ProjectReference Include="..\Agapanthe.Core\Agapanthe.Core.csproj" />
     <ProjectReference Include="..\Agapanthe.World\Agapanthe.World.csproj" />
-    <ProjectReference Include="..\Agapanthe.Rendering\Agapanthe.Rendering.csproj" />
-    <!-- Explicit, not merely transitive: the render context NAMES Graphics types (CommandList, FrameContext,
-         SwapchainTarget) in its public surface, so the dependency is real and is declared as such. -->
-    <ProjectReference Include="..\Agapanthe.Graphics\Agapanthe.Graphics.csproj" />
   </ItemGroup>
 
   <PropertyGroup>

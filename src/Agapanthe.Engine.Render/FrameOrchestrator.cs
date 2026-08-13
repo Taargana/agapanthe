@@ -1,22 +1,28 @@
 using System.Numerics;
-using System.Diagnostics;
 using Agapanthe.Core;
 using Agapanthe.Graphics;
 using Agapanthe.Rendering;
 using Agapanthe.World;
 
-namespace Agapanthe.Engine;
+namespace Agapanthe.Engine.Render;
 
 /// <summary>
-/// The default frame assembly (P3-M2, decision D1/D3.c): it registers the engine's own systems into a
-/// <see cref="SystemScheduler"/> in the one correct order and hands back a cached render delegate. This is where the
-/// frame invariant — propagate transforms, aggregate bounds, fit the light, cull, draw — finally LIVES, instead of
-/// being a sequence of statements in an application's closure that nothing protected (spec §1).
+/// The default frame assembly (P3-M2, decision D1/D3.c): it registers the engine's own systems in the one correct
+/// order and hands back a cached render delegate. This is where the frame invariant — propagate transforms, fit the
+/// cascades, cull, draw — finally LIVES, instead of being a sequence of statements in an application's closure that
+/// nothing protected (spec §1).
+/// <para>
+/// <b>It is the RENDER half of the frame (MP-0a).</b> The simulation half — the world, the tick schedule, the frame
+/// measurement — lives in <see cref="SimulationHost"/>, which this type composes and delegates to. A dedicated
+/// server runs the host alone; only a client needs what is left here. The tick-side members below
+/// (<see cref="Tick"/>, <see cref="EndFrame"/>, <see cref="Stats"/>, <see cref="Add(Stage, ISystem)"/>…) are kept as
+/// forwarding members so applications do not have to know which half owns what.
+/// </para>
 /// <para>
 /// <b>It owns nothing.</b> The <see cref="GameWorld"/>, the <see cref="Renderer"/>, the <see cref="ResourceRegistry"/>
 /// and the render lists are borrowed references; their lifetime — and the 0-leak teardown order — stays with the
-/// application. The orchestrator holds only the scheduler, the per-frame scratch it computes (the scene bounds), and
-/// its render delegate.
+/// application. The orchestrator holds only the simulation host, the per-frame render scratch, and its render
+/// delegate.
 /// </para>
 /// <para>
 /// <b>Tick and render are separate on purpose (D1.a).</b> <see cref="Tick"/> runs Input → Simulation →
@@ -49,73 +55,89 @@ public sealed class FrameOrchestrator
     // far cascades stop swallowing the near field (raster 4× → ~1×). Cascade 0's is an all-keeping tautology.
     private readonly Vector4[] _cascadeNearCutPlanes = new Vector4[CascadeCount];
 
-    private readonly SystemScheduler _scheduler;
+    // The simulation half. Composed, not inherited from and not merged into: everything it does is runnable with no
+    // GPU, and keeping that literally true in the type graph is the point of the split.
+    private readonly SimulationHost _simulation;
+
+    // The render half's own schedule. It takes the world's structural barrier DIRECTLY rather than reaching through
+    // the simulation host: the headless half must not have to know that a render scheduler exists at all.
+    private readonly RenderSystemScheduler _renderScheduler;
 
     // Cached once (F1.i): FrameRenderer.DrawFrame takes an Action, and building it per frame would be one managed
     // allocation per frame — invisible to unit tests, fatal to the 0-alloc gate.
     private readonly Action<CommandList, FrameContext, SwapchainTarget> _renderDelegate;
 
-    // Per-frame scratch the orchestrator computes: the scene extent, produced by the PostSimulation aggregation and
-    // consumed by the Render-stage light fit. Not owned state — recomputed from the world every tick.
-    private Double3Bounds _sceneBounds = Double3Bounds.Empty;
-    private float _dt;
-
-    // Frame self-measurement (UI-2): opened in Tick, closed in EndFrame.
-    private long _frameAllocStart;
-    private long _frameTimestampStart;
-    private int _bracketThreadId;
-    private bool _measurementOpen;
-
     private FrameOrchestrator(
-        GameWorld world, Renderer renderer, ResourceRegistry registry, Camera camera, RenderList render)
+        SimulationHost simulation, GameWorld world, Renderer renderer, ResourceRegistry registry, Camera camera,
+        RenderList render)
     {
         _world = world;
         _renderer = renderer;
         _registry = registry;
         _camera = camera;
         _render = render;
-
-        // The structural barrier the scheduler runs at the end of every stage IS the world's deferred-change flush
-        // (P3-M2 D2): a system enqueues spawns/despawns, the barrier applies them before the next stage iterates.
-        _scheduler = new SystemScheduler(_world.FlushStructuralChanges);
+        _simulation = simulation;
+        _renderScheduler = new RenderSystemScheduler(world.FlushStructuralChanges);
 
         _renderDelegate = (cmd, frame, target) =>
         {
-            var ctx = new RenderContext(new TickContext(_dt, _scheduler.FrameIndex), cmd, frame, target);
-            _scheduler.Render(in ctx);
+            var ctx = new RenderContext(_simulation.CurrentTick, cmd, frame, target);
+            _renderScheduler.Render(in ctx);
         };
     }
 
     /// <summary>
     /// Builds the orchestrator with the engine's default systems registered: PostSimulation propagates transforms
-    /// then aggregates world bounds; Render fits the light, culls, and draws. The application adds its own systems
-    /// (input, gameplay, a bench spinner) with <see cref="Add(Stage, ISystem)"/> BEFORE the first <see cref="Tick"/>.
+    /// (from <see cref="SimulationHost.CreateDefault"/>); Render fits the cascades, culls, and draws. The
+    /// application adds its own systems (input, gameplay, a bench spinner) with <see cref="Add(Stage, ISystem)"/>
+    /// BEFORE the first <see cref="Tick"/>.
     /// </summary>
     public static FrameOrchestrator CreateDefault(
         GameWorld world, Renderer renderer, ResourceRegistry registry, Camera camera, RenderList render)
+        => CreateDefault(SimulationHost.CreateDefault(world), world, renderer, registry, camera, render);
+
+    /// <summary>
+    /// Attaches presentation to an <b>existing</b> <see cref="SimulationHost"/>.
+    /// <para>
+    /// This is the overload that matches the engine cap. A simulation exists; a client may attach a presentation to
+    /// it — not the other way round. The convenience overload above builds a host because a windowed application
+    /// usually has no reason to hold one first, but a composition root that decides between "server only",
+    /// "client + server" and "client only" must be able to build and configure the host itself, then hand it over.
+    /// </para>
+    /// </summary>
+    public static FrameOrchestrator CreateDefault(
+        SimulationHost simulation, GameWorld world, Renderer renderer, ResourceRegistry registry, Camera camera,
+        RenderList render)
     {
+        ArgumentNullException.ThrowIfNull(simulation);
         ArgumentNullException.ThrowIfNull(world);
         ArgumentNullException.ThrowIfNull(renderer);
         ArgumentNullException.ThrowIfNull(registry);
         ArgumentNullException.ThrowIfNull(camera);
         ArgumentNullException.ThrowIfNull(render);
 
-        var o = new FrameOrchestrator(world, renderer, registry, camera, render);
-        o._scheduler.Add(Stage.PostSimulation, new PropagateSystem(o));
-        o._scheduler.Add(Stage.PostSimulation, new AggregateBoundsSystem(o));
-        o._scheduler.Add(new SceneViewSystem(o));
+        var o = new FrameOrchestrator(simulation, world, renderer, registry, camera, render);
+        o._renderScheduler.Add(new SceneViewSystem(o));
         return o;
     }
 
-    /// <summary>Registers an application simulation system (Input / Simulation / PostSimulation). See
-    /// <see cref="SystemScheduler.Add(Stage, ISystem)"/>: registration order is execution order, frozen at first tick.</summary>
-    public void Add(Stage stage, ISystem system) => _scheduler.Add(stage, system);
+    /// <summary>
+    /// The simulation half: register systems on it, read its metrics.
+    /// <para>
+    /// <b>Do not drive the frame from here.</b> Calling <c>Simulation.Tick</c> or <c>Simulation.BeginFrame</c>
+    /// alongside this type's <see cref="Tick"/> would double-tick the world or leave a measurement bracket open.
+    /// The frame is driven through the orchestrator; everything else goes through this property.
+    /// </para>
+    /// </summary>
+    public SimulationHost Simulation => _simulation;
 
-    /// <summary>Registers an application render system (Render stage).</summary>
-    public void Add(IRenderSystem system) => _scheduler.Add(system);
+    /// <summary>Registers an application simulation system (Input / Simulation / PostSimulation). Forwards to
+    /// <see cref="SimulationHost.Add"/>: registration order is execution order, frozen at first tick.</summary>
+    public void Add(Stage stage, ISystem system) => _simulation.Add(stage, system);
 
-    /// <summary>Monotonic tick counter (see <see cref="SystemScheduler.FrameIndex"/>).</summary>
-    public long FrameIndex => _scheduler.FrameIndex;
+    /// <summary>Registers an application render system (Render stage). Stays on this side: the simulation half must
+    /// not learn that render systems exist.</summary>
+    public void Add(IRenderSystem system) => _renderScheduler.Add(system);
 
     /// <summary>
     /// Runs Input → Simulation → PostSimulation for one frame. Call this ONCE per frame, OUTSIDE the render
@@ -123,20 +145,11 @@ public sealed class FrameOrchestrator
     /// </summary>
     public void Tick(float deltaSeconds)
     {
-        // Belt and braces: if the previous frame never called EndFrame, close it here rather than silently dropping
-        // its cost. Otherwise a caller who forgets the call gets a profiler frozen on one stale sample.
-        if (_measurementOpen)
-        {
-            EndFrame();
-        }
-
-        _dt = deltaSeconds;
-        // Open the frame's self-measurement (UI-2). Both reads are allocation-free.
-        _frameAllocStart = GC.GetAllocatedBytesForCurrentThread();
-        _frameTimestampStart = Stopwatch.GetTimestamp();
-        _bracketThreadId = Environment.CurrentManagedThreadId;
-        _measurementOpen = true;
-        _scheduler.Tick(deltaSeconds);
+        // One tick per frame today, so opening the bracket here is exactly the previous behaviour. When the
+        // time-authority sub-milestone turns this into an accumulator loop, BeginFrame stays here and only the
+        // Tick call repeats — which is why the two are separate on SimulationHost.
+        _simulation.BeginFrame();
+        _simulation.Tick(deltaSeconds);
     }
 
     /// <summary>
@@ -155,72 +168,20 @@ public sealed class FrameOrchestrator
     /// allocating path in the engine.
     /// </para>
     /// </summary>
-    public void EndFrame()
-    {
-        if (!_measurementOpen)
-        {
-            return;
-        }
-
-        _measurementOpen = false;
-
-        // GetAllocatedBytesForCurrentThread is a PER-THREAD counter: opening and closing the bracket on two
-        // different threads yields an arbitrary delta, and a negative one reads as a perfectly healthy empty graph.
-        // The engine is single-threaded today; MP-0 (tick decoupled from the frame) is the milestone that could
-        // break this, so the invariant is anchored now while it costs nothing.
-        Debug.Assert(
-            Environment.CurrentManagedThreadId == _bracketThreadId,
-            "Frame measurement must open and close on the same thread — the allocation counter is per-thread.");
-
-        LastFrameAllocatedBytes = Math.Max(0L, GC.GetAllocatedBytesForCurrentThread() - _frameAllocStart);
-        LastFrameMs = (float)Stopwatch.GetElapsedTime(_frameTimestampStart).TotalMilliseconds;
-        Stats.Record(LastFrameMs, LastFrameAllocatedBytes);
-    }
-
-    /// <summary>
-    /// The engine's own frame metrics, recorded every frame whether or not anything displays them.
-    /// <para>
-    /// Owned HERE rather than by the debug overlay: metrics are an engine concern, and hanging them off the overlay
-    /// made them depend on a cooked font being present on disk — no font, no measurements at all.
-    /// </para>
-    /// </summary>
-    public FrameStats Stats { get; } = new();
-
-    /// <summary>
-    /// Managed bytes the ENGINE allocated during the last completed frame — tick plus the whole of DrawFrame.
-    /// <para>
-    /// The bracket matters. Measuring from one tick to the next would also sweep up the host's windowing and input
-    /// pump (Silk.NET/GLFW allocate there), which the engine does not control: the readout would sit permanently
-    /// non-zero through no fault of the engine, and a permanently red indicator hides the regression it exists to
-    /// catch. This bracket is exactly the one the cull-stats bench has always used.
-    /// </para>
-    /// </summary>
-    public long LastFrameAllocatedBytes { get; private set; }
-
-    /// <summary>
-    /// Wall-clock duration of the last completed frame, same bracket as <see cref="LastFrameAllocatedBytes"/>.
-    /// <b>Not a pure CPU cost</b>: the bracket spans the fence wait and the present, so under vsync this tracks the
-    /// display period — which is what makes it the right number for an fps readout, and the wrong one for
-    /// attributing a spike to engine code.
-    /// </summary>
-    public float LastFrameMs { get; private set; }
+    public void EndFrame() => _simulation.EndFrame();
 
     /// <summary>The Render-stage callback, allocated once. Hand it to <c>FrameRenderer.DrawFrame</c>; it is a no-op
     /// on a frame the renderer skips.</summary>
     public Action<CommandList, FrameContext, SwapchainTarget> RenderDelegate => _renderDelegate;
 
-    // System 1 (PostSimulation): recompute every hierarchical entity's world transform from its Parent chain.
-    private sealed class PropagateSystem(FrameOrchestrator o) : ISystem
-    {
-        public void Execute(in TickContext ctx) => o._world.PropagateTransforms();
-    }
-
-    // System 2 (PostSimulation): re-aggregate the world extent every frame (P3-M1 debt #1). It must run AFTER
-    // propagation (bounds derive from world transforms) and BEFORE the light fit, which the stage order guarantees.
-    private sealed class AggregateBoundsSystem(FrameOrchestrator o) : ISystem
-    {
-        public void Execute(in TickContext ctx) => o._sceneBounds = o._world.AggregateBounds();
-    }
+    // PropagateSystem moved to SimulationHost (MP-0a): recomputing world transforms from the Parent chain is
+    // simulation, not rendering — a headless server needs it as much as a client does.
+    //
+    // AggregateBoundsSystem is GONE, not moved. It wrote _sceneBounds every frame and NOTHING read it: the comment
+    // claiming the Render-stage light fit consumed it predates P3-M5, since when SceneViewSystem fits each cascade
+    // to its own camera-frustum slice and never consults global bounds. It was an O(n) per frame with no observable
+    // effect. GameWorld.AggregateBounds() stays — it is pure, tested (WorldSystemsTests, LifecycleTests), and a
+    // future consumer (interest management, world-space UI) will want it; only the per-frame caller is removed.
 
     // The seam (Render stage): the ONE place that sees GameWorld and Renderer together. It runs the D3.c two-pass
     // shadow cull — wedge cull (pass 1) → fit the light to the caster bounds → compact against the light volume

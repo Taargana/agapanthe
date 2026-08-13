@@ -1,5 +1,3 @@
-using Agapanthe.Graphics;
-
 namespace Agapanthe.Engine;
 
 /// <summary>
@@ -7,6 +5,10 @@ namespace Agapanthe.Engine;
 /// <see cref="Stage.Input"/>, <see cref="Stage.Simulation"/> or <see cref="Stage.PostSimulation"/> must be runnable
 /// with no device, no swapchain and no window — that is the whole reason <c>World</c> is GPU-free, and a single
 /// shared context carrying a <c>CommandList</c> would have thrown it away.
+/// <para>
+/// Since MP-0a that is enforced by the build graph rather than by discipline: the render-side context lives in
+/// <c>Agapanthe.Engine.Render</c>, and this assembly references neither <c>Rendering</c> nor <c>Graphics</c>.
+/// </para>
 /// </summary>
 public readonly struct TickContext
 {
@@ -21,37 +23,6 @@ public readonly struct TickContext
 
     /// <summary>Monotonic tick counter, from 0. Ticks are NOT frames: a frame can be skipped, a tick never is.</summary>
     public long FrameIndex { get; }
-}
-
-/// <summary>
-/// What a render system receives: the tick data plus the GPU handles for the frame being recorded. Only
-/// <see cref="Stage.Render"/> systems see this — hence a separate interface, not a fatter shared context.
-/// </summary>
-/// <remarks>
-/// <see cref="Frame"/> is <c>Agapanthe.Graphics.FrameContext</c>, the per-frame-in-flight descriptor/UBO slot. This
-/// type is called <c>RenderContext</c> and not <c>FrameContext</c> on purpose: the name is taken, and two
-/// <c>FrameContext</c> in one call chain is how a reader loses an afternoon.
-/// </remarks>
-public readonly struct RenderContext
-{
-    public RenderContext(in TickContext tick, CommandList cmd, FrameContext frame, SwapchainTarget target)
-    {
-        Tick = tick;
-        Cmd = cmd;
-        Frame = frame;
-        Target = target;
-    }
-
-    public TickContext Tick { get; }
-
-    /// <summary>The command list being recorded for this frame.</summary>
-    public CommandList Cmd { get; }
-
-    /// <summary>The frame-in-flight slot: per-frame descriptor sets and mapped uniform buffers.</summary>
-    public FrameContext Frame { get; }
-
-    /// <summary>The swapchain image this frame draws into.</summary>
-    public SwapchainTarget Target { get; }
 }
 
 /// <summary>
@@ -70,10 +41,4 @@ public readonly struct RenderContext
 public interface ISystem
 {
     void Execute(in TickContext ctx);
-}
-
-/// <summary>A system in <see cref="Stage.Render"/>: the only kind that sees GPU types.</summary>
-public interface IRenderSystem
-{
-    void Render(in RenderContext ctx);
 }

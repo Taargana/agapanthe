@@ -1,15 +1,15 @@
 namespace Agapanthe.Engine;
 
 /// <summary>
-/// Runs the registered systems, stage by stage, in a guaranteed order (P3-M2, decision D1). This type is the frame
-/// order — the invariant that used to live in an application's closure, where nothing protected it.
+/// Runs the registered simulation systems, stage by stage, in a guaranteed order (P3-M2, decision D1). This type is
+/// the tick order — the invariant that used to live in an application's closure, where nothing protected it.
 /// <para>
 /// <b>Simulation and rendering are ticked separately, and that is not cosmetic.</b> The renderer skips a frame
 /// whenever the swapchain is out of date (a resize, a minimize): <c>FrameRenderer.DrawFrame</c> silently returns
 /// without invoking its callback. Had the stages been driven from inside that callback, every window resize would
 /// have skipped the whole simulation — the delta time lost, the deferred despawns stuck in the queue. So:
-/// <see cref="Tick"/> always runs (Input → Simulation → PostSimulation), and <see cref="Render"/> runs only when
-/// there is a frame to draw.
+/// <see cref="Tick"/> always runs (Input → Simulation → PostSimulation), and the render stage — now owned by
+/// <c>RenderSystemScheduler</c> in <c>Agapanthe.Engine.Render</c> (MP-0a) — runs only when there is a frame to draw.
 /// </para>
 /// <para>
 /// <b>Zero-alloc.</b> One list per stage, allocated at registration; iteration by index; the structural barrier is a
@@ -22,12 +22,11 @@ namespace Agapanthe.Engine;
 /// </summary>
 public sealed class SystemScheduler
 {
-    // Input / Simulation / PostSimulation. Render is separate: IRenderSystem is a DIFFERENT interface (it carries GPU
-    // types), so it cannot live in the same list — the two are disjoint on purpose.
+    // Input / Simulation / PostSimulation. Render is not here at all since MP-0a: IRenderSystem carries GPU types,
+    // so it lives in a different assembly entirely — the disjointness is now enforced by the build graph.
     private const int TickStageCount = 3;
 
     private readonly List<ISystem>[] _stages;
-    private readonly List<IRenderSystem> _renderSystems = new();
 
     // Applies the deferred structural changes (spawns, despawns, reparenting) at the end of every stage: a system must
     // never see the entity storage move under its own iteration. Held as a field so calling it costs no allocation;
@@ -54,9 +53,9 @@ public sealed class SystemScheduler
     /// Registers a simulation system. Systems in the same stage run in <b>registration order</b> — that is a
     /// guarantee, not an accident of the container.
     /// </summary>
-    /// <exception cref="ArgumentException"><paramref name="stage"/> is <see cref="Stage.Render"/> — use the
-    /// <see cref="IRenderSystem"/> overload; the two are different interfaces because they receive different
-    /// contexts.</exception>
+    /// <exception cref="ArgumentException"><paramref name="stage"/> is <see cref="Stage.Render"/> — render systems
+    /// are registered on <c>RenderSystemScheduler</c> (<c>Agapanthe.Engine.Render</c>); they receive a context
+    /// carrying GPU handles that this assembly cannot even name.</exception>
     /// <exception cref="InvalidOperationException">The scheduler has already run: see <see cref="Add(Stage, ISystem)"/>
     /// remarks.</exception>
     /// <remarks>
@@ -68,27 +67,31 @@ public sealed class SystemScheduler
     {
         ArgumentNullException.ThrowIfNull(system);
         ThrowIfFrozen();
-        if (stage == Stage.Render)
-        {
-            throw new ArgumentException(
-                "Stage.Render takes an IRenderSystem (it receives a RenderContext with GPU handles), not an ISystem.",
-                nameof(stage));
-        }
+        ThrowIfRenderStage(stage);
 
         _stages[(int)stage].Add(system);
     }
 
-    /// <summary>Registers a render system (<see cref="Stage.Render"/>). Runs in registration order.</summary>
-    public void Add(IRenderSystem system)
+    /// <summary>Simulation systems registered in <paramref name="stage"/> (diagnostics and tests).</summary>
+    /// <exception cref="ArgumentException"><paramref name="stage"/> is <see cref="Stage.Render"/> — this scheduler
+    /// holds no render systems; ask <c>RenderSystemScheduler.Count</c>. Throwing rather than returning 0 keeps the
+    /// answer from being a plausible-looking lie.</exception>
+    public int CountIn(Stage stage)
     {
-        ArgumentNullException.ThrowIfNull(system);
-        ThrowIfFrozen();
-        _renderSystems.Add(system);
+        ThrowIfRenderStage(stage);
+        return _stages[(int)stage].Count;
     }
 
-    /// <summary>Systems registered in <paramref name="stage"/> (diagnostics and tests).</summary>
-    public int CountIn(Stage stage)
-        => stage == Stage.Render ? _renderSystems.Count : _stages[(int)stage].Count;
+    private static void ThrowIfRenderStage(Stage stage)
+    {
+        if (stage == Stage.Render)
+        {
+            throw new ArgumentException(
+                "Stage.Render is not handled by SystemScheduler: render systems receive a RenderContext with GPU "
+                + "handles and live on RenderSystemScheduler (Agapanthe.Engine.Render).",
+                nameof(stage));
+        }
+    }
 
     /// <summary>
     /// Runs Input → Simulation → PostSimulation, each closed by a structural barrier. <b>Always</b> runs, even on a
@@ -111,21 +114,6 @@ public sealed class SystemScheduler
         }
 
         _frameIndex++;
-    }
-
-    /// <summary>
-    /// Runs the <see cref="Stage.Render"/> systems for a frame that is actually being recorded. Called from inside the
-    /// renderer's frame callback — and only from there, which is exactly why it is not part of <see cref="Tick"/>.
-    /// </summary>
-    public void Render(in RenderContext ctx)
-    {
-        _frozen = true;
-        for (var i = 0; i < _renderSystems.Count; i++)
-        {
-            _renderSystems[i].Render(in ctx);
-        }
-
-        _barrier?.Invoke();
     }
 
     private void ThrowIfFrozen()

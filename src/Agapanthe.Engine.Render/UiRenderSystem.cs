@@ -1,7 +1,8 @@
 using Agapanthe.Rendering;
 using Agapanthe.Ui;
 
-namespace Agapanthe.Engine;
+namespace Agapanthe.Engine.Render;
+
 
 /// <summary>
 /// Draws the frame's UI over the finished scene (UI-1). Owns the <see cref="UiDrawList"/> that application systems

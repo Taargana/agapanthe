@@ -4,6 +4,7 @@ using Agapanthe.Assets.Font;
 using Agapanthe.Assets.Model;
 using Agapanthe.Core;
 using Agapanthe.Engine;
+using Agapanthe.Engine.Render;
 using Agapanthe.Graphics;
 using Agapanthe.Platform;
 using Agapanthe.Rendering;
@@ -466,7 +467,7 @@ window.Loaded += () =>
     frameRenderer = new FrameRenderer(device, swapchain, () => window.FramebufferSize);
 
     // The frame order lives in the ENGINE now (P3-M2 D1), not in this closure: the orchestrator registers the
-    // default systems (PostSimulation: propagate transforms, aggregate bounds; Render: fit light, cull, draw) in the
+    // default systems (PostSimulation: propagate transforms; Render: fit cascades, cull, draw) in the
     // one correct order and caches its own render delegate. The Sandbox adds only what is ITS business — the bench
     // spinner and the churn — as Stage.Simulation systems. That both keeps the invariant out of the sample AND
     // proves the scheduler is extensible.
@@ -492,7 +493,8 @@ window.Loaded += () =>
         // UI-2: the engine's debug overlay replaces UI-1's fixed demo string AND the old title-bar HUD. It runs in
         // PostSimulation, after Stage.Input cleared the draw list, and it records its statistics every frame even
         // while hidden (see DebugOverlaySystem).
-        debugOverlay = new DebugOverlaySystem(uiSystem.DrawList, uiFont, renderer!, renderList, orchestrator)
+        debugOverlay = new DebugOverlaySystem(
+            uiSystem.DrawList, uiFont, renderer!, renderList, orchestrator.Simulation.Stats)
         {
             // AGAPANTHE_OVERLAY=0 starts hidden: a perf bench wants the frame to itself, and it is also how the
             // overlay's own per-frame cost is isolated (hidden, it still records stats but draws nothing).
@@ -751,7 +753,7 @@ window.Rendered += dt =>
     // Zero-allocation early-out inside when no shader changed (a single volatile read).
     renderer?.PollShaderReload();
 
-    // Bench measures the WHOLE per-frame cost now: tick (spin/churn/propagate/aggregate) + draw. The alloc delta
+    // Bench measures the WHOLE per-frame cost now: tick (spin/churn/propagate) + draw. The alloc delta
     // must stay zero in steady state (spec §6). Timing spans both, since the frame order moved into the engine.
     if (benchMode)
     {

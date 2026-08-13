@@ -1,6 +1,6 @@
 # Agapanthe — Plan complet & état d'avancement
 
-**Mis à jour** : 2026-08-13 (session 25 — **UI-2 CLOS** : overlay debug in-view + profiler CPU ; `FrameStats`/`Sparkline`/`TextBuilder` + `DebugOverlaySystem`, le HUD `window.Title` et son hack de cession disparaissent, **gate 0-alloc visible en continu à l'écran**, bascule `F3` ; double audit PASS-with-concerns ×2 ; 468 tests, AOT PASS · **synchronization validation activée** et 3 hazards préexistants corrigés) · 2026-08-11 (session 25 — **UI-1 CLOS** : texte à l'écran ; FontCooker SDF hors-ligne + `.agfont` + `Agapanthe.Ui` GPU-free + passe UI ; double audit PASS-with-concerns ×2, verdict humain PASS ; 435 tests, AOT PASS) · 2026-08-03 (session 25 — **RÉORIENTATION cap « vrai engine »** [backlog §4quater] : artefact = le moteur, multijoueur serveur autoritaire, MP-0 = prochain jalon ; VS-4/VS-5 en pause · **brainstorm Texte & UI terminé**, spec `plans/2026-08-03-text-ui-design.md`, 3 jalons UI-1/2/3) · 2026-07-26 (session 24 — **VS-3 CLOS** : glu gameplay = défi d'atterrissage planétaire ; `QuerySurfaceContacts` + règle latchée `LandingChallengeRule` + scène `planet-challenge` (input→spawn→règle→save/resume) ; double audit PASS / PASS-with-concerns 4/5, verdict humain PASS ; 372 tests, AOT PASS) · 2026-07-26 (session 23 — **VS-2 CLOS** : spawn runtime différé (`SpawnBodyDeferred`) + gravité newtonienne (attracteur radial + sol radial) ; double audit PASS-with-concerns [4,5/5], verdict visuel PASS ; scène `planet-drop`, 355 tests, AOT PASS) · 2026-07-24 (session 22 — **VS-1 CLOS** : sérialisation du World save/load, double audit PASS, verdict humain PASS) · 2026-07-23 (session 20 — **P3-M7 CLOS** : buffers device-local + réduction du raster d'ombre 4×→~1× ; double audit PASS, verdict visuel PASS incl. soleil bas ; A+B ~15,3 → ~8,0 ms ≈ ×2) · 2026-07-23 (session 19 — **P3-M6 CLOS** : slots persistants dirty-trackés + cull d'ombre GPU ; double audit PASS, verdict visuel PASS ; voir « Point de reprise ») · 2026-07-14 (session 14 — **vérifs humaines de la Phase 2 soldées** : banc M4 PASS with concerns [perf → P3-M1], précision M3 PASS, hot reload M1 PASS) · 2026-07-13 (session 13 — **PHASE 2 CLOSE** — frustum culling + montée en charge : 10 000 entités cullées à 10 000 km, 0 alloc/frame, en NativeAOT ; double audit signe la clôture) · **Machines de dev** : macOS (Apple M3, MoltenVK) + Windows 11 (RTX 5070 Ti, Vulkan 1.3 core) · **Cibles** : Windows / Linux / macOS
+**Mis à jour** : 2026-08-13 (session 26 — **MP-0a CLOS** : headless split ; `Agapanthe.Engine` ne référence plus que `{Core, World}`, nouveau `Agapanthe.Engine.Render`, `SimulationHost` extrait, `samples/HeadlessSim` simule en NativeAOT **sans GPU** ; MP-0 décomposé en 4 sous-jalons ; double audit PASS-with-concerns ×2 [4,2/5], aucun 🔴 ; 491 tests, captures inchangées) · 2026-08-13 (session 25 — **UI-2 CLOS** : overlay debug in-view + profiler CPU ; `FrameStats`/`Sparkline`/`TextBuilder` + `DebugOverlaySystem`, le HUD `window.Title` et son hack de cession disparaissent, **gate 0-alloc visible en continu à l'écran**, bascule `F3` ; double audit PASS-with-concerns ×2 ; 468 tests, AOT PASS · **synchronization validation activée** et 3 hazards préexistants corrigés) · 2026-08-11 (session 25 — **UI-1 CLOS** : texte à l'écran ; FontCooker SDF hors-ligne + `.agfont` + `Agapanthe.Ui` GPU-free + passe UI ; double audit PASS-with-concerns ×2, verdict humain PASS ; 435 tests, AOT PASS) · 2026-08-03 (session 25 — **RÉORIENTATION cap « vrai engine »** [backlog §4quater] : artefact = le moteur, multijoueur serveur autoritaire, MP-0 = prochain jalon ; VS-4/VS-5 en pause · **brainstorm Texte & UI terminé**, spec `plans/2026-08-03-text-ui-design.md`, 3 jalons UI-1/2/3) · 2026-07-26 (session 24 — **VS-3 CLOS** : glu gameplay = défi d'atterrissage planétaire ; `QuerySurfaceContacts` + règle latchée `LandingChallengeRule` + scène `planet-challenge` (input→spawn→règle→save/resume) ; double audit PASS / PASS-with-concerns 4/5, verdict humain PASS ; 372 tests, AOT PASS) · 2026-07-26 (session 23 — **VS-2 CLOS** : spawn runtime différé (`SpawnBodyDeferred`) + gravité newtonienne (attracteur radial + sol radial) ; double audit PASS-with-concerns [4,5/5], verdict visuel PASS ; scène `planet-drop`, 355 tests, AOT PASS) · 2026-07-24 (session 22 — **VS-1 CLOS** : sérialisation du World save/load, double audit PASS, verdict humain PASS) · 2026-07-23 (session 20 — **P3-M7 CLOS** : buffers device-local + réduction du raster d'ombre 4×→~1× ; double audit PASS, verdict visuel PASS incl. soleil bas ; A+B ~15,3 → ~8,0 ms ≈ ×2) · 2026-07-23 (session 19 — **P3-M6 CLOS** : slots persistants dirty-trackés + cull d'ombre GPU ; double audit PASS, verdict visuel PASS ; voir « Point de reprise ») · 2026-07-14 (session 14 — **vérifs humaines de la Phase 2 soldées** : banc M4 PASS with concerns [perf → P3-M1], précision M3 PASS, hot reload M1 PASS) · 2026-07-13 (session 13 — **PHASE 2 CLOSE** — frustum culling + montée en charge : 10 000 entités cullées à 10 000 km, 0 alloc/frame, en NativeAOT ; double audit signe la clôture) · **Machines de dev** : macOS (Apple M3, MoltenVK) + Windows 11 (RTX 5070 Ti, Vulkan 1.3 core) · **Cibles** : Windows / Linux / macOS
 
 ## Vision
 
@@ -320,7 +320,45 @@ Spec : [2026-07-25-vs2-spawn-runtime-newtonian-gravity-design.md](plans/2026-07-
 > physique) : **[BACKLOG.md](BACKLOG.md)** — chaque item dit *ce qui casse sans lui* et *à quelle échelle il devient
 > obligatoire*.
 
-> ### ▶️ PROCHAIN — **Cap moteur** (réorientation S25) : jalon **MP-0 — fondations d'autorité**
+> ### ✅ **MP-0a CLOS (S26)** — headless split : la simulation tourne sans GPU
+> Spec : **[plans/2026-08-13-mp0a-headless-split-design.md](plans/2026-08-13-mp0a-headless-split-design.md)**
+> (approuvée **4,15/5** après 2 tours ; v1 notée 2,85 « Major Gaps » — le finding fatal était que la spec avait cité
+> un *commentaire* au lieu du code exécutable). Double audit **PASS-with-concerns ×2** (`engine-architect` 4,2/5),
+> **aucun 🔴**, tous les 🟠 appliqués. Détail : [archive/board-session26-MP0a.md](../.absolute-human/archive/board-session26-MP0a.md).
+>
+> **MP-0 est DÉCOMPOSÉ en 4 sous-jalons** (décision humaine S26) : ils ne partagent ni fichiers ni risques, et un
+> double audit portant sur 4 sous-systèmes hétérogènes ne vaudrait rien. **L'ordre exécuté inverse celui du backlog**,
+> qui classait par sévérité : le coût du split est **strictement croissant** avec la taille d'`Engine`, alors que les
+> deux 🔴 identité ne sont pas cassés aujourd'hui et ne le deviennent **qu'au moment du partitionnement**.
+>
+> **Livré** : `Agapanthe.Engine` réduit à `{Core, World}` · nouveau **`Agapanthe.Engine.Render`** (RenderContext,
+> IRenderSystem, `RenderSystemScheduler`, FrameOrchestrator, UiRenderSystem, DebugOverlaySystem) · **`SimulationHost`**
+> (monde + schedule + bracket de mesure, ne nomme aucun type de rendu) · **`samples/HeadlessSim`** NativeAOT, 1,68 Mo,
+> 0 B/frame, **snapshot JIT == AOT** (`7c889fec`) · **6 gates d'architecture** automatisés · `AggregateBoundsSystem` et
+> `_sceneBounds` **supprimés** (écrits chaque frame, lus par personne depuis P3-M5 — un commentaire périmé les avait
+> fait survivre 11 sessions).
+>
+> **Ce que le jalon a démontré empiriquement** : le gate d'architecture **statique** (lit le `.csproj`) et le gate de
+> **closure d'assemblies** ne sont pas redondants. Mutation : ré-ajouter `ProjectReference Rendering` **sans utiliser
+> aucun type** → statique FAIL, closure VERT (le compilateur élide la référence inutilisée). Sans le statique,
+> l'échec serait survenu au commit *suivant* et aurait été imputé au mauvais changement.
+>
+> **Gates** : **491 tests** (3 runs) · 0 warning · **HDR `12638edd` et UI `03421357` inchangés** · 0 leak
+> (233 resources) · 0 validation · AOT PASS · closure `Agapanthe.Engine` = `{Core, World}`.
+>
+> **Dette / décisions au dossier** : 🟠 `CurrentTick.FrameIndex` post-incrément (préservé bit-pour-bit, à trancher en
+> MP-0c) · 🟠 deux relâchements de gel déclarés et testés (`_frozen` dédoublé) · 🟡 `Camera` reste dans `Rendering` ·
+> 🟡 renommage `Engine.Render` → `Engine.Presentation` et `FrameIndex` → `TickIndex` non faits (le second appartient
+> à MP-0c, qui redéfinira ce qu'est un index de tick).
+>
+> ### ▶️ PROCHAIN — **MP-0b / MP-0c / MP-0d** (specs à écrire, une par sous-jalon)
+> **MP-0b identité** (🔴 `GlobalId` 64 bits partitionné + clé de contact physique ; entièrement contenu dans `World`,
+> non affecté par le split — et `RenderStageNeutralityTests` lui offre un harnais de régression gratuit) ·
+> **MP-0c autorité du temps** (accumulator ; ⚠️ **invalide les baselines de capture**, c'est un échange de modèle de
+> déterminisme, pas une dette à solder) · **MP-0d input → commandes horodatées** (le split a créé le seam : le type
+> commande + la file vivent dans `Engine`, l'échantillonnage reste dans l'application).
+>
+> ### Contexte — **Cap moteur** (réorientation S25)
 > **Vertical Slice CLOSE dans son intention** : VS-1 (S22) · VS-2 (S23) · VS-3 (S24) ont prouvé l'intégration
 > `input → spawn → physique → règle → save/load`. **VS-4 (HUD) et VS-5 (audio) sont EN PAUSE** (décision humaine S25).
 >

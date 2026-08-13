@@ -11,21 +11,20 @@ Dernière mise à jour : 2026-08-11 (session 25 — **UI-1 livré** : texte à l
 
 ---
 
-## 0. Dette immédiate (ouverte par le jalon courant)
+## 0. Dette immédiate
 
-Détail et justification : `AVANCEMENT.md` § P3-M1 et board de session 14.
+> **Nettoyée session 26.** Cette section datait de la session 14 et gardait en 🔴 deux items soldés depuis P3-M2 —
+> le *scheduler de systèmes* (livré : `SystemScheduler` + `FrameOrchestrator`) et *`ShadowFit.UpstreamExtent` dérivé
+> des bounds globales* (livré : dérivé des casters). Une section « dette immédiate » dont les urgences sont réglées
+> depuis des mois cesse d'être lue. La dette courante fait foi dans `CLAUDE.md` § Dette persistante.
 
 - 🔴 **Validation Linux / macOS** (P3-M0). AOT et SPIR-V hors-ligne sont **prouvés Windows uniquement** ; le titre
   « fondations cross-platform » est une hypothèse tant qu'un vrai Linux n'a pas tourné. *Bloqué : pas de machine.*
-- 🔴 **Scheduler de systèmes.** L'ordre de frame (`PropagateTransforms → AggregateBounds → ComputeLightViewProj →
-  CollectRenderLists`) vit dans une closure du Sandbox. Toute autre application le recréera de travers. *Mord : dès
-  la deuxième app, et dès la physique.*
-- 🔴 **`ShadowFit.UpstreamExtent` dérivé des bounds globales.** Une entité qui bouge à 10 000 km fait vibrer la plage
-  de profondeur de la shadow map de tout le monde. *Mord : dès la physique.* Correctif : le dériver de la liste de
-  casters (désormais serrée par le wedge).
 - 🟠 **`SortKey` sans profondeur** → toute transparence future sera fausse (pas de tri arrière-vers-avant).
 - 🟠 **Plafond 16 bits** mesh/matériau dans la clé de tri : limite dure documentée, à faire échouer bruyamment au spawn
   plutôt qu'à dégrader le batching en silence.
+- 🟠 **Pas de lifetime / rest-cull des corps runtime** (VS-2) : le spawner de la démo fait croître les entités sans
+  borne — visible à l'œil depuis UI-2, les barres rouges du graphe d'allocation sont les frames de spawn.
 - 🟡 **Crash au shutdown GLFW/Silk.NET** reproductible (`AGAPANTHE_UNLOAD_TEST=20`, ~2 runs/10, *après* le rapport
   propre) — upstream, gate CI keyé sur la ligne de rapport et non sur l'exit code.
 
@@ -375,9 +374,22 @@ monde de bout en bout ». Tant qu'il n'a pas tourné, l'intégration des sous-sy
 contenu, 5 scènes, 4 cadrages caméra, les rigs de lumière, l'input, le save/load et le gameplay. **La couche « engine »
 n'existe pas encore : elle est dans le Sandbox.**
 
-### MP-0 — Fondations d'autorité *(le prochain jalon ; décisions quasi irréversibles)*
+### MP-0 — Fondations d'autorité *(DÉCOMPOSÉ en 4 sous-jalons, session 26)*
 
-Tout ici coûte **peu maintenant** et est **catastrophique à rétrofitter**.
+Tout ici coûte **peu maintenant** et est **catastrophique à rétrofitter**. Les 4 points ne partagent ni fichiers ni
+risques et leur argument « irréversible » est très inégal → **décomposition** (décision humaine S26), un sous-jalon
+à la fois avec feu vert entre chacun.
+
+**L'ordre d'exécution N'EST PAS la numérotation ci-dessous**, qui classe par *sévérité*. Le split headless est passé
+premier parce que son coût est **strictement croissant** avec la taille d'`Engine`, alors que les deux 🔴 identité ne
+sont **pas cassés aujourd'hui** : la clé de contact est correcte tant que les ids restent denses, et ne devient
+fausse **qu'au moment du partitionnement** — bug et correctif arrivent ensemble, rien ne se dégrade à attendre.
+
+**✅ MP-0a — split headless (session 26, CLOS)** : spec `plans/2026-08-13-mp0a-headless-split-design.md` (approuvée
+4,15/5 après 2 tours). `Agapanthe.Engine` ne référence plus que `{Core, World}` ; nouveau `Agapanthe.Engine.Render`
+(RenderContext, IRenderSystem, RenderSystemScheduler, FrameOrchestrator, UiRenderSystem, DebugOverlaySystem) ;
+`SimulationHost` extrait ; **`samples/HeadlessSim`** simule en NativeAOT sans GPU (snapshot JIT == AOT). 6 gates
+d'architecture automatisés. **Restent MP-0b/c/d.**
 
 1. 🔴 **Identité d'entité globale.** `GlobalId` est un **compteur local** (`_nextGlobalId = 1` par `GameWorld`) → deux
    serveurs allouent tous deux 1, 2, 3… (**collision**), et VS-1 restaure ce compteur → deux shards sauvegardés sont
@@ -387,9 +399,7 @@ Tout ici coûte **peu maintenant** et est **catastrophique à rétrofitter**.
    (commentaire du code : *« Assumes GlobalId < 2^32 »*). Couplé au point 1 : si on partitionne l'ID, deux entités de
    shards différents deviennent **silencieusement la même paire de collision**. *Fix* : garder l'ordre déterministe
    `(minGid, maxGid)` mais sur **deux clés parallèles** au lieu d'un packing 32+32 (reste 0-alloc et déterministe).
-3. 🟠 **Split headless.** `Agapanthe.Engine` référence aujourd'hui **`Rendering` ET `Graphics`** → un serveur dédié
-   embarquerait Vulkan. Il faut une simulation qui tourne **sans GPU**. (`Agapanthe.World` est déjà GPU-free : la moitié
-   du chemin est faite.)
+3. ~~🟠 **Split headless.**~~ ✅ **LIVRÉ (MP-0a, S26)** — voir ci-dessus.
 4. 🟠 **Input → commandes horodatées.** Aujourd'hui l'input **mute directement** (`Key.B` → spawn immédiat). Le netcode
    exige des commandes **envoyables / bufferisables / rejouables**. Règle *aussi* l'absence d'abstraction d'input
    (aujourd'hui : `Silk.NET.Input.Key` brut dans un `switch` du Sandbox).

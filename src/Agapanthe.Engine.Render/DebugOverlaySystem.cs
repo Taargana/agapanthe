@@ -4,7 +4,8 @@ using Agapanthe.Core;
 using Agapanthe.Rendering;
 using Agapanthe.Ui;
 
-namespace Agapanthe.Engine;
+namespace Agapanthe.Engine.Render;
+
 
 /// <summary>
 /// The engine's debug overlay: frame time, per-frame managed allocation, draw counts, and two graphs (UI-2).
@@ -46,32 +47,37 @@ public sealed class DebugOverlaySystem : ISystem
     private readonly FontAsset _font;
     private readonly Renderer _renderer;
     private readonly RenderList _renderList;
-    private readonly FrameOrchestrator _orchestrator;
+    private readonly FrameStats _stats;
     private readonly float[] _graphScratch;
 
     public DebugOverlaySystem(
-        UiDrawList drawList, FontAsset font, Renderer renderer, RenderList renderList, FrameOrchestrator orchestrator)
+        UiDrawList drawList, FontAsset font, Renderer renderer, RenderList renderList, FrameStats stats)
     {
         ArgumentNullException.ThrowIfNull(drawList);
         ArgumentNullException.ThrowIfNull(font);
         ArgumentNullException.ThrowIfNull(renderer);
         ArgumentNullException.ThrowIfNull(renderList);
-        ArgumentNullException.ThrowIfNull(orchestrator);
+        ArgumentNullException.ThrowIfNull(stats);
 
         _drawList = drawList;
         _font = font;
         _renderer = renderer;
         _renderList = renderList;
-        _orchestrator = orchestrator;
+        _stats = stats;
         // Sized from the HISTORY, not from a pixel width: the two happen to be compatible today (300 >= 240), but
         // raising FrameStats.DefaultCapacity would then silently truncate the graph. Allocated ONCE — a per-frame
         // stackalloc of this size would be a per-frame memset, and this system exists to keep per-frame cost honest.
-        _graphScratch = new float[orchestrator.Stats.FrameTimeMs.Capacity];
+        _graphScratch = new float[stats.FrameTimeMs.Capacity];
     }
 
-    /// <summary>The metrics history. Owned by the orchestrator (which records it every frame whether or not this
-    /// overlay exists), read here only to display it.</summary>
-    public FrameStats Stats => _orchestrator.Stats;
+    /// <summary>The metrics history. Owned by the SimulationHost (which records it every frame whether or not this
+    /// overlay exists), read here only to display it.
+    /// <para>
+    /// Taken as a <see cref="FrameStats"/> rather than as the concrete orchestrator (MP-0a audit): the data belongs
+    /// to the simulation half, and depending on the render-side type to reach it was what left this system
+    /// untestable in UI-2.
+    /// </para></summary>
+    public FrameStats Stats => _stats;
 
     /// <summary>Whether the overlay draws. Statistics keep being recorded either way — see <see cref="Execute"/>.</summary>
     public bool Visible { get; set; } = true;

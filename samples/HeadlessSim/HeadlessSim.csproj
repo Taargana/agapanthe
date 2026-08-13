@@ -1,0 +1,33 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- The seed of the dedicated server (MP-0a): a real executable that runs the simulation with NO window, NO
+       Vulkan device and NO Silk.NET anywhere in its closure. It is the milestone's headline artifact — the claim
+       "the same simulation code runs everywhere, only authority changes" stops being an argument about the build
+       graph and becomes a binary that runs.
+
+       It lives in samples/ rather than tools/ on purpose: tools/ is by convention never referenced by a shipped
+       project (that is what keeps shaderc and StbTrueTypeSharp out of the AOT closure), whereas this IS shipped
+       code in embryo.
+
+       Note what it does NOT reference: Rendering, Graphics, Platform. That is enforced, not merely intended:
+       EngineIsHeadlessTests.ProjectFile_ReferencesExactlyTheAllowedProjects asserts this file's ProjectReference
+       set is exactly {Core, World, Engine}. If a future change makes any of them necessary here, the headless
+       split has been lost. -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <!-- Phase 2 rule 1: publishes as NativeAOT, which also turns the trim/AOT analyzers on for the whole closure.
+         With no Silk.NET in that closure this app has none of the Sandbox's third-party suppressions — a headless
+         server is expected to be analyzer-clean outright. -->
+    <PublishAot>true</PublishAot>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\Agapanthe.Core\Agapanthe.Core.csproj" />
+    <ProjectReference Include="..\..\src\Agapanthe.World\Agapanthe.World.csproj" />
+    <ProjectReference Include="..\..\src\Agapanthe.Engine\Agapanthe.Engine.csproj" />
+  </ItemGroup>
+
+</Project>

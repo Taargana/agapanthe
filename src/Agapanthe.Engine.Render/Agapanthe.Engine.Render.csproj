@@ -1,0 +1,30 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- The RENDER half of the engine (MP-0a). Agapanthe.Rendering DRAWS things; this project decides WHEN and in
+       WHAT ORDER, and is the only project that sees a GameWorld and a Renderer together.
+
+       It exists so that Agapanthe.Engine — the simulation — can reference neither Rendering nor Graphics, which is
+       what makes a dedicated server buildable without Vulkan (backlog §4quater: "topology is a deployment choice,
+       never an architecture choice"). Everything GPU-bound that used to live in Engine lives here instead; the
+       split follows DEPENDENCIES, not the ISystem/IRenderSystem line (DebugOverlaySystem is an ISystem and belongs
+       here; UiRenderSystem is both). -->
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <!-- Phase 2 rule 1: trim/AOT analyzers at build time (permanent gate, see Agapanthe.Core.csproj). This lives in
+         each project file, NOT in Directory.Build.props — omitting it here would silently disable the analysers. -->
+    <IsAotCompatible>true</IsAotCompatible>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\Agapanthe.Core\Agapanthe.Core.csproj" />
+    <ProjectReference Include="..\Agapanthe.World\Agapanthe.World.csproj" />
+    <ProjectReference Include="..\Agapanthe.Engine\Agapanthe.Engine.csproj" />
+    <ProjectReference Include="..\Agapanthe.Rendering\Agapanthe.Rendering.csproj" />
+    <!-- Explicit, not merely transitive: the render context NAMES Graphics types (CommandList, FrameContext,
+         SwapchainTarget) in its public surface, so the dependency is real and is declared as such. -->
+    <ProjectReference Include="..\Agapanthe.Graphics\Agapanthe.Graphics.csproj" />
+  </ItemGroup>
+
+</Project>

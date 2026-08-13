@@ -14,11 +14,6 @@ public sealed class SchedulerTests
         public void Execute(in TickContext ctx) => log.Add(name);
     }
 
-    private sealed class RecordingRenderSystem(List<string> log, string name) : IRenderSystem
-    {
-        public void Render(in RenderContext ctx) => log.Add(name);
-    }
-
     [Fact]
     public void Stages_RunInDeclaredOrder()
     {
@@ -66,21 +61,6 @@ public sealed class SchedulerTests
     }
 
     [Fact]
-    public void Tick_RunsNoRenderSystem()
-    {
-        var log = new List<string>();
-        var scheduler = new SystemScheduler();
-        scheduler.Add(new RecordingRenderSystem(log, "render"));
-        scheduler.Add(Stage.Simulation, new RecordingSystem(log, "sim"));
-
-        // Tick() is what runs on EVERY frame, including the ones the renderer skips (resize, minimize). It must not
-        // drag the render systems with it — they need a command list that does not exist on a skipped frame.
-        scheduler.Tick(1f / 60f);
-
-        Assert.Equal(new[] { "sim" }, log);
-    }
-
-    [Fact]
     public void FrameIndex_AdvancesWithTicksOnly()
     {
         var scheduler = new SystemScheduler();
@@ -120,8 +100,6 @@ public sealed class SchedulerTests
         // Registering mid-run would mutate a stage's list while it is being iterated.
         Assert.Throws<InvalidOperationException>(
             () => scheduler.Add(Stage.Simulation, new RecordingSystem([], "late")));
-        Assert.Throws<InvalidOperationException>(
-            () => scheduler.Add(new RecordingRenderSystem([], "late")));
     }
 
     [Fact]
@@ -130,7 +108,8 @@ public sealed class SchedulerTests
         var scheduler = new SystemScheduler();
 
         // The two interfaces are disjoint on purpose: a render system receives GPU handles a simulation system must
-        // never be able to touch. Passing Stage.Render here is a category error, and it is caught as one.
+        // never be able to touch — since MP-0a they do not even live in the same assembly. Passing Stage.Render
+        // here is a category error, and it is caught as one.
         Assert.Throws<ArgumentException>(() => scheduler.Add(Stage.Render, new RecordingSystem([], "oops")));
     }
 
@@ -140,12 +119,12 @@ public sealed class SchedulerTests
         var scheduler = new SystemScheduler();
         scheduler.Add(Stage.Simulation, new RecordingSystem([], "a"));
         scheduler.Add(Stage.Simulation, new RecordingSystem([], "b"));
-        scheduler.Add(new RecordingRenderSystem([], "r"));
 
+        // Only the three TICK stages: render systems live on RenderSystemScheduler since MP-0a, and asking this
+        // scheduler about Stage.Render throws (covered by RenderBarrierTests).
         Assert.Equal(0, scheduler.CountIn(Stage.Input));
         Assert.Equal(2, scheduler.CountIn(Stage.Simulation));
         Assert.Equal(0, scheduler.CountIn(Stage.PostSimulation));
-        Assert.Equal(1, scheduler.CountIn(Stage.Render));
     }
 
     private sealed class LambdaSystem(Action<TickContext> body) : ISystem
