@@ -351,9 +351,26 @@ Spec : [2026-07-25-vs2-spawn-runtime-newtonian-gravity-design.md](plans/2026-07-
 > 🟡 renommage `Engine.Render` → `Engine.Presentation` et `FrameIndex` → `TickIndex` non faits (le second appartient
 > à MP-0c, qui redéfinira ce qu'est un index de tick).
 >
-> ### ⏸️ **MP-0b EN COURS (S26)** — identité d'entité : **brainstorm terminé, spec NON écrite**
-> Aucun code écrit. 4 décisions verrouillées par interview. Détail complet et point de reprise :
-> **[.absolute-human/board.md](../.absolute-human/board.md)** § REPRISE.
+> ### ⏸️ **MP-0b EN COURS (S26-27)** — identité d'entité : **spec ÉCRITE et APPROUVÉE (4,4/5), W1 non démarré**
+> Spec : **[plans/2026-08-13-mp0b-entity-identity-design.md](plans/2026-08-13-mp0b-entity-identity-design.md)**
+> (2 tours de revue scorée indépendante : tour 1 **4,0/5** APPROVED WITH FINDINGS / 12 findings appliqués, tour 2
+> **4,4/5** APPROVED / 3 findings appliqués). **Aucun code écrit, aucun fichier de production touché** — arrêt
+> demandé avant l'exécution de W1. Plan d'exécution W1 prêt à reprendre tel quel dans
+> **[.absolute-human/board.md](../.absolute-human/board.md)** § « Plan d'exécution W1 ». 4 décisions verrouillées
+> par interview (ci-dessous).
+>
+> **Ce que les deux tours de revue ont attrapé, et qui n'était pas dans le brainstorm** :
+> (1) la clé de contact est une clé d'**ORDRE**, pas d'identité de paire — `_pairKey` n'est écrit qu'en
+> `GameWorld.Physics.cs:333` et lu que par `Array.Sort` en `:347`, le contenu des paires voyage dans `_pairPacked` ;
+> le défaut réel est la **dépendance au bloc d'ids** (deux nœuds partant de blocs différents calculent des états
+> différents), pas une collision de paires · (2) la couverture AOT vient du **3ᵉ corps** de `AotRootingSmoke`
+> (`GameWorld.cs:583-588` → 3 paires), **pas** du pas à 2 corps `:570-575` : `Array.Sort` sort avant
+> `ArraySortHelper<,>` quand `length <= 1` · (3) le gate « hashes de capture inchangés » ne vaut que parce que la
+> scène de capture forme un **tas** (`Sandbox/Program.cs:2118-2132`, 35 largages) — sinon un hash identique ne
+> prouverait rien · (4) **`7c889fec…` est un MD5** : l'algorithme n'avait **jamais** été consigné, il a été retrouvé
+> par mesure — valeur complète **`7c889fec0df503fe8137ef6c28c7751a`** (1852 octets), reproduite à `HEAD` par
+> `dotnet run --project samples/HeadlessSim -c Debug -- --ticks 600 --bodies 8 --save <path>` +
+> `Get-FileHash -Algorithm MD5`. **Ne plus transporter que le préfixe.**
 >
 > **Décisions** : (1) **identité seule**, pas d'autorité — l'id nomme la **naissance**, jamais l'autorité courante ·
 > (2) l'id reste un **`u64` opaque, aucun découpage de bits figé dans le format** — *motivé par la cible meshing

@@ -1,17 +1,69 @@
 # Absolute-Work Board — Agapanthe Session 26 (MP-0b : identité d'entité)
 
-**Status**: 🟠 **BRAINSTORM TERMINÉ, spec NON écrite.** 4 décisions verrouillées par interview, confiance 100 %.
+**Status**: 🟢 **SPEC ÉCRITE ET APPROUVÉE (4,4/5, 2 tours).** 4 décisions verrouillées par interview, confiance 100 %.
 Aucun code écrit, aucun fichier de production touché. Dernier jalon clos et poussé : **MP-0a** (`93415f8`).
 
 ## ⏸️ REPRISE — où repartir
 
-**À faire au démarrage, dans l'ordre :**
-1. **Écrire la spec complète en anglais** → `docs/plans/2026-08-13-mp0b-entity-identity-design.md`, à partir des
-   décisions ci-dessous (patron : la spec MP-0a, `2026-08-13-mp0a-headless-split-design.md`).
-2. **Revue scorée** par un agent reviewer indépendant (générateur ≠ évaluateur, seuil **4,0/5**), findings appliqués.
-   *Rappel des deux tours de MP-0a : la v1 avait bâti son gate central sur un **commentaire** au lieu du code
-   exécutable. Exiger que chaque affirmation cite une **ligne exécutable**.*
-3. **`absolute-work` sur W1** (la clé de contact).
+1. ✅ **Spec écrite** → [`docs/plans/2026-08-13-mp0b-entity-identity-design.md`](../docs/plans/2026-08-13-mp0b-entity-identity-design.md).
+2. ✅ **Revue scorée** (reviewer indépendant, seuil 4,0/5) : tour 1 **4,0/5** APPROVED WITH FINDINGS, 12 findings
+   appliqués ; tour 2 **4,4/5** APPROVED, 3 findings restants appliqués. Ce que les deux tours ont attrapé, et qui
+   n'était pas dans le brainstorm :
+   - la clé de contact est une clé d'**ORDRE**, pas d'identité de paire (`_pairKey` n'est lu que par `Array.Sort`) —
+     le défaut est la **dépendance au bloc d'ids** entre nœuds, pas une collision de paires ;
+   - la couverture AOT venait de `GameWorld.cs:583-588` (3 corps → 3 paires), **pas** du pas à 2 corps `:570-575`
+     (`Array.Sort` sort avant `ArraySortHelper<,>` quand `length <= 1`) ;
+   - le gate « hashes inchangés » ne vaut que parce que la scène de capture forme un **tas** (`Program.cs:2118-2132`) ;
+   - `7c889fec…` est un **MD5** — jamais consigné, retrouvé par mesure : valeur complète
+     `7c889fec0df503fe8137ef6c28c7751a`, reproduite à `HEAD` par
+     `dotnet run --project samples/HeadlessSim -c Debug -- --ticks 600 --bodies 8 --save <path>` (1852 octets).
+3. ⏹️ **W1 NON DÉMARRÉ — arrêt demandé par l'humain avant toute écriture de code.**
+   `absolute-work` avait été lancé et était en **Phase 3 (DECOMPOSE & PLAN)** ; aucun fichier de production touché,
+   aucun test écrit. Reprendre au plan d'exécution ci-dessous.
+
+### État de l'arbre à la sauvegarde (2026-08-16)
+
+- **Rollback point** : `02c4909` (= `HEAD`, dernier commit poussé).
+- **Non commité** (commits sur demande explicite uniquement — rien n'a été commité) :
+  - `M .absolute-human/board.md` (ce fichier)
+  - `?? docs/plans/2026-08-13-mp0b-entity-identity-design.md` (la spec approuvée)
+- `dotnet build` / `dotnet test` **non relancés** depuis `02c4909` : l'arbre de code est intact, donc les 491 tests
+  et les gates de MP-0a valent toujours.
+
+### Faits établis pendant la session (ne pas les re-chercher)
+
+- **`InternalsVisibleTo("Agapanthe.Tests")` et `("AotComponentProbe")` existent déjà** (`GameWorld.cs:10-11`) →
+  `ContactPairKey` peut rester `internal` et être testé directement, **aucune surface publique à ajouter**.
+- **Le hash de snapshot `HeadlessSim` est un MD5** : valeur complète `7c889fec0df503fe8137ef6c28c7751a`
+  (1852 octets), reproduite à `HEAD` par
+  `dotnet run --project samples/HeadlessSim -c Debug -- --ticks 600 --bodies 8 --save <path>` puis
+  `Get-FileHash -Algorithm MD5`. **Jamais consigné avant cette session** — l'algorithme avait été perdu.
+- **`AotRootingSmoke` atteint `Array.Sort` avec 3 paires grâce au 3ᵉ corps** (`GameWorld.cs:583-588`), **pas** avec
+  le pas à 2 corps (`:570-575`) : `Array.Sort` sort avant `ArraySortHelper<,>` quand `length <= 1`.
+- **La scène de capture trie plusieurs paires** (spirale à angle d'or → tas, `Sandbox/Program.cs:2118-2132`,
+  35 largages) — c'est ce qui rend le gate « hashes inchangés » signifiant.
+
+## Plan d'exécution W1 (à reprendre tel quel)
+
+**Périmètre : la clé de contact, SEULE.** Ni plage d'ids (W2), ni snapshot v2 (W3).
+
+| # | Tâche | Taille | Dépend de |
+|---|---|---|---|
+| W1-1 | **Tests d'abord**, écrits contre l'expression de packing du `HEAD` : (a) collision — `key(1, 2³²+2) == key(2³²+1, 2³²+2)` aujourd'hui, doit cesser ; (b) les deux packings induisent des **permutations différentes** sur les 3 paires sparse `(2³²−1, 2³²)`, `(2³²−1, 2³²+1)`, `(2³², 2³²+1)` ; (c) ordre identique au packing actuel pour toutes les paires d'ids denses | S | — |
+| W1-2 | `ContactPairKey` : `internal readonly struct`, deux `ulong` (`Min`, `Max`), `IComparable<ContactPairKey>` lexicographique, fichier `src/Agapanthe.World/ContactPairKey.cs` | S | W1-1 |
+| W1-3 | Bascule `GameWorld.Physics.cs` : `_pairKey` `ulong[]` → `ContactPairKey[]` (`:38`), écriture (`:333`), `Array.Sort` inchangé dans sa forme (`:347`), `EnsurePairCapacity` (`:432-442`) | S | W1-2 |
+| W1-4 | Commentaire dans `AotRootingSmoke` : le 3ᵉ corps (`:583-588`) est ce qui donne `length > 1` et roote donc `ArraySortHelper<ContactPairKey, long>` sous l'ILC — le retirer supprime le rooting **en silence** | S | W1-3 |
+| W1-5 | Vérification : `dotnet test`, gate 0-alloc existant (`PhysicsTests.cs:204-227`), **les deux hashes de capture inchangés** | S | W1-4 |
+
+**Contrainte dure** : `Array.Sort<TKey,TValue>` doit passer par le **chemin générique contraint** (`IComparable<T>` sur
+le struct) — jamais une `Comparison<T>` ni une instance d'`IComparer<T>` (précédent P2-M2 : `Span.Sort(structComparer)`
+boxait le comparateur, ~88 B/appel).
+
+**Gate central de W1** : `12638edd` (HDR) et `03421357` (UI) **inchangés** — c'est la preuve que la nouvelle clé
+induit la même permutation tant que les ids sont denses. Protocole (ne pas omettre la dernière variable) :
+`AGAPANTHE_SCENE=planet-drop AGAPANTHE_MAX_FRAMES=420 AGAPANTHE_OVERLAY=0 AGAPANTHE_DROP_EVERY=12`, 1280×720, Debug.
+
+**Après W1** : feu vert humain requis avant W2 (plage d'allocation) puis W3 (snapshot v2).
 
 ## But
 
