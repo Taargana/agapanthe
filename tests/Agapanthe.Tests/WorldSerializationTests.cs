@@ -156,9 +156,10 @@ public sealed class WorldSerializationTests
     public void Load_RejectsOutOfRangeMaskBit()
     {
         var bytes = Save(BuildPopulatedWorld());
-        // Header is magic(4)+version(4)+count(4)+nextId(8)+entityCount(4) = 24 bytes; then the first entity's
-        // globalId(8); the presence mask is the u32 at offset 32. Set bit 31 → a component index beyond the count.
-        bytes[35] |= 0x80;
+        // Header (MP-0b W3, v2) is magic(4)+version(4)+count(4)+universeId(16)+nextId(8)+entityCount(4) = 40 bytes;
+        // then the first entity's globalId(8); the presence mask is the u32 at offset 48. Set bit 31 (its MSB, at
+        // offset 51) → a component index beyond the count.
+        bytes[51] |= 0x80;
         Assert.Throws<WorldSerializationException>(() => Load(bytes));
     }
 

@@ -16,9 +16,11 @@ namespace Agapanthe.World;
 /// </list>
 /// </summary>
 /// <remarks>
-/// Process-local: the <c>ulong</c> is a per-run monotonic counter, not a persisted key. Cross-process identity
-/// (serialization/streaming) is a separate future concern. <c>default(EntityRef)</c> (id 0) is the sentinel
-/// "no entity" — the id counter starts at 1.
+/// The <c>ulong</c> is allocated from this world's <see cref="GlobalIdRange"/> (MP-0b W2) and is meaningful only
+/// within a snapshot's declared <see cref="UniverseId"/> (MP-0b W3) — two worlds with different universes may
+/// reuse the same numeric value for unrelated entities, which is exactly why cross-universe loads are refused
+/// rather than silently merged. <c>default(EntityRef)</c> (id 0) is the sentinel "no entity" — no range may start
+/// there (<see cref="GlobalIdRange"/> rejects <c>Start == 0</c>).
 /// </remarks>
 public readonly struct EntityRef : IEquatable<EntityRef>
 {

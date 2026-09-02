@@ -35,7 +35,7 @@ public sealed partial class GameWorld
     private long[] _pCellZ = System.Array.Empty<long>();
     private int[] _cellNext = System.Array.Empty<int>();
     private readonly Dictionary<long, int> _cellHead = new();
-    private ulong[] _pairKey = System.Array.Empty<ulong>();
+    private ContactPairKey[] _pairKey = System.Array.Empty<ContactPairKey>();
     private long[] _pairPacked = System.Array.Empty<long>();
 
     // Positional-correction tunables (Baumgarte): leave a small overlap ("slop") uncorrected to avoid jitter, and
@@ -54,7 +54,7 @@ public sealed partial class GameWorld
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
         AssertOwnerThread();
-        var id = _nextGlobalId++;
+        var id = NextId();
         MaterialiseBody(id, in spec, velocity, inverseMass, restitution, radius);
         return new EntityRef(id);
     }
@@ -71,7 +71,7 @@ public sealed partial class GameWorld
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
         AssertOwnerThread();
-        var id = _nextGlobalId++;
+        var id = NextId();
         _pendingSpawn.Add(id);
         _commands.Add(new StructuralCommand
         {
@@ -103,7 +103,7 @@ public sealed partial class GameWorld
             new Velocity { Linear = velocity },
             new RigidBody { InverseMass = inverseMass, Restitution = restitution, Radius = radius },
             new InstanceSlot { Value = -1 }); // -1 = unassigned; the next structural rebuild sets it
-        _live[globalId] = entity;
+        RegisterLive(globalId, entity);
         _structuralDirty = true; // a new body is a new drawable → force a persistent rebuild (P3-M6)
     }
 
@@ -327,10 +327,9 @@ public sealed partial class GameWorld
                             }
 
                             EnsurePairCapacity(pairCount + 1);
-                            // Sort key: smaller GlobalId in the high bits, larger in the low bits → total order by
-                            // (min,max) GlobalId. Assumes GlobalId < 2^32 (holds for any run this milestone targets;
-                            // the id is a per-run counter from 1).
-                            _pairKey[pairCount] = (_pGid[j] << 32) | (uint)_pGid[k];
+                            // Sort key: total order by (min,max) GlobalId (MP-0b W1: ContactPairKey, no assumption
+                            // that GlobalId stays < 2^32 — see its doc comment for the packing this replaced).
+                            _pairKey[pairCount] = new ContactPairKey(_pGid[j], _pGid[k]);
                             _pairPacked[pairCount] = ((long)k << 32) | (uint)j;
                             pairCount++;
                         }

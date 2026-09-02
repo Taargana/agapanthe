@@ -1,6 +1,6 @@
 # Agapanthe — Plan complet & état d'avancement
 
-**Mis à jour** : 2026-08-13 (session 26 — **MP-0a CLOS** : headless split ; `Agapanthe.Engine` ne référence plus que `{Core, World}`, nouveau `Agapanthe.Engine.Render`, `SimulationHost` extrait, `samples/HeadlessSim` simule en NativeAOT **sans GPU** ; MP-0 décomposé en 4 sous-jalons ; double audit PASS-with-concerns ×2 [4,2/5], aucun 🔴 ; 491 tests, captures inchangées) · 2026-08-13 (session 25 — **UI-2 CLOS** : overlay debug in-view + profiler CPU ; `FrameStats`/`Sparkline`/`TextBuilder` + `DebugOverlaySystem`, le HUD `window.Title` et son hack de cession disparaissent, **gate 0-alloc visible en continu à l'écran**, bascule `F3` ; double audit PASS-with-concerns ×2 ; 468 tests, AOT PASS · **synchronization validation activée** et 3 hazards préexistants corrigés) · 2026-08-11 (session 25 — **UI-1 CLOS** : texte à l'écran ; FontCooker SDF hors-ligne + `.agfont` + `Agapanthe.Ui` GPU-free + passe UI ; double audit PASS-with-concerns ×2, verdict humain PASS ; 435 tests, AOT PASS) · 2026-08-03 (session 25 — **RÉORIENTATION cap « vrai engine »** [backlog §4quater] : artefact = le moteur, multijoueur serveur autoritaire, MP-0 = prochain jalon ; VS-4/VS-5 en pause · **brainstorm Texte & UI terminé**, spec `plans/2026-08-03-text-ui-design.md`, 3 jalons UI-1/2/3) · 2026-07-26 (session 24 — **VS-3 CLOS** : glu gameplay = défi d'atterrissage planétaire ; `QuerySurfaceContacts` + règle latchée `LandingChallengeRule` + scène `planet-challenge` (input→spawn→règle→save/resume) ; double audit PASS / PASS-with-concerns 4/5, verdict humain PASS ; 372 tests, AOT PASS) · 2026-07-26 (session 23 — **VS-2 CLOS** : spawn runtime différé (`SpawnBodyDeferred`) + gravité newtonienne (attracteur radial + sol radial) ; double audit PASS-with-concerns [4,5/5], verdict visuel PASS ; scène `planet-drop`, 355 tests, AOT PASS) · 2026-07-24 (session 22 — **VS-1 CLOS** : sérialisation du World save/load, double audit PASS, verdict humain PASS) · 2026-07-23 (session 20 — **P3-M7 CLOS** : buffers device-local + réduction du raster d'ombre 4×→~1× ; double audit PASS, verdict visuel PASS incl. soleil bas ; A+B ~15,3 → ~8,0 ms ≈ ×2) · 2026-07-23 (session 19 — **P3-M6 CLOS** : slots persistants dirty-trackés + cull d'ombre GPU ; double audit PASS, verdict visuel PASS ; voir « Point de reprise ») · 2026-07-14 (session 14 — **vérifs humaines de la Phase 2 soldées** : banc M4 PASS with concerns [perf → P3-M1], précision M3 PASS, hot reload M1 PASS) · 2026-07-13 (session 13 — **PHASE 2 CLOSE** — frustum culling + montée en charge : 10 000 entités cullées à 10 000 km, 0 alloc/frame, en NativeAOT ; double audit signe la clôture) · **Machines de dev** : macOS (Apple M3, MoltenVK) + Windows 11 (RTX 5070 Ti, Vulkan 1.3 core) · **Cibles** : Windows / Linux / macOS
+**Mis à jour** : 2026-09-02 (session 27 — **MP-0b CLOS** : identité d'entité — `ContactPairKey` 128 bits (clé de contact) + `GlobalIdRange` (plage d'allocation) + `UniverseId`/snapshot v2 (identité par fichier, 5 cas de réconciliation testés) ; double audit W4 a trouvé et corrigé un 🔴 (perte silencieuse d'entité sur collision d'id au `Load`) ; hash `HeadlessSim` re-épinglé `7e8dc68f…` (v2, 1868 o), désormais gardé par un test et non plus seulement par la prose ; verdict humain PASS ; 530 tests, captures inchangées) · 2026-08-13 (session 26 — **MP-0a CLOS** : headless split ; `Agapanthe.Engine` ne référence plus que `{Core, World}`, nouveau `Agapanthe.Engine.Render`, `SimulationHost` extrait, `samples/HeadlessSim` simule en NativeAOT **sans GPU** ; MP-0 décomposé en 4 sous-jalons ; double audit PASS-with-concerns ×2 [4,2/5], aucun 🔴 ; 491 tests, captures inchangées) · 2026-08-13 (session 25 — **UI-2 CLOS** : overlay debug in-view + profiler CPU ; `FrameStats`/`Sparkline`/`TextBuilder` + `DebugOverlaySystem`, le HUD `window.Title` et son hack de cession disparaissent, **gate 0-alloc visible en continu à l'écran**, bascule `F3` ; double audit PASS-with-concerns ×2 ; 468 tests, AOT PASS · **synchronization validation activée** et 3 hazards préexistants corrigés) · 2026-08-11 (session 25 — **UI-1 CLOS** : texte à l'écran ; FontCooker SDF hors-ligne + `.agfont` + `Agapanthe.Ui` GPU-free + passe UI ; double audit PASS-with-concerns ×2, verdict humain PASS ; 435 tests, AOT PASS) · 2026-08-03 (session 25 — **RÉORIENTATION cap « vrai engine »** [backlog §4quater] : artefact = le moteur, multijoueur serveur autoritaire, MP-0 = prochain jalon ; VS-4/VS-5 en pause · **brainstorm Texte & UI terminé**, spec `plans/2026-08-03-text-ui-design.md`, 3 jalons UI-1/2/3) · 2026-07-26 (session 24 — **VS-3 CLOS** : glu gameplay = défi d'atterrissage planétaire ; `QuerySurfaceContacts` + règle latchée `LandingChallengeRule` + scène `planet-challenge` (input→spawn→règle→save/resume) ; double audit PASS / PASS-with-concerns 4/5, verdict humain PASS ; 372 tests, AOT PASS) · 2026-07-26 (session 23 — **VS-2 CLOS** : spawn runtime différé (`SpawnBodyDeferred`) + gravité newtonienne (attracteur radial + sol radial) ; double audit PASS-with-concerns [4,5/5], verdict visuel PASS ; scène `planet-drop`, 355 tests, AOT PASS) · 2026-07-24 (session 22 — **VS-1 CLOS** : sérialisation du World save/load, double audit PASS, verdict humain PASS) · 2026-07-23 (session 20 — **P3-M7 CLOS** : buffers device-local + réduction du raster d'ombre 4×→~1× ; double audit PASS, verdict visuel PASS incl. soleil bas ; A+B ~15,3 → ~8,0 ms ≈ ×2) · 2026-07-23 (session 19 — **P3-M6 CLOS** : slots persistants dirty-trackés + cull d'ombre GPU ; double audit PASS, verdict visuel PASS ; voir « Point de reprise ») · 2026-07-14 (session 14 — **vérifs humaines de la Phase 2 soldées** : banc M4 PASS with concerns [perf → P3-M1], précision M3 PASS, hot reload M1 PASS) · 2026-07-13 (session 13 — **PHASE 2 CLOSE** — frustum culling + montée en charge : 10 000 entités cullées à 10 000 km, 0 alloc/frame, en NativeAOT ; double audit signe la clôture) · **Machines de dev** : macOS (Apple M3, MoltenVK) + Windows 11 (RTX 5070 Ti, Vulkan 1.3 core) · **Cibles** : Windows / Linux / macOS
 
 ## Vision
 
@@ -351,13 +351,13 @@ Spec : [2026-07-25-vs2-spawn-runtime-newtonian-gravity-design.md](plans/2026-07-
 > 🟡 renommage `Engine.Render` → `Engine.Presentation` et `FrameIndex` → `TickIndex` non faits (le second appartient
 > à MP-0c, qui redéfinira ce qu'est un index de tick).
 >
-> ### ⏸️ **MP-0b EN COURS (S26-27)** — identité d'entité : **spec ÉCRITE et APPROUVÉE (4,4/5), W1 non démarré**
+> ### ✅ **MP-0b CLOS (S26-27)** — identité d'entité
 > Spec : **[plans/2026-08-13-mp0b-entity-identity-design.md](plans/2026-08-13-mp0b-entity-identity-design.md)**
-> (2 tours de revue scorée indépendante : tour 1 **4,0/5** APPROVED WITH FINDINGS / 12 findings appliqués, tour 2
-> **4,4/5** APPROVED / 3 findings appliqués). **Aucun code écrit, aucun fichier de production touché** — arrêt
-> demandé avant l'exécution de W1. Plan d'exécution W1 prêt à reprendre tel quel dans
-> **[.absolute-human/board.md](../.absolute-human/board.md)** § « Plan d'exécution W1 ». 4 décisions verrouillées
-> par interview (ci-dessous).
+> (2 tours de revue scorée : tour 1 4,0/5 APPROVED WITH FINDINGS / 12 findings appliqués, tour 2 **4,4/5** APPROVED
+> / 3 findings appliqués). **4 vagues** (W1 clé de contact seule → W2 plage d'allocation → W3 snapshot v2 + identité
+> d'univers → W4 double audit + corrections), chacune gardant les hashes de capture `12638edd`/`03421357`
+> **inchangés** jusqu'à la fin. Détail complet par vague : archive
+> **[.absolute-human/board.md](../.absolute-human/board.md)** (« Résultat W1/W2/W3/W4 »).
 >
 > **Ce que les deux tours de revue ont attrapé, et qui n'était pas dans le brainstorm** :
 > (1) la clé de contact est une clé d'**ORDRE**, pas d'identité de paire — `_pairKey` n'est écrit qu'en
@@ -367,32 +367,52 @@ Spec : [2026-07-25-vs2-spawn-runtime-newtonian-gravity-design.md](plans/2026-07-
 > (`GameWorld.cs:583-588` → 3 paires), **pas** du pas à 2 corps `:570-575` : `Array.Sort` sort avant
 > `ArraySortHelper<,>` quand `length <= 1` · (3) le gate « hashes de capture inchangés » ne vaut que parce que la
 > scène de capture forme un **tas** (`Sandbox/Program.cs:2118-2132`, 35 largages) — sinon un hash identique ne
-> prouverait rien · (4) **`7c889fec…` est un MD5** : l'algorithme n'avait **jamais** été consigné, il a été retrouvé
-> par mesure — valeur complète **`7c889fec0df503fe8137ef6c28c7751a`** (1852 octets), reproduite à `HEAD` par
-> `dotnet run --project samples/HeadlessSim -c Debug -- --ticks 600 --bodies 8 --save <path>` +
-> `Get-FileHash -Algorithm MD5`. **Ne plus transporter que le préfixe.**
+> prouverait rien · (4) **`7c889fec…` était un MD5** : l'algorithme n'avait **jamais** été consigné avant cette
+> session, retrouvé par mesure.
 >
-> **Décisions** : (1) **identité seule**, pas d'autorité — l'id nomme la **naissance**, jamais l'autorité courante ·
-> (2) l'id reste un **`u64` opaque, aucun découpage de bits figé dans le format** — *motivé par la cible meshing
-> dynamique* : les nœuds y sont éphémères, un préfixe 16 bits s'épuiserait en ~4,5 jours à 100 nœuds recyclés
-> toutes les 10 min ; les bits hauts deviennent un **bloc de bail** et **solo = compteur depuis 1, bit-pour-bit ce
-> que fait le moteur aujourd'hui** · (3) l'état de l'allocateur **reste dans l'en-tête mais devient surchargeable au
-> `Load`** (un nœud reçoit des entités qu'il n'a pas créées et ne doit pas avancer son allocateur en les acceptant) ·
-> (4) l'en-tête gagne une **identité d'univers**, format **v1 → v2**, v1 refusé — c'est *ça* qui referme le 🔴
-> « deux mondes inmergeables », pas le partitionnement des ids.
+> **Livré** : **`ContactPairKey`** (`src/Agapanthe.World/ContactPairKey.cs`, W1) — struct 128 bits comparable
+> (`IComparable<T>` contraint, jamais boxé), remplace le packing 32 bits `(gid_j<<32)|(uint)gid_k` qui collisionnait
+> silencieusement dès que les ids cessaient d'être denses · **`GlobalIdRange`** (`GlobalIdRange.cs`, W2) — plage
+> `[Start, EndExclusive)`, `Default = [1, ulong.MaxValue)` bit-pour-bit l'ancien compteur ; les 7 anciens sites
+> `_nextGlobalId++` collapsent dans un seul `NextId()` qui lève bruyamment à l'épuisement · **`UniverseId`**
+> (`UniverseId.cs`, W3) — identité **par snapshot** (deux `ulong`, pas un `Guid` — mixed-endian), défaut vide et
+> **non aléatoire** (un `Guid` tiré aurait cassé le déterminisme JIT-vs-AOT). **Snapshot v2** : en-tête 40 octets
+> (`magic|version=2|componentCount|universeId(16)|nextGlobalId|entityCount`), v1 refusé avec message dédié,
+> réconciliation d'univers à **5 cas** testés (both `None` → inchangé · snapshot set/monde `None` → adopte · monde
+> set/snapshot `None` → garde · both set égaux → confirmé · both set différents → **throw**, `WorldSerializationException`).
+> `Load` gagne **`SnapshotAllocatorPolicy`** (`AdoptFromHeader` | `KeepMine`) — **PAS** un `GlobalIdRange?`
+> (corrigé en W4, voir audit ci-dessous) — et retourne **`SnapshotLoadResult(UniverseOutcome, EntityCount)`**.
 >
-> **À valider à la revue** : identité d'univers par défaut **vide et non aléatoire** (un `Guid` tiré à la création
-> casserait le déterminisme des snapshots et le hash JIT-vs-AOT de `HeadlessSim`) · allocation = **plage
-> `[start, end)`**, pas une interface · clé de contact = struct 128 bits comparable, **0-alloc à prouver**.
+> **Double audit W4 (`csharp-lowlevel` + `engine-architect`) — le 🔴 qu'il a attrapé** : la première version de
+> `Load` acceptait un `allocatorOverride: GlobalIdRange?` qui pouvait recouvrir des ids déjà chargés depuis le
+> snapshot ; les trois points de matérialisation d'entité écrivaient `_live[globalId] = entity` par **indexeur**,
+> donc un spawn ultérieur réémettant le même id **écrasait silencieusement** l'entrée — l'entité chargée restait
+> vivante et simulée mais devenait indespawnable et disparaissait du `Save` suivant (qui itère `_live`). Corrigé :
+> les trois sites passent par un nouveau `RegisterLive` (`TryAdd` + exception nommée sur collision), testé par un
+> repro exact de l'auditeur. L'architecte a aussi trouvé que `allocatorOverride` conflait « ignore l'en-tête » et
+> « voici une nouvelle plage » — un bail (fixé à la construction) redevenait réassignable par un paramètre de
+> désérialisation ; remplacé par l'énumération sans donnée ci-dessus, le bail redevient un fait à un seul point de
+> vérité. PASS-with-concerns 4,1/5 côté architecture (aucun 🔴), dette explicitement notée : aucun hôte de
+> production ne nomme encore d'univers (Sandbox/HeadlessSim chargent en `UniverseId.None`) — le **mécanisme** du
+> 🔴 « deux mondes inmergeables » est fermé, son **usage** attend le premier hôte réel (`Agapanthe.App`/MP-0c-d).
 >
-> **4 vagues** : W1 la clé de contact **seule** (captures inchangées + le test qui échoue aujourd'hui : `1` et
-> `2³²+1` ne doivent pas former la même paire) · W2 la plage d'allocation · W3 le snapshot v2 · W4 tail.
+> **`HeadlessSim` re-épinglé** : format v2 → **`7e8dc68f5a25914c84677a7a53ad3a58`**, **1868 octets** (v1 :
+> `7c889fec0df503fe8137ef6c28c7751a`, 1852 octets — delta +16 = `UniverseId`). Vérifié **JIT == NativeAOT**
+> (publish `win-x64` self-contained) avant ET après les corrections W4 — inchangé, l'API pure ne touche pas le
+> format sur fil. Reproduit par
+> `dotnet run --project samples/HeadlessSim -c Debug -- --ticks 600 --bodies 8 --save <path>` puis
+> `Get-FileHash -Algorithm MD5`. **Gate désormais dans un test** (`HeadlessSimSnapshotFormatTests.cs`), plus
+> seulement dans la prose — c'était le trou que la redécouverte de `7c889fec` en session 26 avait signalé.
 >
-> **Reprise** : écrire la spec anglaise → revue scorée (seuil 4,0/5) → `absolute-work` sur W1.
+> **Gates** : **530 tests** · 0 warning · **HDR `12638edd` et UI `03421357` inchangés** (4 vérifications, une par
+> vague) · 0 leak (233 ressources) · 0 validation · AOT PASS. Double audit PASS-with-concerns (architecture
+> 4,1/5) / 🔴 trouvé et corrigé (bas niveau) → **verdict humain PASS**.
+>
+> **Dette laissée** : 🟠 aucun hôte de production ne stampe encore d'`UniverseId` (attend `Agapanthe.App`) · 🟡 pas
+> de renouvellement de bail avant épuisement de `GlobalIdRange` (additif, pas de refonte requise) · fusion de deux
+> univers rendue **détectable**, pas **implémentée** (hors scope assumé).
 >
 > ### ▶️ ENSUITE — **MP-0c / MP-0d** (specs à écrire, une par sous-jalon)
-> **MP-0b identité** (🔴 `GlobalId` 64 bits partitionné + clé de contact physique ; entièrement contenu dans `World`,
-> non affecté par le split — et `RenderStageNeutralityTests` lui offre un harnais de régression gratuit) ·
 > **MP-0c autorité du temps** (accumulator ; ⚠️ **invalide les baselines de capture**, c'est un échange de modèle de
 > déterminisme, pas une dette à solder) · **MP-0d input → commandes horodatées** (le split a créé le seam : le type
 > commande + la file vivent dans `Engine`, l'échantillonnage reste dans l'application).

@@ -63,9 +63,11 @@ public readonly struct RenderItem
     /// <para>
     /// The tie-break is <b>load-bearing, not decorative</b> (both M4 audits): entities sharing a (material, mesh)
     /// pair have equal high 32 bits, and an equal-key run would otherwise be ordered by Arch's archetype/chunk
-    /// iteration — which is not deterministic. Baking a stable per-entity value (its <c>GlobalId</c>/<c>RenderOrder</c>)
-    /// into the low bits makes the total order deterministic; a "stable sort" alone would not, because the pre-sort
-    /// input order is itself non-deterministic. The tie-break keeps its <b>full 32 bits</b> — never narrow it.
+    /// iteration — which is not deterministic. Baking a stable per-entity value (<c>RenderOrder</c>) into the low
+    /// bits makes the total order deterministic; a "stable sort" alone would not, because the pre-sort input order
+    /// is itself non-deterministic. <c>GlobalId</c> is NOT a candidate here (MP-0b): it is a 64-bit id allocated
+    /// from a host-supplied range, not a dense counter, and truncating it into 32 bits would silently alias
+    /// entities from different id blocks. The tie-break keeps its <b>full 32 bits</b> — never narrow it.
     /// </para>
     /// <para>
     /// <b>Hard limit:</b> material and mesh indices must fit in 16 bits (65 535 each) — the engine's documented

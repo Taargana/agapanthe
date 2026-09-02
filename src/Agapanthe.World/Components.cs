@@ -13,9 +13,10 @@ namespace Agapanthe.World;
 
 /// <summary>Stable identity, unique across processes (future streaming/serialization). Assigned at spawn.
 /// <para>
-/// <b>Downstream packing depends on this staying a dense per-run counter (&lt; 2³²).</b> The physics contact-pair
-/// sort key packs two <c>GlobalId</c>s into a <c>ulong</c> (P3-M3, <c>GameWorld.Physics</c>). The day streaming makes
-/// ids process-unique (sparse / high-bit-tagged), that packing — and any other 32-bit assumption — must be revisited.
+/// The physics contact-pair sort key (P3-M3, <c>GameWorld.Physics</c>) orders pairs of <c>GlobalId</c>s via
+/// <see cref="ContactPairKey"/> (MP-0b W1) — a 128-bit comparable, no assumption that ids stay a dense per-run
+/// counter or fit in 32 bits. Still a local counter from 1 today (MP-0b W2 makes the allocation range host-supplied,
+/// which is what actually makes ids sparse across processes).
 /// </para></summary>
 [Component]
 [StructLayout(LayoutKind.Sequential)]

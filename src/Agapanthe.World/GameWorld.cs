@@ -73,10 +73,18 @@ public sealed partial class GameWorld : IDisposable
     // immediate _world.Create/Destroy/Add/Remove below are safe. All collections are reused (Clear keeps capacity):
     // in steady churn the entity count is stable, so the flush allocates nothing.
 
-    // The durable identity that PRECEDES creation: assigned at enqueue, it is what an EntityRef carries. Starts at 1
-    // so that default(EntityRef) (id 0) is the "no entity" sentinel. Decoupled from RenderOrder (which is a sort key,
-    // not an identity, and need not be unique).
-    private ulong _nextGlobalId = 1;
+    // The block of ids this world may issue (MP-0b W2). Mutable only through Load's allocatorOverride (MP-0b W3,
+    // decision 3: a receiving node must not advance its own allocator by accepting entities it did not create) —
+    // never reassigned outside that one path.
+    private GlobalIdRange _idRange;
+
+    // The identity of this world's universe (MP-0b W3). None until a host names one or a loaded snapshot does; see
+    // UniverseId's doc comment for why None is never randomly assigned.
+    private UniverseId _universeId;
+
+    // The durable identity that PRECEDES creation: assigned at enqueue, it is what an EntityRef carries. Decoupled
+    // from RenderOrder (which is a sort key, not an identity, and need not be unique).
+    private ulong _nextGlobalId;
 
     // GlobalId -> real Arch Entity, for every FLUSHED, live entity. The public EntityRef surface resolves through
     // this; the hot-path systems never touch it (they follow Parent.Value, a raw Entity, directly).
@@ -169,11 +177,47 @@ public sealed partial class GameWorld : IDisposable
         }
     }
 
-    public GameWorld()
+    /// <summary>Builds a world that issues ids from <see cref="GlobalIdRange.Default"/> — bit-for-bit what the bare
+    /// per-run counter did before MP-0b W2. The 75 pre-existing call sites use this overload unchanged.</summary>
+    public GameWorld() : this(GlobalIdRange.Default)
     {
+    }
+
+    /// <summary>Builds a world that issues ids from <paramref name="range"/> (MP-0b W2) — a host partitioning ids
+    /// across processes hands each world a disjoint block. <see cref="NextId"/> throws once the block is spent.
+    /// <paramref name="universe"/> (MP-0b W3) names this world's universe up front — a host that already knows its
+    /// identity (rather than adopting one from a loaded snapshot) sets it here; defaults to
+    /// <see cref="UniverseId.None"/>, the honest "unidentified" state.</summary>
+    public GameWorld(GlobalIdRange range, UniverseId universe = default)
+    {
+        // default(GlobalIdRange) (Start == EndExclusive == 0) bypasses the struct's own validating constructor
+        // (audit MP-0b W3 finding) — catch it here rather than let NextId() misreport it as "exhausted" later.
+        if (range.Start == 0)
+        {
+            throw new ArgumentException(
+                "GlobalIdRange is uninitialized (Start == 0) — did you mean GlobalIdRange.Default?", nameof(range));
+        }
+
+        _idRange = range;
+        _nextGlobalId = range.Start;
+        _universeId = universe;
         // Root all component T[] chunk arrays for the ILC BEFORE the first entity is created (spec §6.1).
         ComponentRegistry.RootAll();
         _world = ArchWorld.Create();
+    }
+
+    // The single allocation point (MP-0b W2, collapses the seven former `_nextGlobalId++` sites): throws loudly on
+    // exhaustion rather than silently wrapping onto ids this world does not own. `_nextGlobalId == EndExclusive` is
+    // the legal representation of "exhausted" (Save can still write it); issuing FROM there is what throws.
+    private ulong NextId()
+    {
+        if (_nextGlobalId >= _idRange.EndExclusive)
+        {
+            throw new InvalidOperationException(
+                $"GlobalId range [{_idRange.Start}, {_idRange.EndExclusive}) is exhausted — no more ids can be issued.");
+        }
+
+        return _nextGlobalId++;
     }
 
     /// <summary>
@@ -188,7 +232,7 @@ public sealed partial class GameWorld : IDisposable
         AssertOwnerThread();
         // Immediate on purpose: SpawnImported is the LOAD-time seam (the Sandbox fills the scene before the loop),
         // never called from inside a running system's query. Runtime spawning goes through the deferred Spawn* API.
-        var entity = MaterialiseDrawable(_nextGlobalId++, in spec);
+        var entity = MaterialiseDrawable(NextId(), in spec);
 
         // castsShadow: false tags the entity NoShadowCast (P3-M5) — it RECEIVES shadows but never casts. Meant for a
         // large flat receiver (the ground plane), whose self-shadowing was a real acne source and whose bounds
@@ -212,7 +256,7 @@ public sealed partial class GameWorld : IDisposable
             new Bounds { Center = spec.BoundsCenter, Radius = spec.BoundsRadius },
             new RenderOrder { Value = spec.Order },
             new InstanceSlot { Value = -1 }); // -1 = unassigned; the next structural rebuild sets it
-        _live[globalId] = entity;
+        RegisterLive(globalId, entity);
         _structuralDirty = true; // a new drawable changes the candidate set → force a persistent rebuild (P3-M6)
         return entity;
     }
@@ -226,7 +270,7 @@ public sealed partial class GameWorld : IDisposable
             local,
             new WorldTransform { Value = Matrix4x4.Identity },
             new WorldPosition { Value = Double3.Zero });
-        _live[globalId] = entity;
+        RegisterLive(globalId, entity);
         return entity;
     }
 
@@ -242,7 +286,7 @@ public sealed partial class GameWorld : IDisposable
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
         AssertOwnerThread();
-        var id = _nextGlobalId++;
+        var id = NextId();
         _pendingSpawn.Add(id);
         _commands.Add(new StructuralCommand
         {
@@ -260,7 +304,7 @@ public sealed partial class GameWorld : IDisposable
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
         AssertOwnerThread();
-        var id = _nextGlobalId++;
+        var id = NextId();
         _pendingSpawn.Add(id);
         _commands.Add(new StructuralCommand { Kind = CommandKind.SpawnDrawable, Target = id, Imported = spec });
         return new EntityRef(id);
@@ -580,6 +624,13 @@ public sealed partial class GameWorld : IDisposable
         // immediate SpawnBody + uniform step above. The attractor is at the origin; the bodies sit ~600 m out, and
         // surfaceRadius = 700 puts them BELOW the radial surface (dist - r < R) so the smoke also EXECUTES the radial
         // ground path — push-out, normal-velocity reflect, rest-clamp — under NativeAOT, not merely roots it (audit m3).
+        //
+        // MP-0b W1 (audit finding, not obvious from the comment above): the ILC roots Array.Sort<ContactPairKey,
+        // long>'s generic ArraySortHelper<,> instantiation STATICALLY, from the call site in ResolveBodyContacts,
+        // independent of how many pairs exist at runtime — so this 3rd body is not what keeps that code compiled.
+        // What it buys is EXECUTION coverage: with pairCount <= 1 (the 2-body step at line 575 above), Array.Sort
+        // short-circuits before ever calling ArraySortHelper, so the probe would compile the sort path under AOT
+        // without ever actually running it. Removing this spawn would silently drop that coverage, not the rooting.
         SpawnBodyDeferred(in bodySpec, new Vector3(0, 1, 0), inverseMass: 1f, restitution: 0.3f, radius: 1f);
         FlushStructuralChanges();
         // Zero uniform gravity WITH the attractor (the Newtonian branch ignores Gravity — a non-zero one here would trip
@@ -967,14 +1018,14 @@ public sealed partial class GameWorld : IDisposable
 
     internal EntityRef SpawnLocalRoot(Double3 position, Quaternion rotation, float scale)
     {
-        var id = _nextGlobalId++;
+        var id = NextId();
         MaterialiseNode(id, new LocalTransform { Position = position, Rotation = rotation, Scale = scale });
         return new EntityRef(id);
     }
 
     internal EntityRef SpawnLocalChild(EntityRef parent, Double3 position, Quaternion rotation, float scale)
     {
-        var id = _nextGlobalId++;
+        var id = NextId();
         MaterialiseNode(id, new LocalTransform { Position = position, Rotation = rotation, Scale = scale });
         LinkParent(id, parent.Id);
         return new EntityRef(id);
@@ -994,6 +1045,22 @@ public sealed partial class GameWorld : IDisposable
             $"EntityRef {entity.Id} does not name a live entity (never spawned, not yet flushed, or despawned).");
     }
 
+    // Registers a freshly materialised entity under its GlobalId. TryAdd, not the indexer (audit MP-0b W3 finding):
+    // NextId() alone can never collide, but Load's allocatorOverride (decision 3) lets a host hand this world a
+    // range that overlaps ids it just loaded from a snapshot — the indexer would silently overwrite _live, leaving
+    // the earlier Arch entity alive and simulated but unreachable by any EntityRef and dropped from the next Save
+    // (which iterates _live). Fail loud instead: a collision here means the allocator/override handed out an id
+    // already in use, which is a configuration mistake to surface, not to paper over.
+    private void RegisterLive(ulong globalId, Entity entity)
+    {
+        if (!_live.TryAdd(globalId, entity))
+        {
+            throw new InvalidOperationException(
+                $"GlobalId {globalId} collides with an existing live entity — the id allocator (or a Load " +
+                "allocatorOverride) handed out an id already in use.");
+        }
+    }
+
     /// <summary>The entity's full world matrix, relative to <paramref name="origin"/> (absolute by default).</summary>
     internal Matrix4x4 GetWorld(EntityRef entity, Double3 origin = default)
     {
@@ -1010,6 +1077,16 @@ public sealed partial class GameWorld : IDisposable
     /// <summary>Test hook (VS-1): the next identity the world will assign. Lets a round-trip test assert the counter
     /// is restored by <see cref="Load"/> without exposing the ECS.</summary>
     internal ulong NextGlobalIdForTest => _nextGlobalId;
+
+    /// <summary>This world's universe identity (MP-0b W3) — <see cref="UniverseId.None"/> until a host names one
+    /// at construction or a <see cref="Load(Stream)"/> adopts one from a snapshot. Public (audit finding): a host
+    /// that just adopted an identity via <see cref="Load(Stream)"/> needs to be able to read, log, or route on it —
+    /// a caller-only <see cref="SnapshotLoadResult"/> flag says an adoption HAPPENED but not what was adopted.</summary>
+    public UniverseId Universe => _universeId;
+
+    /// <summary>This world's declared id-allocation range (MP-0b W2) — public for the same reason as
+    /// <see cref="Universe"/>: a host needs to read back what it is currently allowed to allocate.</summary>
+    public GlobalIdRange IdRange => _idRange;
 
     /// <summary>The number of flushed, live entities (VS-1). Public: a save/load caller or HUD reports it, and a
     /// round-trip test asserts it survives serialization — without touching the ECS.</summary>

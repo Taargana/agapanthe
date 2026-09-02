@@ -30,8 +30,13 @@ public sealed partial class GameWorld
 {
     // "AGWD" (Agapanthe World Data) as little-endian bytes, followed by a format version. A version bump is REQUIRED
     // if ComponentRegistry.All is ever reordered (the mask is positional): see the append-only invariant below.
+    //
+    // v2 (MP-0b W3) inserts UniverseId(16) between componentCount and nextGlobalId:
+    //   magic(4) "AGWD" | version(4)=2 | componentCount(4) | universeId(16) | nextGlobalId(8) | entityCount(4)
+    //   = 40-byte header. v1 had no universeId and is refused outright — no automatic upgrade (a v1 file predates
+    //   universe identity, so there is nothing honest to fill the field with).
     private static ReadOnlySpan<byte> SerializationMagic => "AGWD"u8;
-    private const uint SerializationVersion = 1;
+    private const uint SerializationVersion = 2;
 
     // Components excluded from / specially handled by the format, resolved once from the registry order so a
     // (version-bumped) reorder carries them along instead of drifting against a magic number.
@@ -58,8 +63,9 @@ public sealed partial class GameWorld
 
     /// <summary>
     /// Writes the whole world to <paramref name="stream"/> as a deterministic binary snapshot (VS-1): every entity,
-    /// every component, plus the identity counter — GPU-free, no Arch type crosses the boundary. Structural changes
-    /// are flushed first so the snapshot is a settled world (no half-spawned entity, no pending command). Entities are
+    /// every component, plus the universe identity and the id counter (MP-0b W3) — GPU-free, no Arch type crosses
+    /// the boundary. Structural changes are flushed first so the snapshot is a settled world (no half-spawned
+    /// entity, no pending command). Entities are
     /// written sorted by <see cref="GlobalId"/> and components in registry-index order, so the bytes are stable:
     /// two saves of the same world are identical, and <c>Save(Load(bytes)) == bytes</c>.
     /// </summary>
@@ -94,6 +100,8 @@ public sealed partial class GameWorld
         stream.Write(SerializationMagic);
         WriteU32(stream, SerializationVersion);
         WriteU32(stream, (uint)componentCount);
+        WriteU64(stream, _universeId.High);
+        WriteU64(stream, _universeId.Low);
         WriteU64(stream, _nextGlobalId);
         WriteU32(stream, (uint)entities.Count);
 
@@ -125,19 +133,46 @@ public sealed partial class GameWorld
     }
 
     /// <summary>
+    /// Restores a world snapshot written by <see cref="Save"/> into this <b>fresh</b> world (VS-1), reconciling
+    /// <see cref="UniverseId"/> and adopting the header's id counter (MP-0b W3). Equivalent to
+    /// <c>Load(stream, SnapshotAllocatorPolicy.AdoptFromHeader)</c>; see the overload for the full contract.
+    /// </summary>
+    public SnapshotLoadResult Load(Stream stream) => Load(stream, SnapshotAllocatorPolicy.AdoptFromHeader);
+
+    /// <summary>
     /// Restores a world snapshot written by <see cref="Save"/> into this <b>fresh</b> world (VS-1). The world must be
-    /// empty and settled; loading into a populated world throws (merge is out of scope). The identity counter is
-    /// restored from the header and NEVER bumped by the entities created here — each is created with its serialized
-    /// <see cref="GlobalId"/>. Parent links are rewired by GlobalId in a second pass (the format stores the parent's
-    /// id, not an Arch Entity). A malformed stream (bad magic/version/count, truncation, out-of-range mask) throws
-    /// <see cref="WorldSerializationException"/> rather than corrupting state or reading out of bounds.
+    /// empty and settled; loading into a populated world throws (merge is out of scope). Parent links are rewired by
+    /// GlobalId in a second pass (the format stores the parent's id, not an Arch Entity). A malformed stream (bad
+    /// magic/unsupported version/count, truncation, out-of-range mask) throws <see cref="WorldSerializationException"/>
+    /// rather than corrupting state or reading out of bounds. Returns a <see cref="SnapshotLoadResult"/> describing
+    /// what happened — the caller decides whether that is worth a log line, this layer takes no logging dependency.
+    /// <para><b>Universe reconciliation</b> (MP-0b W3), against this world's <see cref="UniverseId"/> as set at
+    /// construction: both <see cref="UniverseId.None"/> → stays unidentified · snapshot set, world <c>None</c> →
+    /// world <b>adopts</b> the snapshot's identity · snapshot <c>None</c>, world set → world <b>keeps</b> its
+    /// identity (this is how an existing solo world gets named) · both set and equal → confirmed · both set and
+    /// <b>different</b> → <see cref="WorldSerializationException"/> (the entity ids in this file mean something
+    /// else). No mutation happens until every header field is validated — a rejected Load leaves this world exactly
+    /// as it was before the call.</para>
+    /// <para><b>Id allocator</b> (MP-0b W3, <paramref name="policy"/>): <see cref="SnapshotAllocatorPolicy.AdoptFromHeader"/>
+    /// (VS-1's original behaviour) adopts the header's counter, but only if it falls within this world's declared
+    /// <see cref="GlobalIdRange"/> — <c>Start &lt;= nextGlobalId &lt;= EndExclusive</c>, inclusive at the top (a
+    /// world that consumed its whole block holds <c>EndExclusive</c>; issuing FROM there is what throws, not
+    /// sitting at it). Outside that range throws: a world with a declared range loading a foreign allocator state
+    /// is exactly the mistake <see cref="SnapshotAllocatorPolicy.KeepMine"/> exists for — the header's counter is
+    /// ignored entirely and this world keeps allocating from its own construction-time range (decision 3): a node
+    /// that accepts entities it did not create must not advance ITS OWN allocator by accepting them.</para>
+    /// <para>Entities keep their serialized <see cref="GlobalId"/> regardless of whether it falls inside this
+    /// world's range — deliberately unvalidated (decision 1): a node legitimately holds entities it did not
+    /// allocate. A collision between a loaded id and one this world later issues itself throws
+    /// <see cref="InvalidOperationException"/> at the point of the later spawn (see <c>RegisterLive</c>) rather than
+    /// silently orphaning the earlier entity.</para>
     /// <para>The caller's contract (Option 1 seam): the same GPU assets must be (re)loaded in the same order BEFORE
     /// Load, so the serialized <see cref="MeshHandle"/>/<see cref="MaterialHandle"/> values still resolve.</para>
     /// <para>On a malformed stream the exception may be thrown after some entities were already created: this world is
     /// then partially populated and must be discarded (disposed), not reused — Load is all-or-nothing by contract, not
     /// by rollback.</para>
     /// </summary>
-    public void Load(Stream stream)
+    public SnapshotLoadResult Load(Stream stream, SnapshotAllocatorPolicy policy)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
         AssertOwnerThread();
@@ -160,7 +195,10 @@ public sealed partial class GameWorld
         if (version != SerializationVersion)
         {
             throw new WorldSerializationException(
-                $"Unsupported snapshot version {version} (this build reads version {SerializationVersion}).");
+                version == 1
+                    ? "Snapshot is format v1, which predates universe identity (MP-0b W3). There is no automatic " +
+                      "upgrade — resave it with this build first, from wherever it was last loadable."
+                    : $"Unsupported snapshot version {version} (this build reads version {SerializationVersion}).");
         }
 
         var componentCount = ReadU32(stream);
@@ -171,7 +209,55 @@ public sealed partial class GameWorld
                 "(the component set changed without a version bump).");
         }
 
-        _nextGlobalId = ReadU64(stream);
+        // Read the rest of the header before mutating anything (audit MP-0b W3 finding): a rejected Load must not
+        // leave this world half-renamed to the snapshot's universe. Both fields are read off the wire in their
+        // fixed on-disk order regardless of validation outcome; only the ASSIGNMENTS below are deferred.
+        var snapshotUniverse = new UniverseId(ReadU64(stream), ReadU64(stream));
+        var headerNextGlobalId = ReadU64(stream);
+
+        if (snapshotUniverse != UniverseId.None && _universeId != UniverseId.None && snapshotUniverse != _universeId)
+        {
+            throw new WorldSerializationException(
+                $"Snapshot universe {snapshotUniverse} does not match this world's universe {_universeId} — " +
+                "the entity ids in this file mean something else.");
+        }
+
+        if (policy == SnapshotAllocatorPolicy.AdoptFromHeader &&
+            (headerNextGlobalId < _idRange.Start || headerNextGlobalId > _idRange.EndExclusive))
+        {
+            throw new WorldSerializationException(
+                $"Snapshot's next-id counter {headerNextGlobalId} falls outside this world's declared range " +
+                $"[{_idRange.Start}, {_idRange.EndExclusive}) — pass SnapshotAllocatorPolicy.KeepMine to receive " +
+                "this snapshot's entities without adopting its allocator state.");
+        }
+
+        // Every validation above has passed — only NOW does the call start changing state.
+        UniverseOutcome outcome;
+        if (_universeId == UniverseId.None)
+        {
+            outcome = snapshotUniverse == UniverseId.None ? UniverseOutcome.StayedUnidentified : UniverseOutcome.Adopted;
+        }
+        else
+        {
+            outcome = snapshotUniverse == UniverseId.None ? UniverseOutcome.Kept : UniverseOutcome.Confirmed;
+        }
+
+        if (_universeId == UniverseId.None && snapshotUniverse != UniverseId.None)
+        {
+            _universeId = snapshotUniverse; // adopt: this is how an existing solo world gets named
+        }
+
+        if (policy == SnapshotAllocatorPolicy.KeepMine)
+        {
+            // Receiving-node case (decision 3): the header's counter is ignored, this world keeps allocating from
+            // wherever its own construction-time range already had it — Load requires a fresh, unspawned world, so
+            // _idRange/_nextGlobalId are untouched here, exactly as the constructor left them.
+        }
+        else
+        {
+            _nextGlobalId = headerNextGlobalId;
+        }
+
         var entityCount = ReadU32(stream);
 
         // Pass 2 work list: (childGlobalId, parentGlobalId), wired after every entity exists.
@@ -235,6 +321,8 @@ public sealed partial class GameWorld
 
         // A load is a wholesale structural change: the first CollectRenderLists must rebuild the persistent slots.
         _structuralDirty = true;
+
+        return new SnapshotLoadResult(outcome, (int)entityCount);
     }
 
     /// <summary>
