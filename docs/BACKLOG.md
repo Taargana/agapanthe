@@ -7,7 +7,8 @@
 > Règle de tri : chaque item dit **ce qui casse sans lui** et **à quelle échelle il devient obligatoire**. Un item sans
 > déclencheur clair est une idée, pas du backlog.
 
-Dernière mise à jour : 2026-08-11 (session 25 — **UI-1 livré** : texte à l'écran, §4quater à jour) · 2026-08-03 (session 25 — **réorientation cap « vrai engine »**, §4quater créée) · 2026-07-26 (session 24 — **VS-3 livrée** : glu gameplay = défi d'atterrissage planétaire ; §4ter à jour) · 2026-07-26 (session 23 — **VS-2 livrée** : spawn runtime différé + gravité newtonienne ; §4ter à jour) · 2026-07-24 (session 21 — échelle planétaire 1/2 uniforme, **§4ter Vertical Slice** formalisée).
+Dernière mise à jour : 2026-09-02 (session 27 — **MP-0b livré** : identité d'entité, `GlobalIdRange` +
+`ContactPairKey` + `UniverseId`/snapshot v2 ; §4quater à jour, items 1-2 cochés) · 2026-08-11 (session 25 — **UI-1 livré** : texte à l'écran, §4quater à jour) · 2026-08-03 (session 25 — **réorientation cap « vrai engine »**, §4quater créée) · 2026-07-26 (session 24 — **VS-3 livrée** : glu gameplay = défi d'atterrissage planétaire ; §4ter à jour) · 2026-07-26 (session 23 — **VS-2 livrée** : spawn runtime différé + gravité newtonienne ; §4ter à jour) · 2026-07-24 (session 21 — échelle planétaire 1/2 uniforme, **§4ter Vertical Slice** formalisée).
 
 ---
 
@@ -389,16 +390,20 @@ fausse **qu'au moment du partitionnement** — bug et correctif arrivent ensembl
 4,15/5 après 2 tours). `Agapanthe.Engine` ne référence plus que `{Core, World}` ; nouveau `Agapanthe.Engine.Render`
 (RenderContext, IRenderSystem, RenderSystemScheduler, FrameOrchestrator, UiRenderSystem, DebugOverlaySystem) ;
 `SimulationHost` extrait ; **`samples/HeadlessSim`** simule en NativeAOT sans GPU (snapshot JIT == AOT). 6 gates
-d'architecture automatisés. **Restent MP-0b/c/d.**
+d'architecture automatisés.
 
-1. 🔴 **Identité d'entité globale.** `GlobalId` est un **compteur local** (`_nextGlobalId = 1` par `GameWorld`) → deux
-   serveurs allouent tous deux 1, 2, 3… (**collision**), et VS-1 restaure ce compteur → deux shards sauvegardés sont
-   **inmergeables**. *Décision proposée* : **64 bits partitionné** (poids fort = id d'autorité/shard, solo = shard 0,
-   zéro coordination, marche hors-ligne ; poids faible = compteur local).
-2. 🔴 **Clé de contact physique 64-bit-safe.** `_pairKey = (_pGid[j] << 32) | (uint)_pGid[k]` **écrase l'ID sur 32 bits**
-   (commentaire du code : *« Assumes GlobalId < 2^32 »*). Couplé au point 1 : si on partitionne l'ID, deux entités de
-   shards différents deviennent **silencieusement la même paire de collision**. *Fix* : garder l'ordre déterministe
-   `(minGid, maxGid)` mais sur **deux clés parallèles** au lieu d'un packing 32+32 (reste 0-alloc et déterministe).
+**✅ MP-0b — identité d'entité (session 27, CLOS)** : spec `plans/2026-08-13-mp0b-entity-identity-design.md`
+(approuvée 4,4/5 après 2 tours). `GlobalId` reste un `u64` opaque mais alloué depuis une `GlobalIdRange`
+`[Start, EndExclusive)` fournie par l'hôte (défaut bit-pour-bit l'ancien compteur) ; la clé de contact physique
+devient `ContactPairKey`, une struct 128 bits comparable, plus aucune troncature 32 bits. Snapshot **v2** :
+`UniverseId` par fichier, réconciliée à 5 cas au `Load`, v1 refusé. Double audit a trouvé et fait corriger un 🔴
+(perte silencieuse d'entité sur collision d'id) avant tout commit. **Restent MP-0c/d.**
+
+1. ~~🔴 **Identité d'entité globale.**~~ ✅ **LIVRÉ (MP-0b, S27)** — `GlobalIdRange` remplace le compteur par monde ;
+   un hôte partitionnant les ids entre process leur donne des plages disjointes. La fusion de deux univers reste
+   **détectable** (`UniverseId`) mais pas implémentée — hors scope assumé de MP-0b.
+2. ~~🔴 **Clé de contact physique 64-bit-safe.**~~ ✅ **LIVRÉ (MP-0b, S27)** — `ContactPairKey` (deux `ulong`
+   `Min`/`Max`, `IComparable<T>` contraint, jamais boxé) remplace le packing 32+32.
 3. ~~🟠 **Split headless.**~~ ✅ **LIVRÉ (MP-0a, S26)** — voir ci-dessus.
 4. 🟠 **Input → commandes horodatées.** Aujourd'hui l'input **mute directement** (`Key.B` → spawn immédiat). Le netcode
    exige des commandes **envoyables / bufferisables / rejouables**. Règle *aussi* l'absence d'abstraction d'input
