@@ -7,7 +7,9 @@
 > Règle de tri : chaque item dit **ce qui casse sans lui** et **à quelle échelle il devient obligatoire**. Un item sans
 > déclencheur clair est une idée, pas du backlog.
 
-Dernière mise à jour : 2026-09-05 (session 28 — **MP-0c livré** : autorité du temps, `FixedTimestepAccumulator`
+Dernière mise à jour : 2026-09-06 (session 29 — **MP-0d spec approuvée 4,30/5** : input → commandes horodatées,
+`plans/2026-09-06-mp0d-input-commands-design.md` ; §4quater item 4 annoté, exécution `absolute-work` en attente) ·
+2026-09-05 (session 28 — **MP-0c livré** : autorité du temps, `FixedTimestepAccumulator`
 découple le tick de sim de la frame ; `FrameIndex`→`TickIndex` + off-by-one `CurrentTick` corrigé ; §4quater item 5
 coché ; §Physique accumulateur ✅ / interpolation reste 🟡) · 2026-09-02 (session 27 — **MP-0b livré** : identité
 d'entité, `GlobalIdRange` + `ContactPairKey` + `UniverseId`/snapshot v2 ; §4quater à jour, items 1-2 cochés) ·
@@ -429,7 +431,10 @@ pas fixe = source de vérité unique (prérequis netcode) — voir §Physique.
 3. ~~🟠 **Split headless.**~~ ✅ **LIVRÉ (MP-0a, S26)** — voir ci-dessus.
 4. 🟠 **Input → commandes horodatées.** Aujourd'hui l'input **mute directement** (`Key.B` → spawn immédiat). Le netcode
    exige des commandes **envoyables / bufferisables / rejouables**. Règle *aussi* l'absence d'abstraction d'input
-   (aujourd'hui : `Silk.NET.Input.Key` brut dans un `switch` du Sandbox).
+   (aujourd'hui : `Silk.NET.Input.Key` brut dans un `switch` du Sandbox). **→ SPEC APPROUVÉE 4,30/5 (S28-29),
+   exécution en attente** : `plans/2026-09-06-mp0d-input-commands-design.md` (`SimCommand` blittable + `InputSnapshot`
+   générique + `SimCommandQueue` + `InputMap` déclaratif + phase input dans `SimulationHost.Tick` +
+   `GameWorld.SetBodyVelocity`). Différé : `OriginatorId`, format fil, replay/log, ownership routing, flood.
 5. ~~🟠 **Autorité du temps.**~~ ✅ **LIVRÉ (MP-0c, S28)** — `FixedTimestepAccumulator` découple le tick de simulation
    de la frame de rendu. L'**interpolation** reste 🟡 (jalon dédié, voir §Physique).
 

@@ -447,9 +447,31 @@ Spec : [2026-07-25-vs2-spawn-runtime-newtonian-gravity-design.md](plans/2026-07-
 > littéraux `1f/60f` indépendants → le rendre une donnée de config de la simulation est un prérequis netcode** · `bool
 > HasTicked` (désambiguïse `TickIndex == 0`) · ancrage thread dans `Tick`.
 >
-> ### ▶️ ENSUITE — **MP-0d** (spec à écrire)
-> **Input → commandes horodatées** (le split a créé le seam : le type commande + la file vivent dans `Engine`,
-> l'échantillonnage reste dans l'application).
+> ### ▶️ MP-0d — **SPEC APPROUVÉE (4,30/5), exécution en attente** (dernier sous-jalon de MP-0)
+> **Input → commandes horodatées.** Spec :
+> **[plans/2026-09-06-mp0d-input-commands-design.md](plans/2026-09-06-mp0d-input-commands-design.md)** (2 tours de
+> revue scorée `engine-architect` : v1 3,33 NEEDS WORK — toutes les citations exactes, 2 🔴 + 6 🟠 ; v2 4,30
+> APPROVED, R1-R4 repliés). Brainstorm S28, 10 décisions verrouillées.
+>
+> **Ce que le jalon livre** : `Agapanthe.Engine` gagne `SimCommand` (blittable, `[StructLayout(Sequential)]`,
+> `long TargetTick` + `byte Kind` opaque + `EntityRef Target` + **`Double3 Vector`** + `float Scalar` + `uint
+> Flags`, 56 o), `InputSnapshot` générique (`Held/Pressed/Released` + `[InlineArray(4)] float Axes`, 40 o),
+> `InputMap` déclaratif (`BindButton`/`BindAxisVector`), `SimCommandQueue` (FIFO-par-tick, `AssertOwnerThread`
+> qui **jette**), `InputTranslation.Emit`. `SimulationHost.Tick` gagne une phase input+commande **avant**
+> `_scheduler.Tick` : `SampleInput()` (callback app 1×/tick) → traduction déclarative → `Commands.DrainUpTo(tick,
+> ApplyCommand)`. L'accumulateur MP-0c est **inchangé**. `GameWorld.SetBodyVelocity(EntityRef, Vector3)` (1
+> méthode). Démo : scène Sandbox `AGAPANTHE_SCENE=drive` (entité pilotable WASD, corps gravité-zéro
+> vélocité-contrôlé — **non épinglée**) + **`HeadlessSim --drive`** (input scripté = le gate déterministe, nouveau
+> MD5). `Key.B` → `host.Commands.Enqueue` direct (porte `camera.Position`). Captures `12638edd`/`03421357`
+> **inchangées** (`planet-drop` n'exerce aucun input sous capture).
+>
+> **Différé (dette)** : `SimCommand.OriginatorId` / identité de peer · format fil des commandes (blittable
+> maintenant, test) · harness replay/log · routage d'ownership de `SimCommand.Target` · flood protection de la
+> file · rien de réseau. Détail : board `.absolute-human/board.md` + la spec.
+>
+> **Reprise** : lancer `absolute-work` sur les 4 vagues de la spec (W1 mécanisme Engine isolé → W2 câblage host +
+> `SetBodyVelocity` → W3 démo → W4 captures + double audit + tail), feu vert humain entre chaque, commit sur
+> demande.
 >
 > ### Contexte — **Cap moteur** (réorientation S25)
 > **Vertical Slice CLOSE dans son intention** : VS-1 (S22) · VS-2 (S23) · VS-3 (S24) ont prouvé l'intégration
