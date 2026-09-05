@@ -102,10 +102,11 @@ public sealed class RenderStageNeutralityTests
             scheduler.Tick(Dt);
             if (withRenderStage)
             {
-                // Exactly what FrameOrchestrator's render delegate builds (FrameOrchestrator.cs:84), including the
-                // post-increment FrameIndex. The three GPU handles are inert here: no test system dereferences them.
+                // Exactly what FrameOrchestrator's render delegate builds (FrameOrchestrator.cs:84): the LAST tick
+                // actually executed, Math.Max(0L, TickIndex - 1) (MP-0c off-by-one fix — SimulationHost.CurrentTick).
+                // The three GPU handles are inert here: no test system dereferences them.
                 renderScheduler.Render(
-                    new RenderContext(new TickContext(Dt, scheduler.FrameIndex), default, null!, default));
+                    new RenderContext(new TickContext(Dt, Math.Max(0L, scheduler.TickIndex - 1)), default, null!, default));
             }
         }
 
@@ -184,7 +185,7 @@ public sealed class RenderStageNeutralityTests
 
         public void Execute(in TickContext ctx)
         {
-            switch (ctx.FrameIndex)
+            switch (ctx.TickIndex)
             {
                 case 5:
                     var spec = new ImportedEntitySpec(

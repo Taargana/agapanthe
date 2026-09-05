@@ -31,6 +31,10 @@ public sealed class SimulationHost
     private bool _measurementOpen;
     private float _dt;
 
+    // Ticks since the current frame's BeginFrame; latched into LastFrameTickCount by EndFrame (MP-0c, audit arch F3),
+    // so LastFrameTickCount always describes the last COMPLETE frame — same lifecycle as LastFrameMs.
+    private int _frameTickCount;
+
     private SimulationHost(GameWorld world)
     {
         // The structural barrier the scheduler runs at the end of every stage IS the world's deferred-change flush
@@ -55,20 +59,36 @@ public sealed class SimulationHost
     /// <see cref="SystemScheduler.Add(Stage, ISystem)"/>: registration order is execution order, frozen at first tick.</summary>
     public void Add(Stage stage, ISystem system) => _scheduler.Add(stage, system);
 
-    /// <summary>Monotonic tick counter (see <see cref="SystemScheduler.FrameIndex"/>).</summary>
-    public long FrameIndex => _scheduler.FrameIndex;
+    /// <summary>Monotonic tick counter (see <see cref="SystemScheduler.TickIndex"/>).</summary>
+    public long TickIndex => _scheduler.TickIndex;
+
+    /// <summary>
+    /// How many <see cref="Tick"/> calls ran during the last COMPLETE frame — latched by <see cref="EndFrame"/>,
+    /// same lifecycle as <see cref="LastFrameMs"/> (audit arch F3). 1 in steady state and in capture mode;
+    /// <c>&gt; 1</c> means the frame fell behind and the fixed-step accumulator is catching up; 0 for a frame faster
+    /// than one fixed step (the nominal case above the tick rate — the render pass then repeats the previous tick).
+    /// The debug overlay is not wired to it (its constructor takes a <c>FrameStats</c>, not this host — deferred to
+    /// UI-3), but the Sandbox bench line logs it so a catch-up burst is visible rather than silent (MP-0c F8).
+    /// </summary>
+    public int LastFrameTickCount { get; private set; }
 
     /// <summary>
     /// The tick data a render pass should be given for the frame just simulated.
     /// <para>
-    /// <b>Its <see cref="TickContext.FrameIndex"/> is post-increment</b>, and that is deliberate preservation, not a
-    /// design choice: <see cref="SystemScheduler.Tick"/> advances the counter after the stages, so a render system
-    /// has always seen <c>N+1</c> where the tick systems of the same frame saw <c>N</c>. MP-0a changes no behaviour,
-    /// so the off-by-one travels with the code. Whether it SHOULD hold belongs to the time-authority sub-milestone,
-    /// which will revisit what a tick index means. Pinned by <c>RenderBarrierTests</c>.
+    /// <b>Its <see cref="TickContext.TickIndex"/> is the LAST tick actually executed</b> (MP-0c). Before this,
+    /// <see cref="SystemScheduler.Tick"/> advanced the counter after the stages and this property read it raw, so a
+    /// render system saw <c>N+1</c> where the tick systems of the same frame saw <c>N</c> — an off-by-one MP-0a
+    /// deliberately preserved and reserved for the time-authority sub-milestone to settle. It is settled here:
+    /// <c>Math.Max(0L, TickIndex - 1)</c> reports the index of the tick whose results the render pass is about to
+    /// draw, and the clamp covers the boundary before any tick has run (both readings collapse to <c>0</c> there —
+    /// disambiguating them is deferred to MP-0d, which will timestamp commands against this counter). Under the
+    /// fixed-step accumulator N ticks may run in one frame; this is then the index of the Nth. <b>It is no longer
+    /// strictly increasing per frame</b> (audit arch F5): a frame faster than one fixed step — the nominal case
+    /// above the tick rate — runs zero ticks, and <see cref="CurrentTick"/> then repeats the previous index with the
+    /// previous <c>_dt</c>. Pinned by <c>HeadlessSimulationTests.CurrentTick_ReportsTheLastExecutedTick</c>.
     /// </para>
     /// </summary>
-    public TickContext CurrentTick => new(_dt, _scheduler.FrameIndex);
+    public TickContext CurrentTick => new(_dt, Math.Max(0L, _scheduler.TickIndex - 1));
 
     /// <summary>
     /// Runs Input → Simulation → PostSimulation for one frame, each stage closed by the structural barrier.
@@ -79,6 +99,7 @@ public sealed class SimulationHost
     {
         _dt = deltaSeconds;
         _scheduler.Tick(deltaSeconds);
+        _frameTickCount++;
     }
 
     /// <summary>
@@ -109,6 +130,7 @@ public sealed class SimulationHost
         _frameTimestampStart = Stopwatch.GetTimestamp();
         _bracketThreadId = Environment.CurrentManagedThreadId;
         _measurementOpen = true;
+        _frameTickCount = 0;
     }
 
     /// <summary>
@@ -146,6 +168,7 @@ public sealed class SimulationHost
 
         LastFrameAllocatedBytes = Math.Max(0L, GC.GetAllocatedBytesForCurrentThread() - _frameAllocStart);
         LastFrameMs = (float)Stopwatch.GetElapsedTime(_frameTimestampStart).TotalMilliseconds;
+        LastFrameTickCount = _frameTickCount;
         Stats.Record(LastFrameMs, LastFrameAllocatedBytes);
     }
 

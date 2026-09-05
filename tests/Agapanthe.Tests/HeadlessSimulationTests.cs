@@ -115,6 +115,55 @@ public sealed class HeadlessSimulationTests
 
         // ONE sample, not three. Before BeginFrame was split out of Tick, this recorded three.
         Assert.Equal(1, host.Stats.FrameCount);
-        Assert.Equal(4, host.FrameIndex);
+        Assert.Equal(4, host.TickIndex);
+    }
+
+    /// <summary>
+    /// MP-0c off-by-one fix (spec decision 4): <see cref="SimulationHost.CurrentTick"/> reports the LAST tick
+    /// actually executed — <c>Math.Max(0L, TickIndex - 1)</c> — not the raw post-increment counter a render system
+    /// used to see (<c>N+1</c> where the tick systems saw <c>N</c>). This was pinned by no test before.
+    /// </summary>
+    [Fact]
+    public void CurrentTick_ReportsTheLastExecutedTick()
+    {
+        using var world = new GameWorld();
+        var host = SimulationHost.CreateDefault(world);
+
+        // Before any tick has run, both readings collapse to 0 (the clamp).
+        Assert.Equal(0, host.CurrentTick.TickIndex);
+
+        host.Tick(Dt);
+        Assert.Equal(0, host.CurrentTick.TickIndex); // tick 0 just ran — the render pass draws its results
+
+        host.Tick(Dt);
+        host.Tick(Dt);
+        Assert.Equal(2, host.CurrentTick.TickIndex); // tick 2 was the last; TickIndex (the counter) is 3
+        Assert.Equal(3, host.TickIndex);
+    }
+
+    /// <summary>
+    /// The pre-increment view a system sees INSIDE its own tick is unchanged by the off-by-one fix: a system running
+    /// in tick <c>N</c> observes <see cref="TickContext.TickIndex"/> <c>== N</c>. (The render-facing
+    /// <see cref="SimulationHost.CurrentTick"/> is the only thing MP-0c moved — see
+    /// <see cref="CurrentTick_ReportsTheLastExecutedTick"/>.)
+    /// </summary>
+    [Fact]
+    public void ASystemInsideTickN_SeesTickIndexN()
+    {
+        using var world = new GameWorld();
+        var host = SimulationHost.CreateDefault(world);
+        var seen = new List<long>();
+        host.Add(Stage.Simulation, new RecordingTickIndexSystem(seen));
+
+        host.Tick(Dt);
+        host.Tick(Dt);
+        host.Tick(Dt);
+
+        Assert.Equal(new long[] { 0, 1, 2 }, seen);
+    }
+
+    private sealed class RecordingTickIndexSystem(List<long> seen) : ISystem
+    {
+        public void Execute(in TickContext ctx) => seen.Add(ctx.TickIndex);
     }
 }

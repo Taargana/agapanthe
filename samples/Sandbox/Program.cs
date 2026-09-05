@@ -763,7 +763,13 @@ window.Rendered += dt =>
 
     // Tick OUTSIDE DrawFrame (P3-M2 D1.a): Input -> Simulation -> PostSimulation, always. DrawFrame runs only the
     // Render stage, and skips it when the swapchain is out of date — the simulation must not skip with it.
-    orchestrator.Tick((float)dt);
+    //
+    // MP-0c: orchestrator.Tick takes a WALL-CLOCK delta and the fixed-step accumulator turns it into a whole number
+    // of ticks. In capture/bench mode (AGAPANTHE_MAX_FRAMES set, maxFrames > 0 — matching the auto-close guard at
+    // :803 and the UI-capture arm at :797) we feed a constant equal to the fixed tick period so the run is
+    // reproducible tick-for-tick; a real interactive session consumes the true GLFW dt.
+    var wallClockDt = maxFrames > 0 ? orchestrator.FixedTickDeltaSeconds : (float)dt;
+    orchestrator.Tick(wallClockDt);
     frameRenderer.DrawFrame(orchestrator.RenderDelegate);
     // Closes the engine's frame measurement (UI-2). Deliberately AFTER DrawFrame, so the bracket covers submit and
     // present too — and so a frame where DrawFrame bailed out early (resize) is still measured rather than lost.
@@ -787,7 +793,8 @@ window.Rendered += dt =>
             Log.Info(
                 $"Sandbox: [cull-stats] frame {benchFrame} — candidates {renderList.Count}, " +
                 $"draws {renderer!.LastSceneDrawCalls}+{renderer.LastShadowDrawCalls} (instanced), " +
-                $"tick+draw avg {avgMs:F3} ms/frame, per-frame alloc {alloc} B.");
+                $"tick+draw avg {avgMs:F3} ms/frame, per-frame alloc {alloc} B, " +
+                $"sim ticks {orchestrator.LastFrameTickCount}.");
             benchTicks = 0;
         }
     }

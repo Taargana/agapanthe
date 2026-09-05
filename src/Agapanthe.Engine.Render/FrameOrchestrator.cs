@@ -59,6 +59,11 @@ public sealed class FrameOrchestrator
     // GPU, and keeping that literally true in the type graph is the point of the split.
     private readonly SimulationHost _simulation;
 
+    // Decouples simulation speed from frame rate (MP-0c): Tick hands it the wall-clock delta and it drives
+    // _simulation.Tick a whole number of fixed steps. Lives in Agapanthe.Engine (not here) so a headless real-time
+    // server can reuse it without a FrameOrchestrator.
+    private readonly FixedTimestepAccumulator _accumulator;
+
     // The render half's own schedule. It takes the world's structural barrier DIRECTLY rather than reaching through
     // the simulation host: the headless half must not have to know that a render scheduler exists at all.
     private readonly RenderSystemScheduler _renderScheduler;
@@ -69,7 +74,7 @@ public sealed class FrameOrchestrator
 
     private FrameOrchestrator(
         SimulationHost simulation, GameWorld world, Renderer renderer, ResourceRegistry registry, Camera camera,
-        RenderList render)
+        RenderList render, float fixedTickDeltaSeconds, float maxWallClockDeltaSeconds)
     {
         _world = world;
         _renderer = renderer;
@@ -77,6 +82,7 @@ public sealed class FrameOrchestrator
         _camera = camera;
         _render = render;
         _simulation = simulation;
+        _accumulator = new FixedTimestepAccumulator(fixedTickDeltaSeconds, maxWallClockDeltaSeconds);
         _renderScheduler = new RenderSystemScheduler(world.FlushStructuralChanges);
 
         _renderDelegate = (cmd, frame, target) =>
@@ -92,9 +98,16 @@ public sealed class FrameOrchestrator
     /// application adds its own systems (input, gameplay, a bench spinner) with <see cref="Add(Stage, ISystem)"/>
     /// BEFORE the first <see cref="Tick"/>.
     /// </summary>
+    /// <param name="fixedTickDeltaSeconds">The fixed simulation step, seconds (MP-0c) — a PERIOD, not a rate.
+    /// Default 1/60.</param>
+    /// <param name="maxWallClockDeltaSeconds">The accumulator's input clamp, seconds — the anti-spiral-of-death
+    /// ceiling. Default 250 ms.</param>
     public static FrameOrchestrator CreateDefault(
-        GameWorld world, Renderer renderer, ResourceRegistry registry, Camera camera, RenderList render)
-        => CreateDefault(SimulationHost.CreateDefault(world), world, renderer, registry, camera, render);
+        GameWorld world, Renderer renderer, ResourceRegistry registry, Camera camera, RenderList render,
+        float fixedTickDeltaSeconds = 1f / 60f, float maxWallClockDeltaSeconds = 0.25f)
+        => CreateDefault(
+            SimulationHost.CreateDefault(world), world, renderer, registry, camera, render,
+            fixedTickDeltaSeconds, maxWallClockDeltaSeconds);
 
     /// <summary>
     /// Attaches presentation to an <b>existing</b> <see cref="SimulationHost"/>.
@@ -105,9 +118,13 @@ public sealed class FrameOrchestrator
     /// "client + server" and "client only" must be able to build and configure the host itself, then hand it over.
     /// </para>
     /// </summary>
+    /// <param name="fixedTickDeltaSeconds">The fixed simulation step, seconds (MP-0c) — a PERIOD, not a rate.
+    /// Default 1/60.</param>
+    /// <param name="maxWallClockDeltaSeconds">The accumulator's input clamp, seconds — the anti-spiral-of-death
+    /// ceiling. Default 250 ms.</param>
     public static FrameOrchestrator CreateDefault(
         SimulationHost simulation, GameWorld world, Renderer renderer, ResourceRegistry registry, Camera camera,
-        RenderList render)
+        RenderList render, float fixedTickDeltaSeconds = 1f / 60f, float maxWallClockDeltaSeconds = 0.25f)
     {
         ArgumentNullException.ThrowIfNull(simulation);
         ArgumentNullException.ThrowIfNull(world);
@@ -116,7 +133,8 @@ public sealed class FrameOrchestrator
         ArgumentNullException.ThrowIfNull(camera);
         ArgumentNullException.ThrowIfNull(render);
 
-        var o = new FrameOrchestrator(simulation, world, renderer, registry, camera, render);
+        var o = new FrameOrchestrator(
+            simulation, world, renderer, registry, camera, render, fixedTickDeltaSeconds, maxWallClockDeltaSeconds);
         o._renderScheduler.Add(new SceneViewSystem(o));
         return o;
     }
@@ -135,22 +153,31 @@ public sealed class FrameOrchestrator
     /// <see cref="SimulationHost.Add"/>: registration order is execution order, frozen at first tick.</summary>
     public void Add(Stage stage, ISystem system) => _simulation.Add(stage, system);
 
+    /// <summary>The fixed simulation step the accumulator issues, seconds (MP-0c). In capture mode the host feeds
+    /// this value as the wall-clock delta so a run is reproducible tick-for-tick.</summary>
+    public float FixedTickDeltaSeconds => _accumulator.FixedDeltaSeconds;
+
+    /// <summary>How many simulation ticks the last <see cref="Tick"/> ran (forwards
+    /// <see cref="SimulationHost.LastFrameTickCount"/>): 1 in steady state, &gt; 1 while catching up, 0 for a frame
+    /// faster than one step.</summary>
+    public int LastFrameTickCount => _simulation.LastFrameTickCount;
+
     /// <summary>Registers an application render system (Render stage). Stays on this side: the simulation half must
     /// not learn that render systems exist.</summary>
     public void Add(IRenderSystem system) => _renderScheduler.Add(system);
 
     /// <summary>
-    /// Runs Input → Simulation → PostSimulation for one frame. Call this ONCE per frame, OUTSIDE the render
-    /// callback, then pass <see cref="RenderDelegate"/> to <c>FrameRenderer.DrawFrame</c> (D1.a).
+    /// Advances the simulation for one rendered frame (D1.a). Call this ONCE per frame, OUTSIDE the render callback,
+    /// then pass <see cref="RenderDelegate"/> to <c>FrameRenderer.DrawFrame</c>.
+    /// <para>
+    /// <paramref name="wallClockDeltaSeconds"/> is a wall-clock delta, not "the dt this tick uses": the
+    /// <see cref="FixedTimestepAccumulator"/> consumes it and runs Input → Simulation → PostSimulation a whole
+    /// number of fixed steps (0, 1, or several while catching up — MP-0c). <see cref="SimulationHost.BeginFrame"/>
+    /// stays out of that loop so the frame's self-measurement records one sample per frame, not one per tick.
+    /// </para>
     /// </summary>
-    public void Tick(float deltaSeconds)
-    {
-        // One tick per frame today, so opening the bracket here is exactly the previous behaviour. When the
-        // time-authority sub-milestone turns this into an accumulator loop, BeginFrame stays here and only the
-        // Tick call repeats — which is why the two are separate on SimulationHost.
-        _simulation.BeginFrame();
-        _simulation.Tick(deltaSeconds);
-    }
+    public void Tick(float wallClockDeltaSeconds)
+        => _accumulator.AdvanceFrame(_simulation, wallClockDeltaSeconds);
 
     /// <summary>
     /// Closes the frame's self-measurement and files it into <see cref="Stats"/>. Call it once per frame, right

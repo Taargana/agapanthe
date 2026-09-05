@@ -25,8 +25,8 @@ namespace Agapanthe.Tests;
 /// </summary>
 public sealed class RenderBarrierTests
 {
-    private static RenderContext Context(long frameIndex = 0)
-        => new(new TickContext(1f / 60f, frameIndex), default, null!, default);
+    private static RenderContext Context(long tickIndex = 0)
+        => new(new TickContext(1f / 60f, tickIndex), default, null!, default);
 
     [Fact]
     public void Render_ClosesWithTheStructuralBarrier()
@@ -58,7 +58,7 @@ public sealed class RenderBarrierTests
         // A drawn frame adds the Render stage and its barrier.
         barriers = 0;
         tick.Tick(1f / 60f);
-        render.Render(Context(tick.FrameIndex));
+        render.Render(Context(tick.TickIndex));
         Assert.Equal(4, barriers);
     }
 
@@ -111,11 +111,11 @@ public sealed class RenderBarrierTests
         var render = new RenderSystemScheduler();
 
         tick.Tick(1f / 60f);
-        render.Render(Context(tick.FrameIndex));
-        render.Render(Context(tick.FrameIndex));
+        render.Render(Context(tick.TickIndex));
+        render.Render(Context(tick.TickIndex));
 
         // A tick is not a frame: the counter belongs to the simulation, and drawing twice does not simulate twice.
-        Assert.Equal(1, tick.FrameIndex);
+        Assert.Equal(1, tick.TickIndex);
     }
 
     [Fact]

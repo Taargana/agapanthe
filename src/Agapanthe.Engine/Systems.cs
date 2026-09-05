@@ -12,17 +12,17 @@ namespace Agapanthe.Engine;
 /// </summary>
 public readonly struct TickContext
 {
-    public TickContext(float deltaSeconds, long frameIndex)
+    public TickContext(float deltaSeconds, long tickIndex)
     {
         DeltaSeconds = deltaSeconds;
-        FrameIndex = frameIndex;
+        TickIndex = tickIndex;
     }
 
     /// <summary>Seconds since the previous tick.</summary>
     public float DeltaSeconds { get; }
 
     /// <summary>Monotonic tick counter, from 0. Ticks are NOT frames: a frame can be skipped, a tick never is.</summary>
-    public long FrameIndex { get; }
+    public long TickIndex { get; }
 }
 
 /// <summary>

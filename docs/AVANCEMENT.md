@@ -1,6 +1,6 @@
 # Agapanthe — Plan complet & état d'avancement
 
-**Mis à jour** : 2026-09-02 (session 27 — **MP-0b CLOS** : identité d'entité — `ContactPairKey` 128 bits (clé de contact) + `GlobalIdRange` (plage d'allocation) + `UniverseId`/snapshot v2 (identité par fichier, 5 cas de réconciliation testés) ; double audit W4 a trouvé et corrigé un 🔴 (perte silencieuse d'entité sur collision d'id au `Load`) ; hash `HeadlessSim` re-épinglé `7e8dc68f…` (v2, 1868 o), désormais gardé par un test et non plus seulement par la prose ; verdict humain PASS ; 530 tests, captures inchangées) · 2026-08-13 (session 26 — **MP-0a CLOS** : headless split ; `Agapanthe.Engine` ne référence plus que `{Core, World}`, nouveau `Agapanthe.Engine.Render`, `SimulationHost` extrait, `samples/HeadlessSim` simule en NativeAOT **sans GPU** ; MP-0 décomposé en 4 sous-jalons ; double audit PASS-with-concerns ×2 [4,2/5], aucun 🔴 ; 491 tests, captures inchangées) · 2026-08-13 (session 25 — **UI-2 CLOS** : overlay debug in-view + profiler CPU ; `FrameStats`/`Sparkline`/`TextBuilder` + `DebugOverlaySystem`, le HUD `window.Title` et son hack de cession disparaissent, **gate 0-alloc visible en continu à l'écran**, bascule `F3` ; double audit PASS-with-concerns ×2 ; 468 tests, AOT PASS · **synchronization validation activée** et 3 hazards préexistants corrigés) · 2026-08-11 (session 25 — **UI-1 CLOS** : texte à l'écran ; FontCooker SDF hors-ligne + `.agfont` + `Agapanthe.Ui` GPU-free + passe UI ; double audit PASS-with-concerns ×2, verdict humain PASS ; 435 tests, AOT PASS) · 2026-08-03 (session 25 — **RÉORIENTATION cap « vrai engine »** [backlog §4quater] : artefact = le moteur, multijoueur serveur autoritaire, MP-0 = prochain jalon ; VS-4/VS-5 en pause · **brainstorm Texte & UI terminé**, spec `plans/2026-08-03-text-ui-design.md`, 3 jalons UI-1/2/3) · 2026-07-26 (session 24 — **VS-3 CLOS** : glu gameplay = défi d'atterrissage planétaire ; `QuerySurfaceContacts` + règle latchée `LandingChallengeRule` + scène `planet-challenge` (input→spawn→règle→save/resume) ; double audit PASS / PASS-with-concerns 4/5, verdict humain PASS ; 372 tests, AOT PASS) · 2026-07-26 (session 23 — **VS-2 CLOS** : spawn runtime différé (`SpawnBodyDeferred`) + gravité newtonienne (attracteur radial + sol radial) ; double audit PASS-with-concerns [4,5/5], verdict visuel PASS ; scène `planet-drop`, 355 tests, AOT PASS) · 2026-07-24 (session 22 — **VS-1 CLOS** : sérialisation du World save/load, double audit PASS, verdict humain PASS) · 2026-07-23 (session 20 — **P3-M7 CLOS** : buffers device-local + réduction du raster d'ombre 4×→~1× ; double audit PASS, verdict visuel PASS incl. soleil bas ; A+B ~15,3 → ~8,0 ms ≈ ×2) · 2026-07-23 (session 19 — **P3-M6 CLOS** : slots persistants dirty-trackés + cull d'ombre GPU ; double audit PASS, verdict visuel PASS ; voir « Point de reprise ») · 2026-07-14 (session 14 — **vérifs humaines de la Phase 2 soldées** : banc M4 PASS with concerns [perf → P3-M1], précision M3 PASS, hot reload M1 PASS) · 2026-07-13 (session 13 — **PHASE 2 CLOSE** — frustum culling + montée en charge : 10 000 entités cullées à 10 000 km, 0 alloc/frame, en NativeAOT ; double audit signe la clôture) · **Machines de dev** : macOS (Apple M3, MoltenVK) + Windows 11 (RTX 5070 Ti, Vulkan 1.3 core) · **Cibles** : Windows / Linux / macOS
+**Mis à jour** : 2026-09-05 (session 28 — **MP-0c CLOS** : autorité du temps — `FixedTimestepAccumulator` (`Agapanthe.Engine`) découple la vitesse de sim du framerate (`Advance`→N pas fixes, clamp 250 ms, garde de ratio, non-fini→0 + `SanitisedInputCount`, `AdvanceFrame`) ; `FrameIndex`→`TickIndex` partout + off-by-one `CurrentTick` corrigé (`Math.Max(0L,TickIndex-1)` = dernier tick exécuté, épinglé) ; `PhysicsSystem.RatesMatch` + assert, `PhysicsSettings.FixedDt` inchangé ; captures **inchangées** via dt synthétique quand `AGAPANTHE_MAX_FRAMES` posé (prédiction du brainstorm corrigée) ; `AccumulatorEquivalenceTests` = équivalence tick-count (entiers) ; double audit PASS-with-concerns ×2 (4,2/5), aucun 🔴, 8 findings appliqués ; 558 tests, `HeadlessSim` JIT==AOT inchangé, 0 leak/0 validation) · 2026-09-02 (session 27 — **MP-0b CLOS** : identité d'entité — `ContactPairKey` 128 bits (clé de contact) + `GlobalIdRange` (plage d'allocation) + `UniverseId`/snapshot v2 (identité par fichier, 5 cas de réconciliation testés) ; double audit W4 a trouvé et corrigé un 🔴 (perte silencieuse d'entité sur collision d'id au `Load`) ; hash `HeadlessSim` re-épinglé `7e8dc68f…` (v2, 1868 o), désormais gardé par un test et non plus seulement par la prose ; verdict humain PASS ; 530 tests, captures inchangées) · 2026-08-13 (session 26 — **MP-0a CLOS** : headless split ; `Agapanthe.Engine` ne référence plus que `{Core, World}`, nouveau `Agapanthe.Engine.Render`, `SimulationHost` extrait, `samples/HeadlessSim` simule en NativeAOT **sans GPU** ; MP-0 décomposé en 4 sous-jalons ; double audit PASS-with-concerns ×2 [4,2/5], aucun 🔴 ; 491 tests, captures inchangées) · 2026-08-13 (session 25 — **UI-2 CLOS** : overlay debug in-view + profiler CPU ; `FrameStats`/`Sparkline`/`TextBuilder` + `DebugOverlaySystem`, le HUD `window.Title` et son hack de cession disparaissent, **gate 0-alloc visible en continu à l'écran**, bascule `F3` ; double audit PASS-with-concerns ×2 ; 468 tests, AOT PASS · **synchronization validation activée** et 3 hazards préexistants corrigés) · 2026-08-11 (session 25 — **UI-1 CLOS** : texte à l'écran ; FontCooker SDF hors-ligne + `.agfont` + `Agapanthe.Ui` GPU-free + passe UI ; double audit PASS-with-concerns ×2, verdict humain PASS ; 435 tests, AOT PASS) · 2026-08-03 (session 25 — **RÉORIENTATION cap « vrai engine »** [backlog §4quater] : artefact = le moteur, multijoueur serveur autoritaire, MP-0 = prochain jalon ; VS-4/VS-5 en pause · **brainstorm Texte & UI terminé**, spec `plans/2026-08-03-text-ui-design.md`, 3 jalons UI-1/2/3) · 2026-07-26 (session 24 — **VS-3 CLOS** : glu gameplay = défi d'atterrissage planétaire ; `QuerySurfaceContacts` + règle latchée `LandingChallengeRule` + scène `planet-challenge` (input→spawn→règle→save/resume) ; double audit PASS / PASS-with-concerns 4/5, verdict humain PASS ; 372 tests, AOT PASS) · 2026-07-26 (session 23 — **VS-2 CLOS** : spawn runtime différé (`SpawnBodyDeferred`) + gravité newtonienne (attracteur radial + sol radial) ; double audit PASS-with-concerns [4,5/5], verdict visuel PASS ; scène `planet-drop`, 355 tests, AOT PASS) · 2026-07-24 (session 22 — **VS-1 CLOS** : sérialisation du World save/load, double audit PASS, verdict humain PASS) · 2026-07-23 (session 20 — **P3-M7 CLOS** : buffers device-local + réduction du raster d'ombre 4×→~1× ; double audit PASS, verdict visuel PASS incl. soleil bas ; A+B ~15,3 → ~8,0 ms ≈ ×2) · 2026-07-23 (session 19 — **P3-M6 CLOS** : slots persistants dirty-trackés + cull d'ombre GPU ; double audit PASS, verdict visuel PASS ; voir « Point de reprise ») · 2026-07-14 (session 14 — **vérifs humaines de la Phase 2 soldées** : banc M4 PASS with concerns [perf → P3-M1], précision M3 PASS, hot reload M1 PASS) · 2026-07-13 (session 13 — **PHASE 2 CLOSE** — frustum culling + montée en charge : 10 000 entités cullées à 10 000 km, 0 alloc/frame, en NativeAOT ; double audit signe la clôture) · **Machines de dev** : macOS (Apple M3, MoltenVK) + Windows 11 (RTX 5070 Ti, Vulkan 1.3 core) · **Cibles** : Windows / Linux / macOS
 
 ## Vision
 
@@ -346,10 +346,9 @@ Spec : [2026-07-25-vs2-spawn-runtime-newtonian-gravity-design.md](plans/2026-07-
 > **Gates** : **491 tests** (3 runs) · 0 warning · **HDR `12638edd` et UI `03421357` inchangés** · 0 leak
 > (233 resources) · 0 validation · AOT PASS · closure `Agapanthe.Engine` = `{Core, World}`.
 >
-> **Dette / décisions au dossier** : 🟠 `CurrentTick.FrameIndex` post-incrément (préservé bit-pour-bit, à trancher en
-> MP-0c) · 🟠 deux relâchements de gel déclarés et testés (`_frozen` dédoublé) · 🟡 `Camera` reste dans `Rendering` ·
-> 🟡 renommage `Engine.Render` → `Engine.Presentation` et `FrameIndex` → `TickIndex` non faits (le second appartient
-> à MP-0c, qui redéfinira ce qu'est un index de tick).
+> **Dette / décisions au dossier** : ✅ ~~`CurrentTick.FrameIndex` post-incrément~~ + ~~`FrameIndex` → `TickIndex`~~
+> **résolus MP-0c (S28)** · 🟠 deux relâchements de gel déclarés et testés (`_frozen` dédoublé) · 🟡 `Camera` reste
+> dans `Rendering` · 🟡 renommage `Engine.Render` → `Engine.Presentation` non fait.
 >
 > ### ✅ **MP-0b CLOS (S26-27)** — identité d'entité
 > Spec : **[plans/2026-08-13-mp0b-entity-identity-design.md](plans/2026-08-13-mp0b-entity-identity-design.md)**
@@ -412,10 +411,45 @@ Spec : [2026-07-25-vs2-spawn-runtime-newtonian-gravity-design.md](plans/2026-07-
 > de renouvellement de bail avant épuisement de `GlobalIdRange` (additif, pas de refonte requise) · fusion de deux
 > univers rendue **détectable**, pas **implémentée** (hors scope assumé).
 >
-> ### ▶️ ENSUITE — **MP-0c / MP-0d** (specs à écrire, une par sous-jalon)
-> **MP-0c autorité du temps** (accumulator ; ⚠️ **invalide les baselines de capture**, c'est un échange de modèle de
-> déterminisme, pas une dette à solder) · **MP-0d input → commandes horodatées** (le split a créé le seam : le type
-> commande + la file vivent dans `Engine`, l'échantillonnage reste dans l'application).
+> ### ✅ **MP-0c CLOS (S28)** — autorité du temps : le tick de simulation découplé de la frame de rendu
+> Spec : **[plans/2026-09-05-mp0c-time-authority-design.md](plans/2026-09-05-mp0c-time-authority-design.md)**
+> (APPROVED **4,4/5**, 2 tours ; v1 à 3,7 NEEDS REVISION — le test d'équivalence échouait en `float` `3f/60f ≠
+> 3f*(1f/60f)` d'1 ULP → 59 vs 60 ticks ; « les hashes de capture vont changer » était **faux**, aucun code prod ne
+> lit `ctx.DeltaSeconds`). Détail par vague : **[.absolute-human/board.md](../.absolute-human/board.md)** (§Progress log).
+>
+> **Livré** : **`FixedTimestepAccumulator`** (`Agapanthe.Engine`, décision 7) — `Advance(host, dt) → int` accumule le
+> dt wall-clock et pilote `SimulationHost.Tick` N pas fixes ; `AdvanceFrame` = `BeginFrame` + `Advance` (séquence
+> d'un hôte real-time, ce que `FrameOrchestrator.Tick` appelle) · **clamp d'entrée 250 ms** + **garde de ratio ctor**
+> (`max/fixed > 1024` → throw : `fixed≈1e-9` boucle infinie, soustraction float = no-op) · **non-fini/négatif → `0f`**
+> (échec inerte, jamais 15 ticks physique silencieux) + `SanitisedInputCount` · `Sanitise` extrait (`float.IsFinite`
+> **avant** `MathF.Min` qui propage NaN) · **`FrameIndex` → `TickIndex`** partout · **off-by-one `CurrentTick`
+> corrigé** (`Math.Max(0L, TickIndex-1)` = dernier tick exécuté, épinglé pour la 1ʳᵉ fois) · `PhysicsSystem.RatesMatch`
+> extrait + `Debug.Assert`, `PhysicsSettings.FixedDt` **inchangé** (décision 3) · `SimulationHost.LastFrameTickCount`
+> (latché en `EndFrame`) + loggé au banc.
+>
+> **Déterminisme des captures** (décision 2, prédiction du brainstorm **corrigée** — pas une des 8 décisions) :
+> `AGAPANTHE_MAX_FRAMES` (> 0) → dt synthétique = 1 tick/frame → **hashes INCHANGÉS** (HDR `12638edd`, UI `03421357`,
+> byte-identiques ×3 runs). Un run déterministe **DOIT** poser `AGAPANTHE_MAX_FRAMES`.
+>
+> **Vérification** : `AccumulatorEquivalenceTests` — **20×`Advance(3·Fixed)` == 60×`Advance(1·Fixed)` == 60 ticks**
+> (assertion primaire = **entiers** ; positions = garde de câblage car `PhysicsSystem` ignore `DeltaSeconds`) +
+> catch-up `FrameOrchestrator`-shape via `AdvanceFrame` · `AotComponentProbe` exerce l'accumulateur
+> (`AotAccumulatorSmoke: 1 + 3 ticks`).
+>
+> **Gates** : **558 tests** · 0 warning · **HDR `12638edd` / UI `03421357` inchangés** (3 runs) · `HeadlessSim`
+> `7e8dc68f5a25914c84677a7a53ad3a58` **JIT == AOT** inchangé (`HeadlessSimSnapshotFormatTests` passe sans édition) ·
+> `AotComponentProbe` PASS · 0 leak (233) · 0 validation. Double audit **PASS-with-concerns ×2** (`engine-architect`
+> 4,2/5), **aucun 🔴** — 8 findings 🟠/🟡 appliqués (rename params, garde de ratio, `Sanitise`+compteur, `NaN→0`,
+> `AdvanceFrame` testable, latch `LastFrameTickCount`, probe AOT, test 0-alloc multi-branches).
+>
+> **Dette laissée** (board §Deferred Work) : interpolation visuelle (l'accumulateur détient déjà le facteur de blend
+> `_accumulated/FixedDeltaSeconds`) · `FixedTimestepAccumulator.Reset()` (Load in-process, pause) · **pas fixe = 4
+> littéraux `1f/60f` indépendants → le rendre une donnée de config de la simulation est un prérequis netcode** · `bool
+> HasTicked` (désambiguïse `TickIndex == 0`) · ancrage thread dans `Tick`.
+>
+> ### ▶️ ENSUITE — **MP-0d** (spec à écrire)
+> **Input → commandes horodatées** (le split a créé le seam : le type commande + la file vivent dans `Engine`,
+> l'échantillonnage reste dans l'application).
 >
 > ### Contexte — **Cap moteur** (réorientation S25)
 > **Vertical Slice CLOSE dans son intention** : VS-1 (S22) · VS-2 (S23) · VS-3 (S24) ont prouvé l'intégration
@@ -435,9 +469,10 @@ Spec : [2026-07-25-vs2-spawn-runtime-newtonian-gravity-design.md](plans/2026-07-
 >    Proposition : **64 bits partitionné** (poids fort = shard, solo = 0).
 > 2. 🔴 **Clé de contact physique** `(_pGid[j] << 32) | (uint)_pGid[k]` **écrase l'ID sur 32 bits** → couplé au point 1,
 >    collision **silencieuse** entre shards. Fix : deux clés parallèles, ordre déterministe préservé.
-> 3. 🟠 **Split headless** : `Engine` référence `Rendering` + `Graphics` → pas de serveur dédié sans Vulkan.
-> 4. 🟠 **Input → commandes horodatées** (aujourd'hui l'input mute directement).
-> 5. 🟠 **Tick de simulation découplé** de la frame (accumulator + interpolation) — dette P3-M3 rendue obligatoire.
+> 3. ~~🟠 **Split headless**~~ ✅ **LIVRÉ (MP-0a, S26)**.
+> 4. 🟠 **Input → commandes horodatées** (aujourd'hui l'input mute directement) — **MP-0d, prochain**.
+> 5. ~~🟠 **Tick de simulation découplé**~~ ✅ **LIVRÉ (MP-0c, S28)** — `FixedTimestepAccumulator`. L'interpolation
+>    visuelle reste 🟡 (jalon dédié).
 >
 > **Ensuite** : `Agapanthe.App` (host + contrat `Game`, extraction de `Program.cs`) → contenu (identité d'assets stable,
 > cook, prefabs/scènes, data-driven) → **2ᵉ slice dissemblable** (top-down — test de généralité) → texte/UI, audio,

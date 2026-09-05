@@ -40,6 +40,22 @@ try
         Console.Error.WriteLine($"AotComponentProbe: FAIL — serialization restored {restored}, expected >= 5.");
         return 1;
     }
+
+    // MP-0c: the fixed-step accumulator (audit LL F-4 — the milestone's AOT gate line must actually exercise the
+    // type, not assume it). A plain sealed non-generic class driving SimulationHost.Tick; nothing exotic, but say
+    // so by running it. Two profiles: one whole step (1 tick), one catch-up (3 ticks).
+    using var accWorld = new GameWorld();
+    var accHost = SimulationHost.CreateDefault(accWorld);
+    var accumulator = new FixedTimestepAccumulator(1f / 60f);
+    var oneStep = accumulator.Advance(accHost, accumulator.FixedDeltaSeconds);
+    var catchUp = accumulator.Advance(accHost, 3f * accumulator.FixedDeltaSeconds);
+    Console.WriteLine($"AotAccumulatorSmoke: {oneStep} + {catchUp} ticks, host at TickIndex {accHost.TickIndex}.");
+    if (oneStep != 1 || catchUp != 3 || accHost.TickIndex != 4)
+    {
+        Console.Error.WriteLine(
+            $"AotComponentProbe: FAIL — accumulator ran {oneStep}+{catchUp} ticks (TickIndex {accHost.TickIndex}), expected 1+3 (4).");
+        return 1;
+    }
 }
 catch (Exception ex)
 {

@@ -111,7 +111,7 @@ try
     }
 
     Console.WriteLine(
-        $"HeadlessSim: ran {host.FrameIndex} ticks, {world.LiveEntityCount} entities alive, "
+        $"HeadlessSim: ran {host.TickIndex} ticks, {world.LiveEntityCount} entities alive, "
         + $"last frame {host.LastFrameMs:F3} ms / {host.LastFrameAllocatedBytes} B.");
 
     if (savePath is not null)

@@ -7,8 +7,11 @@
 > Règle de tri : chaque item dit **ce qui casse sans lui** et **à quelle échelle il devient obligatoire**. Un item sans
 > déclencheur clair est une idée, pas du backlog.
 
-Dernière mise à jour : 2026-09-02 (session 27 — **MP-0b livré** : identité d'entité, `GlobalIdRange` +
-`ContactPairKey` + `UniverseId`/snapshot v2 ; §4quater à jour, items 1-2 cochés) · 2026-08-11 (session 25 — **UI-1 livré** : texte à l'écran, §4quater à jour) · 2026-08-03 (session 25 — **réorientation cap « vrai engine »**, §4quater créée) · 2026-07-26 (session 24 — **VS-3 livrée** : glu gameplay = défi d'atterrissage planétaire ; §4ter à jour) · 2026-07-26 (session 23 — **VS-2 livrée** : spawn runtime différé + gravité newtonienne ; §4ter à jour) · 2026-07-24 (session 21 — échelle planétaire 1/2 uniforme, **§4ter Vertical Slice** formalisée).
+Dernière mise à jour : 2026-09-05 (session 28 — **MP-0c livré** : autorité du temps, `FixedTimestepAccumulator`
+découple le tick de sim de la frame ; `FrameIndex`→`TickIndex` + off-by-one `CurrentTick` corrigé ; §4quater item 5
+coché ; §Physique accumulateur ✅ / interpolation reste 🟡) · 2026-09-02 (session 27 — **MP-0b livré** : identité
+d'entité, `GlobalIdRange` + `ContactPairKey` + `UniverseId`/snapshot v2 ; §4quater à jour, items 1-2 cochés) ·
+2026-08-11 (session 25 — **UI-1 livré** : texte à l'écran, §4quater à jour) · 2026-08-03 (session 25 — **réorientation cap « vrai engine »**, §4quater créée) · 2026-07-26 (session 24 — **VS-3 livrée** : glu gameplay = défi d'atterrissage planétaire ; §4ter à jour) · 2026-07-26 (session 23 — **VS-2 livrée** : spawn runtime différé + gravité newtonienne ; §4ter à jour) · 2026-07-24 (session 21 — échelle planétaire 1/2 uniforme, **§4ter Vertical Slice** formalisée).
 
 ---
 
@@ -210,8 +213,19 @@ quantifiée (P2-M3/M4). Tenir en orbite à 400 km sans que les pixels tremblent,
     `GlobalId` est un compteur dense par run ; **casse silencieusement** quand le streaming rendra les ids process-uniques
     (bits hauts tagués). Même famille que le plafond 16 bits mesh/matériau — à faire échouer bruyamment, ou repacker,
     quand la sérialisation arrive.
-  - 🟡 **Accumulateur wall-clock + interpolation** : la physique step à dt fixe (1 substep/tick, déterminisme by frame
-    count). En **interactif** à framerate variable la vitesse de sim est couplée au framerate (attendu). *Mord : jeu réel.*
+  - **Accumulateur wall-clock + interpolation** :
+    - ✅ **Accumulateur — LIVRÉ (MP-0c, S28)** : `FixedTimestepAccumulator` (`Agapanthe.Engine`) découple la vitesse de
+      sim du framerate — `Advance(host, dt)` ticke N pas fixes, clamp d'entrée 250 ms, garde de ratio ctor.
+    - 🟡 **Interpolation visuelle** (lissage rendu entre deux ticks) : jalon dédié. Aucune infra d'état « précédent »
+      par entité n'existe (`WorldPosition`/`WorldTransform` sans pendant historique). Le facteur de blend
+      (`_accumulated / FixedDeltaSeconds`) est déjà détenu par l'accumulateur — ce jalon ajoutera l'accesseur + le
+      stockage `previous`. *Mord : judder visible aux framerates qui ne divisent pas le tick rate.*
+    - 🟡 **`FixedTimestepAccumulator.Reset()`** : jeter le reliquat sur un `Load` de snapshot in-process / pause /
+      reseed. Aujourd'hui théorique (`AGAPANTHE_LOAD` relaunch-only) ; mord au premier `Agapanthe.App`.
+    - 🟠 **Pas fixe = source de vérité unique** : 4 littéraux `1f/60f` indépendants (`PhysicsSettings.Default`,
+      `FrameOrchestrator.CreateDefault` ×2, `HeadlessSim`, scènes Sandbox), réconciliés par le seul `Debug.Assert` de
+      `PhysicsSystem`. **Prérequis netcode** (tick rate = constante de protocole) : le porter sur `SimulationHost` /
+      un `SimulationSettings`. À instruire en MP-0d ou au premier `Agapanthe.App`.
   - 🟡 **Pré-grow du `_cellHead`** ~~absent~~ ✅ **soldé** (`EnsureCapacity(count)`), gate 0-alloc rendu général (scènes
     dispersantes incluses).
   - 🟡 **Qualité solver** : rotation/inertie/friction, warm-starting, sleeping/islands, CCD (tunneling à grande vitesse),
@@ -397,7 +411,15 @@ d'architecture automatisés.
 `[Start, EndExclusive)` fournie par l'hôte (défaut bit-pour-bit l'ancien compteur) ; la clé de contact physique
 devient `ContactPairKey`, une struct 128 bits comparable, plus aucune troncature 32 bits. Snapshot **v2** :
 `UniverseId` par fichier, réconciliée à 5 cas au `Load`, v1 refusé. Double audit a trouvé et fait corriger un 🔴
-(perte silencieuse d'entité sur collision d'id) avant tout commit. **Restent MP-0c/d.**
+(perte silencieuse d'entité sur collision d'id) avant tout commit.
+
+**✅ MP-0c — autorité du temps (session 28, CLOS)** : spec `plans/2026-09-05-mp0c-time-authority-design.md` (approuvée
+4,4/5 après 2 tours). `FixedTimestepAccumulator` (`Agapanthe.Engine`) découple la vitesse de simulation du framerate ;
+`FrameIndex` → `TickIndex` partout + off-by-one de `CurrentTick` corrigé (dernier tick exécuté). Déterminisme des
+captures via dt synthétique quand `AGAPANTHE_MAX_FRAMES` est posé — **hashes inchangés** (prédiction du brainstorm
+« ils vont changer » corrigée : aucun code prod ne lit `ctx.DeltaSeconds`). Double audit PASS-with-concerns ×2, aucun
+🔴, 8 findings appliqués. **Reste MP-0d.** Dette : interpolation visuelle (jalon dédié), `Reset()` sur l'accumulateur,
+pas fixe = source de vérité unique (prérequis netcode) — voir §Physique.
 
 1. ~~🔴 **Identité d'entité globale.**~~ ✅ **LIVRÉ (MP-0b, S27)** — `GlobalIdRange` remplace le compteur par monde ;
    un hôte partitionnant les ids entre process leur donne des plages disjointes. La fusion de deux univers reste
@@ -408,8 +430,8 @@ devient `ContactPairKey`, une struct 128 bits comparable, plus aucune troncature
 4. 🟠 **Input → commandes horodatées.** Aujourd'hui l'input **mute directement** (`Key.B` → spawn immédiat). Le netcode
    exige des commandes **envoyables / bufferisables / rejouables**. Règle *aussi* l'absence d'abstraction d'input
    (aujourd'hui : `Silk.NET.Input.Key` brut dans un `switch` du Sandbox).
-5. 🟠 **Autorité du temps.** Découpler le **tick de simulation** de la frame de rendu (accumulator + interpolation) —
-   dette déjà notée en P3-M3, que le multijoueur rend **obligatoire**.
+5. ~~🟠 **Autorité du temps.**~~ ✅ **LIVRÉ (MP-0c, S28)** — `FixedTimestepAccumulator` découple le tick de simulation
+   de la frame de rendu. L'**interpolation** reste 🟡 (jalon dédié, voir §Physique).
 
 ### Ensuite, dans l'ordre
 

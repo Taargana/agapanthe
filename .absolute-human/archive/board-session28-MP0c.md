@@ -1,8 +1,6 @@
 # Absolute-Work Board — Agapanthe Session 28 (MP-0c : autorité du temps)
 
-**Status**: ✅ **CONVERGED — MP-0c CLOS (2026-09-05, session 28). Verdict humain PASS.** Board archivé
-`archive/board-session28-MP0c.md`. Prochain jalon : **MP-0d** (input → commandes horodatées). Commit non fait
-(sur demande explicite uniquement).
+**Status**: ✅ **VERIFY CLOSE — toutes vagues + audits + docs + tail faits. En attente verdict humain → CONVERGE.**
 Spec : `docs/plans/2026-09-05-mp0c-time-authority-design.md` (APPROVED 4,4/5, 2 tours de revue scorée).
 Parcours : design présenté (S28) → approuvé → spec v1 (3,7/5) → v2 (F1-F9) → revue round 2 (4,4/5, R1-R3
 corrigés) → revue humaine OK → **décomposition**.
@@ -374,5 +372,5 @@ Wave 3 (spec W3) — captures + tail
     `HeadlessSimSnapshotFormatTests` sans édition ✅ · AOT probe PASS ✅ · Sandbox headless 0 val/0 leak ✅ · 0
     alloc/frame ✅ · 8 décisions verrouillées honorées, confirmé par l'audit archi 8/8).
   - **AW-306** — full verification : `dotnet build` **0 warning**, `dotnet test` **558/558 × 3 runs**.
-  - **Verdict humain : PASS.** → CONVERGE : board archivé `archive/board-session28-MP0c.md`, docs à jour, message de
-    commit proposé. **Commit non exécuté** (sur demande explicite uniquement).
+  - **Prochaine étape : verdict humain → CONVERGE** (archiver le board `archive/board-session28-MP0c.md`, suggérer
+    un commit — commit sur demande explicite uniquement).

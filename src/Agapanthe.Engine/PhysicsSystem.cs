@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using Agapanthe.World;
 
 namespace Agapanthe.Engine;
@@ -11,8 +12,10 @@ namespace Agapanthe.Engine;
 /// </summary>
 /// <remarks>
 /// It borrows the world and holds the immutable <see cref="PhysicsSettings"/>; it owns nothing and disposes
-/// nothing, like every other system. <see cref="TickContext.DeltaSeconds"/> is deliberately ignored — physics
-/// steps by frame count (spec §2), which is what keeps a scene reproducible run-to-run.
+/// nothing, like every other system. It still steps by a FIXED <see cref="PhysicsSettings.FixedDt"/> rather than by
+/// <see cref="TickContext.DeltaSeconds"/> (spec decision 3) — but the two must now agree, because the MP-0c
+/// fixed-step accumulator is what guarantees a tick is always exactly one fixed step. <see cref="Execute"/> checks
+/// that with <see cref="RatesMatch"/>.
 /// </remarks>
 public sealed class PhysicsSystem : ISystem
 {
@@ -26,5 +29,19 @@ public sealed class PhysicsSystem : ISystem
         _settings = settings;
     }
 
-    public void Execute(in TickContext ctx) => _world.StepPhysics(in _settings);
+    /// <summary>
+    /// Whether the tick's delta and the physics fixed step agree. Extracted so a unit test can exercise it
+    /// directly: a failed <see cref="Debug.Assert"/> goes through <c>DebugProvider.FailCore</c> and terminates the
+    /// test host rather than raising a catchable exception (MP-0c R3), so the assert below cannot be the test's
+    /// subject. The assert stays as the runtime guard.
+    /// </summary>
+    internal static bool RatesMatch(float tickDeltaSeconds, float fixedDt) => tickDeltaSeconds == fixedDt;
+
+    public void Execute(in TickContext ctx)
+    {
+        Debug.Assert(
+            RatesMatch(ctx.DeltaSeconds, _settings.FixedDt),
+            "PhysicsSystem's fixed step and the accumulator's tick rate have drifted apart — configure them to match.");
+        _world.StepPhysics(in _settings);
+    }
 }

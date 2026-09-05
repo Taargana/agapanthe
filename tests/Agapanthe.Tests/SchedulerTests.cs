@@ -61,19 +61,19 @@ public sealed class SchedulerTests
     }
 
     [Fact]
-    public void FrameIndex_AdvancesWithTicksOnly()
+    public void TickIndex_AdvancesWithTicksOnly()
     {
         var scheduler = new SystemScheduler();
-        Assert.Equal(0, scheduler.FrameIndex);
+        Assert.Equal(0, scheduler.TickIndex);
 
         scheduler.Tick(1f / 60f);
         scheduler.Tick(1f / 60f);
 
-        Assert.Equal(2, scheduler.FrameIndex);
+        Assert.Equal(2, scheduler.TickIndex);
     }
 
     [Fact]
-    public void TickContext_CarriesTheDeltaAndTheFrameIndex()
+    public void TickContext_CarriesTheDeltaAndTheTickIndex()
     {
         float? seenDelta = null;
         long? seenFrame = null;
@@ -81,7 +81,7 @@ public sealed class SchedulerTests
         scheduler.Add(Stage.Simulation, new LambdaSystem(ctx =>
         {
             seenDelta = ctx.DeltaSeconds;
-            seenFrame = ctx.FrameIndex;
+            seenFrame = ctx.TickIndex;
         }));
 
         scheduler.Tick(1f / 60f);

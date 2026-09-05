@@ -34,7 +34,7 @@ public sealed class SystemScheduler
     private readonly Action? _barrier;
 
     private bool _frozen;
-    private long _frameIndex;
+    private long _tickIndex;
 
     public SystemScheduler(Action? structuralBarrier = null)
     {
@@ -47,7 +47,7 @@ public sealed class SystemScheduler
     }
 
     /// <summary>Ticks run so far. A tick is not a frame: a frame can be skipped, a tick never is.</summary>
-    public long FrameIndex => _frameIndex;
+    public long TickIndex => _tickIndex;
 
     /// <summary>
     /// Registers a simulation system. Systems in the same stage run in <b>registration order</b> — that is a
@@ -100,7 +100,7 @@ public sealed class SystemScheduler
     public void Tick(float deltaSeconds)
     {
         _frozen = true;
-        var ctx = new TickContext(deltaSeconds, _frameIndex);
+        var ctx = new TickContext(deltaSeconds, _tickIndex);
 
         for (var stage = 0; stage < TickStageCount; stage++)
         {
@@ -113,7 +113,7 @@ public sealed class SystemScheduler
             _barrier?.Invoke(); // end-of-stage structural barrier
         }
 
-        _frameIndex++;
+        _tickIndex++;
     }
 
     private void ThrowIfFrozen()
