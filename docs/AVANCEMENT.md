@@ -1,6 +1,6 @@
 # Agapanthe — Plan complet & état d'avancement
 
-**Mis à jour** : 2026-09-05 (session 28 — **MP-0c CLOS** : autorité du temps — `FixedTimestepAccumulator` (`Agapanthe.Engine`) découple la vitesse de sim du framerate (`Advance`→N pas fixes, clamp 250 ms, garde de ratio, non-fini→0 + `SanitisedInputCount`, `AdvanceFrame`) ; `FrameIndex`→`TickIndex` partout + off-by-one `CurrentTick` corrigé (`Math.Max(0L,TickIndex-1)` = dernier tick exécuté, épinglé) ; `PhysicsSystem.RatesMatch` + assert, `PhysicsSettings.FixedDt` inchangé ; captures **inchangées** via dt synthétique quand `AGAPANTHE_MAX_FRAMES` posé (prédiction du brainstorm corrigée) ; `AccumulatorEquivalenceTests` = équivalence tick-count (entiers) ; double audit PASS-with-concerns ×2 (4,2/5), aucun 🔴, 8 findings appliqués ; 558 tests, `HeadlessSim` JIT==AOT inchangé, 0 leak/0 validation) · 2026-09-02 (session 27 — **MP-0b CLOS** : identité d'entité — `ContactPairKey` 128 bits (clé de contact) + `GlobalIdRange` (plage d'allocation) + `UniverseId`/snapshot v2 (identité par fichier, 5 cas de réconciliation testés) ; double audit W4 a trouvé et corrigé un 🔴 (perte silencieuse d'entité sur collision d'id au `Load`) ; hash `HeadlessSim` re-épinglé `7e8dc68f…` (v2, 1868 o), désormais gardé par un test et non plus seulement par la prose ; verdict humain PASS ; 530 tests, captures inchangées) · 2026-08-13 (session 26 — **MP-0a CLOS** : headless split ; `Agapanthe.Engine` ne référence plus que `{Core, World}`, nouveau `Agapanthe.Engine.Render`, `SimulationHost` extrait, `samples/HeadlessSim` simule en NativeAOT **sans GPU** ; MP-0 décomposé en 4 sous-jalons ; double audit PASS-with-concerns ×2 [4,2/5], aucun 🔴 ; 491 tests, captures inchangées) · 2026-08-13 (session 25 — **UI-2 CLOS** : overlay debug in-view + profiler CPU ; `FrameStats`/`Sparkline`/`TextBuilder` + `DebugOverlaySystem`, le HUD `window.Title` et son hack de cession disparaissent, **gate 0-alloc visible en continu à l'écran**, bascule `F3` ; double audit PASS-with-concerns ×2 ; 468 tests, AOT PASS · **synchronization validation activée** et 3 hazards préexistants corrigés) · 2026-08-11 (session 25 — **UI-1 CLOS** : texte à l'écran ; FontCooker SDF hors-ligne + `.agfont` + `Agapanthe.Ui` GPU-free + passe UI ; double audit PASS-with-concerns ×2, verdict humain PASS ; 435 tests, AOT PASS) · 2026-08-03 (session 25 — **RÉORIENTATION cap « vrai engine »** [backlog §4quater] : artefact = le moteur, multijoueur serveur autoritaire, MP-0 = prochain jalon ; VS-4/VS-5 en pause · **brainstorm Texte & UI terminé**, spec `plans/2026-08-03-text-ui-design.md`, 3 jalons UI-1/2/3) · 2026-07-26 (session 24 — **VS-3 CLOS** : glu gameplay = défi d'atterrissage planétaire ; `QuerySurfaceContacts` + règle latchée `LandingChallengeRule` + scène `planet-challenge` (input→spawn→règle→save/resume) ; double audit PASS / PASS-with-concerns 4/5, verdict humain PASS ; 372 tests, AOT PASS) · 2026-07-26 (session 23 — **VS-2 CLOS** : spawn runtime différé (`SpawnBodyDeferred`) + gravité newtonienne (attracteur radial + sol radial) ; double audit PASS-with-concerns [4,5/5], verdict visuel PASS ; scène `planet-drop`, 355 tests, AOT PASS) · 2026-07-24 (session 22 — **VS-1 CLOS** : sérialisation du World save/load, double audit PASS, verdict humain PASS) · 2026-07-23 (session 20 — **P3-M7 CLOS** : buffers device-local + réduction du raster d'ombre 4×→~1× ; double audit PASS, verdict visuel PASS incl. soleil bas ; A+B ~15,3 → ~8,0 ms ≈ ×2) · 2026-07-23 (session 19 — **P3-M6 CLOS** : slots persistants dirty-trackés + cull d'ombre GPU ; double audit PASS, verdict visuel PASS ; voir « Point de reprise ») · 2026-07-14 (session 14 — **vérifs humaines de la Phase 2 soldées** : banc M4 PASS with concerns [perf → P3-M1], précision M3 PASS, hot reload M1 PASS) · 2026-07-13 (session 13 — **PHASE 2 CLOSE** — frustum culling + montée en charge : 10 000 entités cullées à 10 000 km, 0 alloc/frame, en NativeAOT ; double audit signe la clôture) · **Machines de dev** : macOS (Apple M3, MoltenVK) + Windows 11 (RTX 5070 Ti, Vulkan 1.3 core) · **Cibles** : Windows / Linux / macOS
+**Mis à jour** : 2026-09-06 (session 29 — **MP-0d CLOS → MP-0 CLOS (4/4)** : input → commandes horodatées ; `SimCommand`/`InputSnapshot` blittables (56/40 o, offsets épinglés) + `SimCommandQueue` (drain compacté avant handlers, ré-entrant safe) + `InputMap` déclaratif + phase input dans `SimulationHost.Tick` avant `Stage.Input` + `DiscardedCommandCount` ; `GameWorld.SetBodyVelocity` (garde `Has<Velocity>`, audit LL 🔴) ; `HeadlessSim --drive` = gate JIT==AOT `97e786f0…` ; `Key.B` Sandbox passe par `Commands.Enqueue` ; double audit `engine-architect` 4,3/5 + `csharp-lowlevel` 1 🔴 trouvé-et-corrigé ; 589 tests, captures inchangées, 0 leak/0 validation) · 2026-09-05 (session 28 — **MP-0c CLOS** : autorité du temps — `FixedTimestepAccumulator` (`Agapanthe.Engine`) découple la vitesse de sim du framerate (`Advance`→N pas fixes, clamp 250 ms, garde de ratio, non-fini→0 + `SanitisedInputCount`, `AdvanceFrame`) ; `FrameIndex`→`TickIndex` partout + off-by-one `CurrentTick` corrigé (`Math.Max(0L,TickIndex-1)` = dernier tick exécuté, épinglé) ; `PhysicsSystem.RatesMatch` + assert, `PhysicsSettings.FixedDt` inchangé ; captures **inchangées** via dt synthétique quand `AGAPANTHE_MAX_FRAMES` posé (prédiction du brainstorm corrigée) ; `AccumulatorEquivalenceTests` = équivalence tick-count (entiers) ; double audit PASS-with-concerns ×2 (4,2/5), aucun 🔴, 8 findings appliqués ; 558 tests, `HeadlessSim` JIT==AOT inchangé, 0 leak/0 validation) · 2026-09-02 (session 27 — **MP-0b CLOS** : identité d'entité — `ContactPairKey` 128 bits (clé de contact) + `GlobalIdRange` (plage d'allocation) + `UniverseId`/snapshot v2 (identité par fichier, 5 cas de réconciliation testés) ; double audit W4 a trouvé et corrigé un 🔴 (perte silencieuse d'entité sur collision d'id au `Load`) ; hash `HeadlessSim` re-épinglé `7e8dc68f…` (v2, 1868 o), désormais gardé par un test et non plus seulement par la prose ; verdict humain PASS ; 530 tests, captures inchangées) · 2026-08-13 (session 26 — **MP-0a CLOS** : headless split ; `Agapanthe.Engine` ne référence plus que `{Core, World}`, nouveau `Agapanthe.Engine.Render`, `SimulationHost` extrait, `samples/HeadlessSim` simule en NativeAOT **sans GPU** ; MP-0 décomposé en 4 sous-jalons ; double audit PASS-with-concerns ×2 [4,2/5], aucun 🔴 ; 491 tests, captures inchangées) · 2026-08-13 (session 25 — **UI-2 CLOS** : overlay debug in-view + profiler CPU ; `FrameStats`/`Sparkline`/`TextBuilder` + `DebugOverlaySystem`, le HUD `window.Title` et son hack de cession disparaissent, **gate 0-alloc visible en continu à l'écran**, bascule `F3` ; double audit PASS-with-concerns ×2 ; 468 tests, AOT PASS · **synchronization validation activée** et 3 hazards préexistants corrigés) · 2026-08-11 (session 25 — **UI-1 CLOS** : texte à l'écran ; FontCooker SDF hors-ligne + `.agfont` + `Agapanthe.Ui` GPU-free + passe UI ; double audit PASS-with-concerns ×2, verdict humain PASS ; 435 tests, AOT PASS) · 2026-08-03 (session 25 — **RÉORIENTATION cap « vrai engine »** [backlog §4quater] : artefact = le moteur, multijoueur serveur autoritaire, MP-0 = prochain jalon ; VS-4/VS-5 en pause · **brainstorm Texte & UI terminé**, spec `plans/2026-08-03-text-ui-design.md`, 3 jalons UI-1/2/3) · 2026-07-26 (session 24 — **VS-3 CLOS** : glu gameplay = défi d'atterrissage planétaire ; `QuerySurfaceContacts` + règle latchée `LandingChallengeRule` + scène `planet-challenge` (input→spawn→règle→save/resume) ; double audit PASS / PASS-with-concerns 4/5, verdict humain PASS ; 372 tests, AOT PASS) · 2026-07-26 (session 23 — **VS-2 CLOS** : spawn runtime différé (`SpawnBodyDeferred`) + gravité newtonienne (attracteur radial + sol radial) ; double audit PASS-with-concerns [4,5/5], verdict visuel PASS ; scène `planet-drop`, 355 tests, AOT PASS) · 2026-07-24 (session 22 — **VS-1 CLOS** : sérialisation du World save/load, double audit PASS, verdict humain PASS) · 2026-07-23 (session 20 — **P3-M7 CLOS** : buffers device-local + réduction du raster d'ombre 4×→~1× ; double audit PASS, verdict visuel PASS incl. soleil bas ; A+B ~15,3 → ~8,0 ms ≈ ×2) · 2026-07-23 (session 19 — **P3-M6 CLOS** : slots persistants dirty-trackés + cull d'ombre GPU ; double audit PASS, verdict visuel PASS ; voir « Point de reprise ») · 2026-07-14 (session 14 — **vérifs humaines de la Phase 2 soldées** : banc M4 PASS with concerns [perf → P3-M1], précision M3 PASS, hot reload M1 PASS) · 2026-07-13 (session 13 — **PHASE 2 CLOSE** — frustum culling + montée en charge : 10 000 entités cullées à 10 000 km, 0 alloc/frame, en NativeAOT ; double audit signe la clôture) · **Machines de dev** : macOS (Apple M3, MoltenVK) + Windows 11 (RTX 5070 Ti, Vulkan 1.3 core) · **Cibles** : Windows / Linux / macOS
 
 ## Vision
 
@@ -447,31 +447,59 @@ Spec : [2026-07-25-vs2-spawn-runtime-newtonian-gravity-design.md](plans/2026-07-
 > littéraux `1f/60f` indépendants → le rendre une donnée de config de la simulation est un prérequis netcode** · `bool
 > HasTicked` (désambiguïse `TickIndex == 0`) · ancrage thread dans `Tick`.
 >
-> ### ▶️ MP-0d — **SPEC APPROUVÉE (4,30/5), exécution en attente** (dernier sous-jalon de MP-0)
-> **Input → commandes horodatées.** Spec :
-> **[plans/2026-09-06-mp0d-input-commands-design.md](plans/2026-09-06-mp0d-input-commands-design.md)** (2 tours de
-> revue scorée `engine-architect` : v1 3,33 NEEDS WORK — toutes les citations exactes, 2 🔴 + 6 🟠 ; v2 4,30
-> APPROVED, R1-R4 repliés). Brainstorm S28, 10 décisions verrouillées.
+> ### ✅ **MP-0d CLOS (S29)** — input → commandes horodatées : l'input n'atteint la sim qu'en tant que commande
+> **Dernier sous-jalon de MP-0 → MP-0 CLOS (4/4).** Spec :
+> **[plans/2026-09-06-mp0d-input-commands-design.md](plans/2026-09-06-mp0d-input-commands-design.md)** (approuvée
+> 4,30/5, v1 3,33 NEEDS WORK — 2 🔴 + 6 🟠, toutes citations exactes). 4 vagues, feu vert humain entre chaque.
 >
-> **Ce que le jalon livre** : `Agapanthe.Engine` gagne `SimCommand` (blittable, `[StructLayout(Sequential)]`,
-> `long TargetTick` + `byte Kind` opaque + `EntityRef Target` + **`Double3 Vector`** + `float Scalar` + `uint
-> Flags`, 56 o), `InputSnapshot` générique (`Held/Pressed/Released` + `[InlineArray(4)] float Axes`, 40 o),
-> `InputMap` déclaratif (`BindButton`/`BindAxisVector`), `SimCommandQueue` (FIFO-par-tick, `AssertOwnerThread`
-> qui **jette**), `InputTranslation.Emit`. `SimulationHost.Tick` gagne une phase input+commande **avant**
-> `_scheduler.Tick` : `SampleInput()` (callback app 1×/tick) → traduction déclarative → `Commands.DrainUpTo(tick,
-> ApplyCommand)`. L'accumulateur MP-0c est **inchangé**. `GameWorld.SetBodyVelocity(EntityRef, Vector3)` (1
-> méthode). Démo : scène Sandbox `AGAPANTHE_SCENE=drive` (entité pilotable WASD, corps gravité-zéro
-> vélocité-contrôlé — **non épinglée**) + **`HeadlessSim --drive`** (input scripté = le gate déterministe, nouveau
-> MD5). `Key.B` → `host.Commands.Enqueue` direct (porte `camera.Position`). Captures `12638edd`/`03421357`
-> **inchangées** (`planet-drop` n'exerce aucun input sous capture).
+> **Livré** — `Agapanthe.Engine` (closure `{Core, World}` **intacte**, `EngineIsHeadlessTests` vert) :
+> - `SimCommand` (`readonly record struct`, `[Sequential]`, **56 o** — offsets épinglés par test) : `long
+>   TargetTick` · `byte Kind` **opaque** (l'app définit ses constantes, l'engine n'interprète jamais) · `EntityRef
+>   Target` · **`Double3 Vector`** · `float Scalar` · `uint Flags`. `SimCommandHandler` delegate.
+> - `InputSnapshot` (`[Sequential]`, **40 o**) : `Held`/`Pressed`/`Released` (edges) + `InputAxes` =
+>   `[InlineArray(4)] float` (**1ʳᵉ utilisation projet**, AOT-safe, exercée par le probe).
+> - `InputMap` déclaratif : `BindButton(bit, kind, OnPress|OnRelease|WhileHeld)` + `BindAxisVector(kind, x, y, z)`
+>   (une commande/tick, `Vector` = les axes liés). Le binding axis laisse **`Target = default`** — un client n'a
+>   pas autorité sur *quelle* entité ; l'ownership routing vivra dans `ApplyCommand` (`EntityRef` ctor `internal`).
+> - `SimCommandQueue` : insertion sort stable (`>` strict = FIFO à tick égal), `DrainUpTo(tick, handler)` **lève le
+>   préfixe dû dans un scratch et compacte AVANT d'appeler les handlers** → un handler peut `Enqueue` sans
+>   corruption (sa commande attend le drain suivant) ; drain ré-entrant → throw ; garde owner-thread
+>   `[Conditional("DEBUG")]` qui **lève** (patron `GameWorld.AssertOwnerThread`).
+> - `InputTranslation.Emit` : static, stateless, 0-alloc, pas de `prev`.
 >
-> **Différé (dette)** : `SimCommand.OriginatorId` / identité de peer · format fil des commandes (blittable
-> maintenant, test) · harness replay/log · routage d'ownership de `SimCommand.Target` · flood protection de la
-> file · rien de réseau. Détail : board `.absolute-human/board.md` + la spec.
+> `SimulationHost.Tick` gagne une phase **avant `Stage.Input`** : `SampleInput()` (1×/tick) → `InputTranslation.Emit`
+> → `Commands.DrainUpTo(_scheduler.TickIndex, ApplyCommand ?? _discard)`. Drain avant toute stage → `ApplyCommand`
+> mute sans query en vol, `StepPhysics` voit la vélocité le même tick. `ApplyCommand` null →
+> **`DiscardedCommandCount`** (signal Release, patron `SanitisedInputCount` de MP-0c — **pas** un `Debug.Assert`).
+> L'accumulateur MP-0c **inchangé**.
 >
-> **Reprise** : lancer `absolute-work` sur les 4 vagues de la spec (W1 mécanisme Engine isolé → W2 câblage host +
-> `SetBodyVelocity` → W3 démo → W4 captures + double audit + tail), feu vert humain entre chaque, commit sur
-> demande.
+> `GameWorld.SetBodyVelocity(EntityRef, Vector3)` : gardes standard **+ `Has<Velocity>()` → throw** (Arch `Set<T>`
+> sur le mauvais archétype = écriture hors-bornes silencieuse, et `SimCommand.Target` est une donnée externe —
+> audit LL 🔴).
+>
+> **Démos** : `HeadlessSim --drive` (séquence `InputSnapshot` scriptée, **le gate déterministe**, MD5
+> `97e786f0455a53d856b9ba4affca1003` / 208 o, **JIT == AOT**, épinglé dans `HeadlessSimSnapshotFormatTests`) ·
+> Sandbox `AGAPANTHE_SCENE=drive` (interactif, **non épinglé**, caméra fixe, WASD + `X` brake) · `Key.B`
+> (planet-drop/challenge) → `orchestrator.Simulation.Commands.Enqueue` stampé `TickIndex` portant `camera.Position`,
+> routé par `ApplyCommand` vers `TryShoot`/`DropOne`.
+>
+> **Gates** : **589 tests** (+31) · 0 warning · HDR **`12638edd`** / UI **`03421357`** **inchangés** (×3) ·
+> `HeadlessSim` défaut `7e8dc68f…` **inchangé** · `HeadlessSim --drive` `97e786f0…` **JIT == AOT** ·
+> `AotComponentProbe` PASS (`IsDynamicCodeSupported=False`) · 0 leak / 0 validation. Double audit :
+> `engine-architect` PASS-with-concerns **4,3/5** (aucun 🔴) · `csharp-lowlevel` PASS-with-concerns (**1 🔴
+> trouvé-et-corrigé** : `SetBodyVelocity` sans `Has<Velocity>`). Findings 🟠 appliqués : file ré-entrante,
+> `DiscardedCommandCount`, offsets de champs testés.
+>
+> **Dette laissée** (board §Deferred) : extraire un `SimulationInput` de `SimulationHost` **au 2ᵉ concern** input
+> (receive réseau / ownership routing / replay log), pas avant · purge `Commands` sur un `GameWorld.Load`
+> in-process (avec la dette `FixedTimestepAccumulator.Reset()`) · cap anti-flood de `SimCommandQueue` ·
+> `OriginatorId` / identité de pair · format fil (send/recv) · le clone `RunDrive` dans les tests.
+>
+> ### ▶️ Reprise — `Agapanthe.App` (premier hôte de prod) ou UI-3 (timestamps GPU)
+> MP-0 est CLOS (4/4). Le prochain grand pas du cap moteur : **`Agapanthe.App`** — extraire `Program.cs` (2 300+
+> lignes : bootstrap + contenu + 6 scènes + 4 caméras + input + gameplay) en un host + un contrat `Game`, et **c'est
+> là que le premier `UniverseId` réel se stampe** (dette MP-0b) et que la topologie de déploiement se choisit.
+> Alternative courte : **UI-3** (timestamps GPU + refactor du seam `FrameProfiler` réservé par UI-2).
 >
 > ### Contexte — **Cap moteur** (réorientation S25)
 > **Vertical Slice CLOSE dans son intention** : VS-1 (S22) · VS-2 (S23) · VS-3 (S24) ont prouvé l'intégration
@@ -492,7 +520,8 @@ Spec : [2026-07-25-vs2-spawn-runtime-newtonian-gravity-design.md](plans/2026-07-
 > 2. 🔴 **Clé de contact physique** `(_pGid[j] << 32) | (uint)_pGid[k]` **écrase l'ID sur 32 bits** → couplé au point 1,
 >    collision **silencieuse** entre shards. Fix : deux clés parallèles, ordre déterministe préservé.
 > 3. ~~🟠 **Split headless**~~ ✅ **LIVRÉ (MP-0a, S26)**.
-> 4. 🟠 **Input → commandes horodatées** (aujourd'hui l'input mute directement) — **MP-0d, prochain**.
+> 4. ~~🟠 **Input → commandes horodatées**~~ ✅ **LIVRÉ (MP-0d, S29)** — `SimCommand`/`SimCommandQueue`/`InputMap` +
+>    phase dans `SimulationHost.Tick` + `HeadlessSim --drive`.
 > 5. ~~🟠 **Tick de simulation découplé**~~ ✅ **LIVRÉ (MP-0c, S28)** — `FixedTimestepAccumulator`. L'interpolation
 >    visuelle reste 🟡 (jalon dédié).
 >

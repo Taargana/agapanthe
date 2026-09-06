@@ -22,6 +22,12 @@ public sealed class HeadlessSimSnapshotFormatTests
     private const int Bodies = 8;
     private const float FixedDt = 1f / 60f;
 
+    // MP-0d --drive gate (mirrors HeadlessSim/Program.cs RunDrive).
+    private const byte DriveMoveKind = 1;
+    private const byte DriveBrakeKind = 2;
+    private const int DriveBrakeBit = 0;
+    private const float DriveSpeed = 5f;
+
     // Mirrors samples/HeadlessSim/Program.cs's BuildScene + main loop exactly (defaults: --ticks 600 --bodies 8).
     private static byte[] RunHeadlessSimScene()
     {
@@ -70,5 +76,84 @@ public sealed class HeadlessSimSnapshotFormatTests
         Assert.Equal(ExpectedByteLength, bytes.Length);
         var actualMd5 = Convert.ToHexStringLower(MD5.HashData(bytes));
         Assert.Equal(ExpectedMd5, actualMd5);
+    }
+
+    // Mirrors samples/HeadlessSim/Program.cs's RunDrive exactly (`--drive --ticks 600`): one zero-gravity body
+    // steered by a scripted per-tick InputSnapshot through the MP-0d declarative translation + ApplyCommand.
+    private static byte[] RunHeadlessSimDriveScene()
+    {
+        using var world = new GameWorld();
+
+        var spec = new ImportedEntitySpec(
+            new MeshHandle(0, 1), new MaterialHandle(0, 1), Double3.Zero, Matrix4x4.Identity, Vector3.Zero, 1f, 0u);
+        var body = world.SpawnBody(in spec, Vector3.Zero, inverseMass: 1f, restitution: 0f, radius: 1f);
+        world.FlushStructuralChanges();
+
+        var host = SimulationHost.CreateDefault(world);
+        var settings = new PhysicsSettings(Vector3.Zero, groundY: -100_000f, fixedDt: FixedDt);
+        host.Add(Stage.Simulation, new PhysicsSystem(world, in settings));
+
+        var map = new InputMap();
+        map.BindAxisVector(DriveMoveKind, axisX: 0, axisY: 1, axisZ: 2);
+        map.BindButton(DriveBrakeBit, DriveBrakeKind, ButtonTrigger.OnPress);
+        host.InputMap = map;
+
+        host.ApplyCommand = (in SimCommand cmd) =>
+        {
+            if (!world.IsAlive(body))
+            {
+                return;
+            }
+
+            switch (cmd.Kind)
+            {
+                case DriveMoveKind:
+                    world.SetBodyVelocity(body, cmd.Vector.ToVector3(Double3.Zero) * DriveSpeed);
+                    break;
+                case DriveBrakeKind:
+                    world.SetBodyVelocity(body, Vector3.Zero);
+                    break;
+            }
+        };
+
+        host.SampleInput = () =>
+        {
+            var s = default(InputSnapshot);
+            var t = host.TickIndex;
+            s.Axes[0] = t < 60 ? 1f : t < 120 ? -1f : 0f;
+            if (t == 120)
+            {
+                s.Pressed = 1UL << DriveBrakeBit;
+            }
+
+            return s;
+        };
+
+        for (var i = 0; i < Ticks; i++)
+        {
+            host.BeginFrame();
+            host.Tick(FixedDt);
+            host.EndFrame();
+        }
+
+        using var ms = new MemoryStream();
+        world.Save(ms);
+        return ms.ToArray();
+    }
+
+    // Pinned 2026-09-06 (MP-0d W3). Reproduced identically by `dotnet run` (JIT) and a NativeAOT win-x64 publish of
+    // samples/HeadlessSim (`--drive --ticks 600 --save`). One body, so 208 bytes vs the default scene's 1868.
+    // Re-derive with: dotnet run --project samples/HeadlessSim -c Debug -- --drive --ticks 600 --save <path>
+    private const string ExpectedDriveMd5 = "97e786f0455a53d856b9ba4affca1003";
+    private const int ExpectedDriveByteLength = 208;
+
+    [Fact]
+    public void HeadlessSimDriveScene_SnapshotHash_MatchesPinnedValue()
+    {
+        var bytes = RunHeadlessSimDriveScene();
+
+        Assert.Equal(ExpectedDriveByteLength, bytes.Length);
+        var actualMd5 = Convert.ToHexStringLower(MD5.HashData(bytes));
+        Assert.Equal(ExpectedDriveMd5, actualMd5);
     }
 }

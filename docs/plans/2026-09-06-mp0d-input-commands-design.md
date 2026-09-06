@@ -268,9 +268,12 @@ public void SetBodyVelocity(EntityRef entity, System.Numerics.Vector3 linear)
   far below.
 - `host.InputMap`: `BindAxisVector(kind: MoveIntent, 0, 1, 2)` and `BindButton(bit: Brake, kind: Brake,
   OnPress)` — the button binding exercises `OnPress` + the `Pressed` bits deterministically.
-- `host.ApplyCommand`: `MoveIntent` → `if (world.IsAlive(cmd.Target)) world.SetBodyVelocity(cmd.Target,
-  cmd.Vector.ToVector3(Double3.Zero) * MoveSpeed)` — `Vector` is a *direction*, so `ToVector3(Double3.Zero)` is a
-  plain narrow, no origin to subtract; `Brake` → `SetBodyVelocity(cmd.Target, Vector3.Zero)`.
+- `host.ApplyCommand`: `MoveIntent` → `world.SetBodyVelocity(steerableBody, cmd.Vector.ToVector3(Double3.Zero) *
+  MoveSpeed)` on the scene's known body (the declarative binding leaves `cmd.Target` = `default`; ownership
+  routing lives in `ApplyCommand`, not the map — see `SimCommand.Target`). `Vector` is a *direction*, so
+  `ToVector3(Double3.Zero)` is a plain narrow; `Brake` → `SetBodyVelocity(steerableBody, Vector3.Zero)`. Guard on
+  `world.IsAlive(steerableBody)` — a live non-body handle now throws (audit LL F1). **Corrected from the v-final
+  text, which read `cmd.Target` and would have no-op'd (`IsAlive(default)` is false).**
 - `host.SampleInput`: interactive — reads WASD/Space/C from `EngineWindow`, writes axes 0/1/2 as −1/0/+1, sets
   the Brake bit from a pending-edge mask fed by `KeyPressed`.
 - `Key.B` in planet-challenge / planet-drop: the `KeyPressed` handler builds
@@ -376,3 +379,26 @@ action-map assets · `CameraInput` unification (camera stays a client/view conce
 `absolute-work` — waves W1 (Engine mechanism, isolated) → W2 (wire into `SimulationHost` + `GameWorld
 .SetBodyVelocity`) → W3 (demo: `drive` scene, `Key.B`, `HeadlessSim --drive`, `AotComponentProbe`) → W4
 (captures + double audit + tail), human greenlight between waves, commit on explicit request only.
+
+## Execution outcome (session 29)
+
+Delivered across W1–W4. 589 tests (+31), 0 warning, captures `12638edd…` / `03421357…` unchanged (×3),
+`HeadlessSim --drive` JIT == AOT `97e786f0455a53d856b9ba4affca1003` (208 B, new pin), default `7e8dc68f…`
+unchanged, `AotComponentProbe` PASS (`IsDynamicCodeSupported=False`).
+
+Double audit — `engine-architect` PASS-with-concerns 4.3/5 (no 🔴), `csharp-lowlevel` PASS-with-concerns (1 🔴).
+Findings applied before close:
+- **🔴 (LL F1)** `GameWorld.SetBodyVelocity` / `GetVelocity` now guard `Has<Velocity>()` and throw — Arch's
+  `Set<T>` on a wrong archetype is a silent out-of-bounds write, and `SimCommand.Target` is external data.
+- **🟠 (both)** `SimCommandQueue.DrainUpTo` lifts the due prefix into scratch and compacts *before* running any
+  handler; re-entrant drain throws. A handler may now `Enqueue` safely (its command waits for the next drain).
+- **🟠 (both)** `DiscardHandler` (Debug-only assert) replaced by `SimulationHost.DiscardedCommandCount`, the
+  MP-0c `SanitisedInputCount` shape.
+- **🟠 (LL F4)** `SimCommandTests` now asserts field byte offsets, not just size.
+- Docs: `SimCommand.Target` / `InputMap.BindAxisVector` note the declarative path leaves `Target = default`;
+  `Tick` XML states the phase order; `ApplyCommand` says assign, not `+=`.
+
+Deferred (board §Deferred Work): extract `SimulationInput` from `SimulationHost` *at the second concern joining
+the input group* (net receive path / ownership routing / replay log) — not before; purge `Commands` on an
+in-process `GameWorld.Load` (with the `FixedTimestepAccumulator.Reset()` debt); `SimCommandQueue` flood cap;
+`OriginatorId` / peer identity; the drive-scene `RunDrive` clone in `HeadlessSimSnapshotFormatTests`.

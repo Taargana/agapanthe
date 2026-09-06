@@ -35,11 +35,14 @@ public sealed class SimulationHost
     // so LastFrameTickCount always describes the last COMPLETE frame — same lifecycle as LastFrameMs.
     private int _frameTickCount;
 
+    private readonly SimCommandHandler _discard;
+
     private SimulationHost(GameWorld world)
     {
         // The structural barrier the scheduler runs at the end of every stage IS the world's deferred-change flush
         // (P3-M2 D2): a system enqueues spawns/despawns, the barrier applies them before the next stage iterates.
         _scheduler = new SystemScheduler(world.FlushStructuralChanges);
+        _discard = Discard; // cached once — `ApplyCommand ?? _discard` then allocates nothing per tick
     }
 
     /// <summary>
@@ -58,6 +61,53 @@ public sealed class SimulationHost
     /// <summary>Registers a simulation system (Input / Simulation / PostSimulation). See
     /// <see cref="SystemScheduler.Add(Stage, ISystem)"/>: registration order is execution order, frozen at first tick.</summary>
     public void Add(Stage stage, ISystem system) => _scheduler.Add(stage, system);
+
+    // ── MP-0d: input → timestamped commands ───────────────────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// The application's per-tick input source. Invoked once at the top of every <see cref="Tick"/> (so a catch-up
+    /// frame running N ticks samples input N times — the callback must serve one edge per physical press across
+    /// those calls, see <see cref="InputSnapshot"/>). Null (the default) skips the whole input phase — the engine
+    /// adds no input system, <see cref="Stage.Input"/> stays the application's.
+    /// </summary>
+    public Func<InputSnapshot>? SampleInput { get; set; }
+
+    /// <summary>The declarative input→command map applied to each <see cref="SampleInput"/> result. Null skips the
+    /// map (the application may still <see cref="SimCommandQueue.Enqueue"/> onto <see cref="Commands"/> directly —
+    /// e.g. a discrete key that needs client context the map cannot supply).</summary>
+    public InputMap? InputMap { get; set; }
+
+    /// <summary>
+    /// The application's command apply-point: it validates (budget, target liveness) then executes. The
+    /// server-authoritative split — the client emits intent, this decides whether to honour it. When null, a
+    /// drained command increments <see cref="DiscardedCommandCount"/> and is dropped.
+    /// <para>
+    /// <b>Assign it (<c>=</c>), never <c>+=</c>.</b> The authority point is single: two handlers each "validating"
+    /// the same command is a contradiction. The type is a delegate only because it is the natural shape.
+    /// </para>
+    /// </summary>
+    public SimCommandHandler? ApplyCommand { get; set; }
+
+    /// <summary>
+    /// The command buffer drained each tick at <see cref="TickIndex"/>. Composed by the host (it owns nothing else
+    /// — this is the one exception, because a dedicated server binds its network receive path here). The
+    /// application may enqueue directly for discrete, context-carrying commands.
+    /// </summary>
+    public SimCommandQueue Commands { get; } = new();
+
+    /// <summary>The input sampled at the top of the current/last <see cref="Tick"/> — diagnostic; a
+    /// <see cref="Stage.Input"/> system may read it.</summary>
+    public InputSnapshot CurrentInput { get; private set; }
+
+    /// <summary>
+    /// How many commands were drained with no <see cref="ApplyCommand"/> set and therefore discarded — a
+    /// Release-readable signal, in the shape MP-0c chose for <c>FixedTimestepAccumulator.SanitisedInputCount</c>
+    /// (a counter any build / test / telemetry can read beats a Debug-only assert). Non-zero means input is being
+    /// produced but nothing consumes it — on a dedicated server, every peer's input dropped.
+    /// </summary>
+    public long DiscardedCommandCount { get; private set; }
+
+    private void Discard(in SimCommand command) => DiscardedCommandCount++;
 
     /// <summary>Monotonic tick counter (see <see cref="SystemScheduler.TickIndex"/>).</summary>
     public long TickIndex => _scheduler.TickIndex;
@@ -91,12 +141,32 @@ public sealed class SimulationHost
     public TickContext CurrentTick => new(_dt, Math.Max(0L, _scheduler.TickIndex - 1));
 
     /// <summary>
-    /// Runs Input → Simulation → PostSimulation for one frame, each stage closed by the structural barrier.
+    /// Runs one tick: <b>MP-0d input phase (sample → translate → drain commands) → <see cref="Stage.Input"/> →
+    /// <see cref="Stage.Simulation"/> → <see cref="Stage.PostSimulation"/></b>, each stage closed by the structural
+    /// barrier. The input phase is before <see cref="Stage.Input"/> on purpose: a command handler mutates
+    /// components (and may spawn) while no query iterates, and a <see cref="Stage.Input"/> system can then read the
+    /// result via <see cref="CurrentInput"/>.
+    /// <para>
     /// <b>Always</b> call it, including on a frame the renderer will skip: the simulation does not stop because a
     /// window is being resized (D1.a).
+    /// </para>
     /// </summary>
     public void Tick(float deltaSeconds)
     {
+        // MP-0d: sample input, translate it to commands, and drain everything due for the tick ABOUT to run
+        // (_scheduler.TickIndex, incremented after the stages). The drain is before any stage, so ApplyCommand
+        // mutates components while no query iterates and Stage.Simulation sees the change the same tick.
+        if (SampleInput is not null)
+        {
+            CurrentInput = SampleInput();
+            if (InputMap is not null)
+            {
+                InputTranslation.Emit(CurrentInput, InputMap, Commands, _scheduler.TickIndex);
+            }
+        }
+
+        Commands.DrainUpTo(_scheduler.TickIndex, ApplyCommand ?? _discard);
+
         _dt = deltaSeconds;
         _scheduler.Tick(deltaSeconds);
         _frameTickCount++;

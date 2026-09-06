@@ -445,8 +445,51 @@ public sealed partial class GameWorld
     private static long CellHash(long cx, long cy, long cz)
         => (cx * 73856093L) ^ (cy * 19349663L) ^ (cz * 83492791L);
 
-    /// <summary>Test/inspection accessor: the body's current linear velocity.</summary>
-    internal Vector3 GetVelocity(EntityRef entity) => Deref(entity).Get<Velocity>().Linear;
+    /// <summary>Test/inspection accessor: the body's current linear velocity. Throws if the handle names no live
+    /// entity or one that is not a physics body (no <c>Velocity</c> component).</summary>
+    internal Vector3 GetVelocity(EntityRef entity)
+    {
+        var e = Deref(entity);
+        RequireBody(e, entity);
+        return e.Get<Velocity>().Linear;
+    }
+
+    // Arch's Entity.Set<T> does NOT check the archetype: on an entity without T it writes through
+    // Chunk.GetArray<T>()'s DangerousGetReferenceAt(-1) — a silent out-of-bounds write that corrupts a neighbouring
+    // component, no exception, no assert (Arch ships Release, its own asserts stripped). IsAlive cannot catch this
+    // (it knows nothing of the archetype), and SimCommand.Target is external, buffered, replayable data — the whole
+    // point of MP-0d — so the apply point's IsAlive gate is not enough. Fail loudly here instead (audit LL F1).
+    private static void RequireBody(in Entity e, EntityRef handle)
+    {
+        if (!e.Has<Velocity>())
+        {
+            throw new InvalidOperationException(
+                $"EntityRef {handle.Id} names a live entity that is not a physics body (no Velocity component).");
+        }
+    }
+
+    /// <summary>
+    /// Sets a physics body's linear velocity directly (MP-0d). For an externally-driven ("kinematic") body: a
+    /// command handler writes the velocity before the tick's <c>StepPhysics</c> integrates it, so the body moves
+    /// deterministically the same tick.
+    /// <para>
+    /// Throws for a dead handle, like every <see cref="GameWorld"/> mutator, <b>and</b> for a live handle that is
+    /// not a physics body (no <c>Velocity</c> component) — <see cref="IsAlive"/> alone does not prove the archetype,
+    /// and Arch's <c>Set&lt;T&gt;</c> would otherwise corrupt memory silently (audit LL F1). The caller (the app's
+    /// apply point) still gates on <see cref="IsAlive"/> for buffered or replayed commands. <see cref="IsAlive"/>
+    /// covers a despawn; it does <b>not</b> cover a deferred spawn still pending the structural barrier
+    /// (<c>Deref</c> throws for that state too) — a netcode-replay concern, not the MP-0d demo (which steers a
+    /// fixed body).
+    /// </para>
+    /// </summary>
+    public void SetBodyVelocity(EntityRef entity, Vector3 linear)
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        AssertOwnerThread();
+        var e = Deref(entity);
+        RequireBody(e, entity);
+        e.Set(new Velocity { Linear = linear });
+    }
 
     /// <summary>
     /// A generic, GPU-free, 0-alloc spatial aggregation over the rigid bodies (VS-3): counts the total, how many are

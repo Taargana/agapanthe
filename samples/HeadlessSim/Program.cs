@@ -14,16 +14,26 @@ using Agapanthe.World;
 //   --save <path>          write a VS-1 snapshot of the final state
 //   --load <path>          start from a snapshot instead of the built-in scene
 //   --bodies N             built-in scene size (default 8)
+//   --drive                MP-0d gate: steer one zero-gravity body with a SCRIPTED per-tick InputSnapshot
+//                          sequence through an InputMap + ApplyCommand — input → command → mutation, no GPU,
+//                          JIT == AOT. Ignores --bodies/--load.
 // Exit code 0 on success, 1 on a usage or I/O error.
 
 const int DefaultTicks = 600;
 const int DefaultBodies = 8;
 const float FixedDt = 1f / 60f;
 
+// MP-0d --drive command kinds (opaque bytes — the app owns them) and the steering model.
+const byte DriveMoveKind = 1;
+const byte DriveBrakeKind = 2;
+const int DriveBrakeBit = 0;
+const float DriveSpeed = 5f;
+
 var ticks = DefaultTicks;
 var bodies = DefaultBodies;
 string? savePath = null;
 string? loadPath = null;
+var drive = false;
 
 for (var i = 0; i < args.Length; i++)
 {
@@ -63,6 +73,9 @@ for (var i = 0; i < args.Length; i++)
             }
 
             break;
+        case "--drive":
+            drive = true;
+            break;
         default:
             Console.Error.WriteLine(
                 $"HeadlessSim: unknown or incomplete argument '{args[i]}'. "
@@ -79,9 +92,20 @@ if (loadPath is not null && bodies != DefaultBodies)
     return 1;
 }
 
+if (drive && (loadPath is not null || bodies != DefaultBodies))
+{
+    Console.Error.WriteLine("HeadlessSim: --drive builds its own one-body scene and conflicts with --load / --bodies.");
+    return 1;
+}
+
 try
 {
     using var world = new GameWorld();
+
+    if (drive)
+    {
+        return RunDrive(world, ticks, savePath);
+    }
 
     if (loadPath is not null)
     {
@@ -130,6 +154,82 @@ catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or A
 
 Console.WriteLine("HeadlessSim: PASS — simulation ran to completion with no GPU.");
 return 0;
+
+// MP-0d gate (--drive): one zero-gravity body, steered by a SCRIPTED per-tick InputSnapshot sequence run through
+// the engine's declarative translation + an ApplyCommand. Proves input → SimCommand → SetBodyVelocity end to end
+// with no GPU, and — pinned by a test against a fixed MD5 — byte-identically JIT and NativeAOT.
+static int RunDrive(GameWorld world, int ticks, string? savePath)
+{
+    var spec = new ImportedEntitySpec(
+        new MeshHandle(0, 1), new MaterialHandle(0, 1), Double3.Zero, Matrix4x4.Identity, Vector3.Zero, 1f, 0u);
+    var body = world.SpawnBody(in spec, Vector3.Zero, inverseMass: 1f, restitution: 0f, radius: 1f);
+    world.FlushStructuralChanges();
+
+    var host = SimulationHost.CreateDefault(world);
+    var settings = new PhysicsSettings(Vector3.Zero, groundY: -100_000f, fixedDt: FixedDt);
+    host.Add(Stage.Simulation, new PhysicsSystem(world, in settings));
+
+    var map = new InputMap();
+    map.BindAxisVector(DriveMoveKind, axisX: 0, axisY: 1, axisZ: 2);
+    map.BindButton(DriveBrakeBit, DriveBrakeKind, ButtonTrigger.OnPress);
+    host.InputMap = map;
+
+    host.ApplyCommand = (in SimCommand cmd) =>
+    {
+        if (!world.IsAlive(body))
+        {
+            return;
+        }
+
+        switch (cmd.Kind)
+        {
+            case DriveMoveKind:
+                world.SetBodyVelocity(body, cmd.Vector.ToVector3(Double3.Zero) * DriveSpeed);
+                break;
+            case DriveBrakeKind:
+                world.SetBodyVelocity(body, Vector3.Zero);
+                break;
+        }
+    };
+
+    // Scripted, keyed on the tick about to run so the script is independent of frame chunking:
+    //   ticks [0,60)   axis0 = +1   (drive +X)
+    //   ticks [60,120) axis0 = -1   (drive -X)
+    //   tick  120      Brake pressed (one edge) then axis0 = 0
+    host.SampleInput = () =>
+    {
+        var s = default(InputSnapshot);
+        var t = host.TickIndex;
+        s.Axes[0] = t < 60 ? 1f : t < 120 ? -1f : 0f;
+        if (t == 120)
+        {
+            s.Pressed = 1UL << DriveBrakeBit;
+        }
+
+        return s;
+    };
+
+    for (var i = 0; i < ticks; i++)
+    {
+        host.BeginFrame();
+        host.Tick(FixedDt);
+        host.EndFrame();
+    }
+
+    Console.WriteLine(
+        $"HeadlessSim: --drive ran {host.TickIndex} ticks, {world.LiveEntityCount} entities alive, "
+        + $"last frame {host.LastFrameMs:F3} ms / {host.LastFrameAllocatedBytes} B.");
+
+    if (savePath is not null)
+    {
+        using var output = File.Create(savePath);
+        world.Save(output);
+        Console.WriteLine($"HeadlessSim: saved '{savePath}'.");
+    }
+
+    Console.WriteLine("HeadlessSim: PASS — --drive input path ran to completion with no GPU.");
+    return 0;
+}
 
 // Falling bodies over a ground plane, plus a small transform hierarchy so PropagateTransforms has work to do. The
 // mesh and material handles are never dereferenced by the World (it only sorts and batches by them), so default

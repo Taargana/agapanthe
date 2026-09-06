@@ -127,6 +127,88 @@ public sealed class AccumulatorEquivalenceTests : IDisposable
         Assert.NotEqual(thirty.Positions, sixty.Positions);
     }
 
+    // ── MP-0d: the same property, re-proven for input → command → mutation ────────────────────────────────────────
+    // A scripted per-tick input (keyed on the tick index, so it is independent of how frames are chunked) drives an
+    // axis-vector command every tick plus one OnPress command at tick 15. Whether the accumulator runs 3 ticks per
+    // Advance or 1, the command count and the final body position must be identical.
+
+    private const byte MoveKind = 1;
+    private const byte HonkKind = 2;
+    private const float MoveSpeed = 3f;
+
+    private (int Commands, Double3 Position) RunSteerViaAccumulator(IReadOnlyList<float> wallClockDeltas)
+    {
+        var world = new GameWorld();
+        _worlds.Add(world);
+
+        var spec = new ImportedEntitySpec(
+            new MeshHandle(0, 1), new MaterialHandle(0, 1), Double3.Zero, Matrix4x4.Identity, Vector3.Zero, 1f, 0u);
+        var body = world.SpawnBody(in spec, Vector3.Zero, inverseMass: 1f, restitution: 0f, radius: 0.5f);
+
+        var host = SimulationHost.CreateDefault(world);
+        var zeroGravity = new PhysicsSettings(Vector3.Zero, groundY: -100_000f, fixedDt: Fixed);
+        host.Add(Stage.Simulation, new PhysicsSystem(world, in zeroGravity));
+
+        var map = new InputMap();
+        map.BindAxisVector(MoveKind, 0, 1, 2);
+        map.BindButton(bit: 7, HonkKind, ButtonTrigger.OnPress);
+        host.InputMap = map;
+
+        var commands = 0;
+        host.ApplyCommand = (in SimCommand cmd) =>
+        {
+            commands++;
+            if (cmd.Kind == MoveKind)
+            {
+                world.SetBodyVelocity(body, cmd.Vector.ToVector3(Double3.Zero) * MoveSpeed);
+            }
+        };
+
+        host.SampleInput = () =>
+        {
+            var s = default(InputSnapshot);
+            s.Axes[0] = host.TickIndex < 30 ? 1f : -1f;
+            if (host.TickIndex == 15)
+            {
+                s.Pressed = 1UL << 7;
+            }
+
+            return s;
+        };
+
+        var accumulator = new FixedTimestepAccumulator(Fixed);
+        foreach (var dt in wallClockDeltas)
+        {
+            accumulator.Advance(host, dt);
+        }
+
+        return (commands, world.GetWorldPosition(body));
+    }
+
+    [Fact]
+    public void ScriptedInput_DifferentChunking_SameCommandCountAndPosition()
+    {
+        var coarse = RunSteerViaAccumulator(Repeat(3f * Fixed, 20));
+        var fine = RunSteerViaAccumulator(Repeat(1f * Fixed, 60));
+
+        // Primary: integer command count (60 axis commands + 1 OnPress at tick 15).
+        Assert.Equal(61, coarse.Commands);
+        Assert.Equal(61, fine.Commands);
+
+        // Secondary wiring guard: identical trajectory.
+        Assert.Equal(coarse.Position, fine.Position);
+    }
+
+    [Fact]
+    public void ScriptedInput_FewerTicks_ProduceADifferentPosition()
+    {
+        var thirty = RunSteerViaAccumulator(Repeat(1f * Fixed, 30));
+        var sixty = RunSteerViaAccumulator(Repeat(1f * Fixed, 60));
+
+        Assert.Equal(31, thirty.Commands);
+        Assert.NotEqual(thirty.Position, sixty.Position);
+    }
+
     [Fact]
     public void FrameOrchestratorShape_CatchUpRunsSeveralTicksButRecordsOneFrame()
     {

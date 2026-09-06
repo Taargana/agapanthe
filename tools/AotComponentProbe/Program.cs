@@ -56,6 +56,29 @@ try
             $"AotComponentProbe: FAIL — accumulator ran {oneStep}+{catchUp} ticks (TickIndex {accHost.TickIndex}), expected 1+3 (4).");
         return 1;
     }
+
+    // MP-0d: the command/input mechanism under NativeAOT — SimCommandQueue, InputMap, InputTranslation and the
+    // [InlineArray] InputAxes (its first use in the project). AOT-safe by construction (no reflection, no dynamic
+    // generics), but the probe is the declared gate, so it runs rather than assumes.
+    var cmdQueue = new SimCommandQueue();
+    var inputMap = new InputMap();
+    inputMap.BindButton(bit: 3, kind: 1, ButtonTrigger.OnPress);
+    inputMap.BindAxisVector(kind: 2, axisX: 0, axisY: 1, axisZ: 2);
+
+    var snap = default(InputSnapshot);
+    snap.Pressed = 1UL << 3;
+    snap.Axes[0] = 1f;
+    snap.Axes[1] = -1f;
+
+    InputTranslation.Emit(snap, inputMap, cmdQueue, tick: 0);
+    var applied = 0;
+    var drained = cmdQueue.DrainUpTo(0, (in SimCommand c) => applied += c.Kind + (int)c.Vector.X);
+    Console.WriteLine($"AotInputCommandSmoke: emitted {drained} command(s), axes[1]={snap.Axes[1]:F1}, applied {applied}.");
+    if (drained != 2 || applied == 0)
+    {
+        Console.Error.WriteLine($"AotComponentProbe: FAIL — input/command mechanism ran {drained} command(s) under AOT.");
+        return 1;
+    }
 }
 catch (Exception ex)
 {

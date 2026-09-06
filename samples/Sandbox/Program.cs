@@ -91,6 +91,18 @@ ProbeDropSystem? probeDropper = null;
 // read its state. Null unless AGAPANTHE_SCENE=planet-challenge built it.
 LandingChallengeSystem? landingChallenge = null;
 
+// MP-0d: opaque SimCommand.Kind bytes the Sandbox defines for itself (the engine never interprets them).
+const byte SpawnProbeCommandKind = 1;   // B key, both planet scenes — carries camera.Position in Vector
+const byte DriveMoveCommandKind = 2;    // AGAPANTHE_SCENE=drive — axis-vector steering
+const byte DriveBrakeCommandKind = 3;   // AGAPANTHE_SCENE=drive — zero the velocity
+const int DriveBrakeBit = 0;
+const float DriveMoveSpeed = 6f;
+
+// AGAPANTHE_SCENE=drive (MP-0d interactive demo): one steerable body, fixed camera, input routed through SimCommands.
+var driveScene = false;
+EntityRef? driveBody = null;
+ulong drivePendingBrake = 0;   // KeyPressed sets the edge; the next SampleInput consumes and clears it
+
 // UI-1: the text overlay. Null when no cooked font shipped alongside the executable.
 UiRenderSystem? uiSystem = null;
 
@@ -196,6 +208,7 @@ window.Loaded += () =>
         || string.Equals(sceneSpec, "planet", StringComparison.OrdinalIgnoreCase);
     var (rows, cols) = ParseGrid(sceneSpec);
     var dropCount = ParseDrop(sceneSpec);
+    driveScene = string.Equals(sceneSpec, "drive", StringComparison.OrdinalIgnoreCase);
     bool multiInstance;
     double? physicsGroundY = null; // set by drop mode: the Y of the collision plane AND the rendered ground quad
     // VS-2 planet-drop state (filled by the planet branch below, consumed by the physics + spawner systems):
@@ -273,6 +286,19 @@ window.Loaded += () =>
         multiInstance = true;
         Log.Info($"Sandbox: [scene] grid {rows}x{cols} = {rows * cols * specs.Length} entities " +
                  $"(spacing {spacing:F1} m), one model upload.");
+    }
+    else if (driveScene)
+    {
+        // One steerable physics body, reusing the loaded model's mesh/material so it renders. Zero gravity (wired
+        // below); the player drives it purely by velocity commands.
+        var s0 = specs[0];
+        var bodyRadius = MathF.Max(s0.BoundsRadius * MathHelpers.MaxStretch(s0.RotationScale), 0.25f);
+        driveBody = world.SpawnBody(
+            new ImportedEntitySpec(
+                s0.Mesh, s0.Material, worldOrigin, s0.RotationScale, s0.BoundsCenter, s0.BoundsRadius, s0.Order),
+            Vector3.Zero, inverseMass: 1f, restitution: 0f, radius: bodyRadius);
+        multiInstance = false;
+        Log.Info("Sandbox: [scene] drive — one steerable zero-gravity body (WASD move, Space/C up-down, X brake).");
     }
     else
     {
@@ -561,6 +587,77 @@ window.Loaded += () =>
                  "fly, B drops (aimed radial), F5 saves. Relaunch with AGAPANTHE_LOAD to resume.");
     }
 
+    // MP-0d: the B key enqueues a SpawnProbe SimCommand (above); this is where it is honoured — inside the tick, on
+    // the sim owner thread. The declarative InputMap does not fit here (B needs camera.Position), so B enqueues
+    // directly and only the apply-point is registered.
+    if (landingChallenge is not null || probeDropper is not null)
+    {
+        var challenge = landingChallenge;
+        var dropper = probeDropper;
+        orchestrator.Simulation.ApplyCommand = (in SimCommand cmd) =>
+        {
+            if (cmd.Kind != SpawnProbeCommandKind)
+            {
+                return;
+            }
+
+            if (challenge is not null)
+            {
+                challenge.TryShoot(cmd.Vector);   // aimed radial drop below the camera, budget-checked
+            }
+            else
+            {
+                dropper!.DropOne();               // the spawner owns its golden-angle spiral; cmd.Vector unused here
+            }
+        };
+    }
+
+    // MP-0d drive scene: zero-gravity physics + the declarative InputMap + an ApplyCommand steering the one body.
+    // The axis binding emits a MoveIntent every tick (Vector = the WASD axes); X emits a Brake edge.
+    if (driveScene && driveBody is { } steerable)
+    {
+        var driveSettings = new PhysicsSettings(Vector3.Zero, groundY: -100_000f, fixedDt: 1f / 60f);
+        orchestrator.Add(Stage.Simulation, new PhysicsSystem(world!, in driveSettings));
+
+        var driveMap = new InputMap();
+        driveMap.BindAxisVector(DriveMoveCommandKind, axisX: 0, axisY: 1, axisZ: 2);
+        driveMap.BindButton(DriveBrakeBit, DriveBrakeCommandKind, ButtonTrigger.OnPress);
+        orchestrator.Simulation.InputMap = driveMap;
+
+        orchestrator.Simulation.ApplyCommand = (in SimCommand cmd) =>
+        {
+            if (!world!.IsAlive(steerable))
+            {
+                return;
+            }
+
+            switch (cmd.Kind)
+            {
+                case DriveMoveCommandKind:
+                    world.SetBodyVelocity(steerable, cmd.Vector.ToVector3(Double3.Zero) * DriveMoveSpeed);
+                    break;
+                case DriveBrakeCommandKind:
+                    world.SetBodyVelocity(steerable, Vector3.Zero);
+                    break;
+            }
+        };
+
+        orchestrator.Simulation.SampleInput = () =>
+        {
+            var snap = default(InputSnapshot);
+            snap.Axes[0] = (window.IsKeyDown(Key.D) ? 1f : 0f)
+                - (window.IsKeyDown(Key.A) || window.IsKeyDown(Key.Q) ? 1f : 0f);
+            snap.Axes[1] = (window.IsKeyDown(Key.Space) ? 1f : 0f) - (window.IsKeyDown(Key.C) ? 1f : 0f);
+            snap.Axes[2] = (window.IsKeyDown(Key.S) ? 1f : 0f)
+                - (window.IsKeyDown(Key.W) || window.IsKeyDown(Key.Z) ? 1f : 0f);
+            snap.Pressed = drivePendingBrake;
+            drivePendingBrake = 0;
+            return snap;
+        };
+
+        Log.Info("Sandbox: [drive] input wired — SimCommand path active (MoveIntent every tick, X = brake edge).");
+    }
+
     // Camera-relative proof (spec §3.3): both are world-space doubles, and the GPU sees neither — it only ever
     // sees their difference. Logged so a far-out run is visibly far out, not silently at the origin.
     Log.Info($"Sandbox: model at world origin {worldOrigin}, eye at {camera.Position} " +
@@ -649,18 +746,23 @@ window.KeyPressed += key =>
             renderer.Lights.Directional = d;
             Log.Info($"Key light direction: {d.Direction}");
             break;
-        // B: drop one probe. Edge-triggered, same owner thread as the tick → the deferred spawn is safe.
-        // planet-challenge = an AIMED radial drop below the camera (budget-checked); planet-drop = the VS-2 spawner.
-        case Key.B when landingChallenge is not null:
-            landingChallenge.TryShoot(camera.Position);
-            break;
-        case Key.B when probeDropper is not null:
-            probeDropper.DropOne();
+        // B: enqueue a probe-spawn command (MP-0d) stamped for the next tick, carrying camera.Position — client
+        // context the declarative InputMap cannot supply. Drained inside Tick on the sim owner thread, then routed
+        // by orchestrator.Simulation.ApplyCommand to the aimed radial drop (planet-challenge, budget-checked) or the
+        // VS-2 spawner (planet-drop). Same effect as the old direct calls, but now it is a command.
+        case Key.B when orchestrator is not null && (landingChallenge is not null || probeDropper is not null):
+            orchestrator.Simulation.Commands.Enqueue(new SimCommand(
+                orchestrator.Simulation.TickIndex, SpawnProbeCommandKind, default, camera.Position, 0f, 0u));
             break;
         // F3: toggle the engine's debug overlay (UI-2). Statistics keep being recorded while it is hidden, so the
         // graphs stay truthful across a toggle instead of showing a gap that never happened.
         case Key.F3 when debugOverlay is not null:
             debugOverlay.Toggle();
+            break;
+        // X: brake the steerable body (MP-0d drive scene). Recorded as a pending edge; the next SampleInput turns it
+        // into one OnPress command.
+        case Key.X when driveScene:
+            drivePendingBrake |= 1UL << DriveBrakeBit;
             break;
         // F5: quicksave the world (VS-3). Reload = relaunch with AGAPANTHE_LOAD (VS-1). Between ticks → safe; Save
         // flushes pending spawns first, so a just-dropped probe is included.
@@ -691,7 +793,8 @@ window.Updated += dt =>
     // Camera control only while the cursor is captured (a click in the window captures it,
     // focus loss releases it) — mouse motion outside the window never steers the view.
     // The glTF model is static (M4: no animation); the world transform comes from the node hierarchy.
-    if (!window.MouseCaptured)
+    // MP-0d drive scene: the camera is fixed — WASD steers the body, not the view.
+    if (driveScene || !window.MouseCaptured)
     {
         // Update() isn't driven while the cursor is free, so clear the smoothed look delta: the next
         // captured frame then starts from rest instead of gliding out a stale delta (no rotation kick).

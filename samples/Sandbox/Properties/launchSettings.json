@@ -69,6 +69,12 @@
       "environmentVariables": {
         "AGAPANTHE_SCENE": "planet"
       }
+    },
+    "drive (MP-0d steerable entity)": {
+      "commandName": "Project",
+      "environmentVariables": {
+        "AGAPANTHE_SCENE": "drive"
+      }
     }
   }
 }
