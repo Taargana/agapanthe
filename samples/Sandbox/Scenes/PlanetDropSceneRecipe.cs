@@ -20,6 +20,9 @@ internal sealed class PlanetDropSceneRecipe : ISceneRecipe
             ctx.Device, ctx.Registry, ctx.Renderer.MaterialSetLayout, info.WorldOrigin, info.PlanetRadius,
             ctx.Simulation.Settings.FixedDeltaSeconds);
 
+        // The probe asset is now registered — safe to restore a snapshot that references it.
+        PlanetStage.RestoreIfRequested(ctx, in info);
+
         ctx.Orchestrator.Add(Stage.Simulation, new PhysicsSystem(ctx.World, in physics));
 
         var dropEvery = (int)Math.Max(SandboxEnv.EnvDouble("AGAPANTHE_DROP_EVERY", 30.0), 1.0);

@@ -22,6 +22,9 @@ internal sealed class PlanetChallengeSceneRecipe : ISceneRecipe
             ctx.Device, ctx.Registry, ctx.World, ctx.Renderer.MaterialSetLayout,
             info.WorldOrigin, info.PlanetRadius, ctx.Simulation.Settings.FixedDeltaSeconds, spawnEntities: !info.LoadMode);
 
+        // The probe + beacon assets are now registered — safe to restore a snapshot that references them.
+        PlanetStage.RestoreIfRequested(ctx, in info);
+
         var physics = setup.Physics;
         ctx.Orchestrator.Add(Stage.Simulation, new PhysicsSystem(ctx.World, in physics));
 
@@ -48,6 +51,7 @@ internal sealed class PlanetChallengeSceneRecipe : ISceneRecipe
         RecipeInput.WireProbeKey(ctx);
 
         var world = ctx.World;
+        var registry = ctx.Registry;
         ctx.Window.KeyPressed += key =>
         {
             if (key != Key.F5)
@@ -59,7 +63,7 @@ internal sealed class PlanetChallengeSceneRecipe : ISceneRecipe
             try
             {
                 using var fs = File.Create(saveTarget);
-                world.Save(fs);
+                world.Save(fs, registry.IdentifyMeshRef); // Contenu-1: MeshRefs → stable AssetKeys
                 Log.Info($"Sandbox: [challenge] quicksaved to '{saveTarget}'. Relaunch AGAPANTHE_SCENE=planet-challenge " +
                          $"AGAPANTHE_LOAD={saveTarget} to resume.");
             }

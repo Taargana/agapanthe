@@ -69,9 +69,16 @@ public sealed class RenderStageNeutralityTests
         world.Spawn(new Double3(0, 1, 0), Quaternion.Identity, 2f, mid);
 
         using var stream = new MemoryStream();
-        world.Save(stream); // Save flushes the structural queue first
+        world.Save(stream, Identify); // Save flushes the structural queue first
         return stream.ToArray();
     }
+
+    // v3 (Contenu-1): every body shares one (mesh, material) pair, so one key re-resolves them all — the Render
+    // stage needs live handles to build a sort key.
+    private static readonly AssetKey FixtureKey = new("test/body");
+    private static MeshRefKey Identify(MeshHandle mesh, MaterialHandle material) => new(FixtureKey, 0, 0);
+    private static (MeshHandle, MaterialHandle) Resolve(AssetKey key, int localMesh, int localMat)
+        => (new MeshHandle(0, 1), new MaterialHandle(0, 1));
 
     /// <summary>
     /// One run. <paramref name="withRenderStage"/> selects headless (tick stages only) or windowed (tick stages
@@ -83,7 +90,7 @@ public sealed class RenderStageNeutralityTests
         using var world = new GameWorld();
         using (var input = new MemoryStream(fixture))
         {
-            world.Load(input);
+            world.Load(input, SnapshotAllocatorPolicy.AdoptFromHeader, Resolve);
         }
 
         var scheduler = new SystemScheduler(world.FlushStructuralChanges);

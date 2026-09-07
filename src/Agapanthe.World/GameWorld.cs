@@ -1100,6 +1100,20 @@ public sealed partial class GameWorld : IDisposable
         return e.Has<Parent>() ? e.Get<Parent>().Value.Get<GlobalId>().Value : 0;
     }
 
+    /// <summary>Test hook (Contenu-1): the raw <c>MeshRef</c> handles of a live entity by GlobalId, or <c>null</c>
+    /// if it has none. Lets a v3 round-trip test assert the resolver rebuilt the drawable's handles (or left them
+    /// <see cref="MeshHandle.Invalid"/> when there was no resolver).</summary>
+    internal (MeshHandle Mesh, MaterialHandle Material)? MeshRefForTest(ulong globalId)
+    {
+        if (!_live.TryGetValue(globalId, out var entity) || !entity.Has<MeshRef>())
+        {
+            return null;
+        }
+
+        var mr = entity.Get<MeshRef>();
+        return (mr.Mesh, mr.Material);
+    }
+
     public void Dispose()
     {
         if (_disposed)

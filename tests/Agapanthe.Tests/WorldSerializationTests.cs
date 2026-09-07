@@ -16,8 +16,20 @@ public sealed class WorldSerializationTests
     private static RenderView ViewAt(Double3 origin)
         => new(origin, Vector3.Zero, Matrix4x4.Identity, Matrix4x4.Identity, 1f, 1f, 0.1f, 1f);
 
+    private static readonly MeshHandle DrawMesh = new(3, 7);
+    private static readonly MaterialHandle DrawMaterial = new(5, 2);
+    private static readonly AssetKey DrawKey = new("test/drawable");
+
     private static ImportedEntitySpec Drawable(Double3 position, uint order)
-        => new(new MeshHandle(3, 7), new MaterialHandle(5, 2), position, Matrix4x4.Identity, new Vector3(0.1f, 0.2f, 0.3f), 2.5f, order);
+        => new(DrawMesh, DrawMaterial, position, Matrix4x4.Identity, new Vector3(0.1f, 0.2f, 0.3f), 2.5f, order);
+
+    // v3 (Contenu-1): a save that keeps its MeshRef handles resolvable needs an identifier + a resolver. Every
+    // drawable here shares one (mesh, material) pair, so one key round-trips them all.
+    private static MeshRefKey IdentifyDrawable(MeshHandle mesh, MaterialHandle material)
+        => new(DrawKey, 0, 0);
+
+    private static (MeshHandle, MaterialHandle) ResolveDrawable(AssetKey key, int localMesh, int localMat)
+        => (DrawMesh, DrawMaterial);
 
     // Builds a world exercising all three archetypes plus the NoShadowCast tag and a two-level parent hierarchy.
     private static GameWorld BuildPopulatedWorld()
@@ -102,11 +114,13 @@ public sealed class WorldSerializationTests
         original.PropagateTransforms();
         original.CollectRenderLists(originalRender, new SceneCandidateSet(), ViewAt(Double3.Zero));
 
-        var restored = Load(Save(original));
+        using var saved = new MemoryStream();
+        original.Save(saved, IdentifyDrawable);
+        using var restored = new GameWorld();
+        restored.Load(new MemoryStream(saved.ToArray()), SnapshotAllocatorPolicy.AdoptFromHeader, ResolveDrawable);
         var restoredRender = new RenderList();
         restored.PropagateTransforms(); // must not throw (hierarchy intact)
         restored.CollectRenderLists(restoredRender, new SceneCandidateSet(), ViewAt(Double3.Zero));
-        restored.Dispose();
 
         Assert.Equal(originalRender.Count, restoredRender.Count);
     }
@@ -156,10 +170,20 @@ public sealed class WorldSerializationTests
     public void Load_RejectsOutOfRangeMaskBit()
     {
         var bytes = Save(BuildPopulatedWorld());
-        // Header (MP-0b W3, v2) is magic(4)+version(4)+count(4)+universeId(16)+nextId(8)+entityCount(4) = 40 bytes;
-        // then the first entity's globalId(8); the presence mask is the u32 at offset 48. Set bit 31 (its MSB, at
-        // offset 51) → a component index beyond the count.
-        bytes[51] |= 0x80;
+        // Header (v3) is magic(4)+version(4)+count(4)+universeId(16)+nextId(8)+entityCount(4) = 40 bytes; then the
+        // key table: keyCount(4) then keyCount × { byteLen(2) | UTF-8 }. A save with no identifier writes only
+        // entry 0 (AssetKey.None, byteLen 0) → 6 bytes. Then the first entity's globalId(8); the presence mask is
+        // the u32 that follows. Set its MSB → a component index beyond the count.
+        var keyCount = System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(bytes.AsSpan(40, 4));
+        var offset = 44;
+        for (var i = 0; i < keyCount; i++)
+        {
+            var len = System.Buffers.Binary.BinaryPrimitives.ReadUInt16LittleEndian(bytes.AsSpan(offset, 2));
+            offset += 2 + len;
+        }
+
+        var maskMsbByte = offset + 8 + 3; // + globalId(8) + the 3 low bytes of the u32 mask
+        bytes[maskMsbByte] |= 0x80;
         Assert.Throws<WorldSerializationException>(() => Load(bytes));
     }
 

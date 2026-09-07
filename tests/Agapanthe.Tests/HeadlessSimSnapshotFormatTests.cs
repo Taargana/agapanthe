@@ -62,11 +62,13 @@ public sealed class HeadlessSimSnapshotFormatTests
         return ms.ToArray();
     }
 
-    // Pinned 2026-09-02 (MP-0b W3, format v2): reproduced identically by `dotnet run` (JIT) and a NativeAOT
-    // win-x64 publish of samples/HeadlessSim. Superseded 7c889fec0df503fe8137ef6c28c7751a (v1, 1852 bytes) — the
-    // 16-byte UniverseId this milestone adds to the header accounts for the size delta (1852 -> 1868).
-    private const string ExpectedMd5 = "7e8dc68f5a25914c84677a7a53ad3a58";
-    private const int ExpectedByteLength = 1868;
+    // Pinned 2026-09-07 (Contenu-1, format v3): reproduced identically by `dotnet run` (JIT) and a NativeAOT
+    // win-x64 publish of samples/HeadlessSim. Superseded 7e8dc68f5a25914c84677a7a53ad3a58 (v2, 1868 bytes) — v3
+    // adds a 6-byte key table (keyCount + the mandatory AssetKey.None entry) and shrinks each of the 8 bodies'
+    // MeshRef from a 16-byte blittable to 12 bytes (keyIdx|localMesh|localMat): 1868 + 6 - 8*4 = 1842. No
+    // identifier is passed, so every MeshRef serialises as AssetKey.None.
+    private const string ExpectedMd5 = "80ced166fdf3076119a62970f63d683b";
+    private const int ExpectedByteLength = 1842;
 
     [Fact]
     public void HeadlessSimDefaultScene_SnapshotHash_MatchesPinnedValue()
@@ -141,11 +143,12 @@ public sealed class HeadlessSimSnapshotFormatTests
         return ms.ToArray();
     }
 
-    // Pinned 2026-09-06 (MP-0d W3). Reproduced identically by `dotnet run` (JIT) and a NativeAOT win-x64 publish of
-    // samples/HeadlessSim (`--drive --ticks 600 --save`). One body, so 208 bytes vs the default scene's 1868.
+    // Pinned 2026-09-07 (Contenu-1, format v3). Reproduced identically by `dotnet run` (JIT) and a NativeAOT
+    // win-x64 publish of samples/HeadlessSim (`--drive --ticks 600 --save`). Supersedes
+    // 97e786f0455a53d856b9ba4affca1003 (v2, 208 bytes): +6 key table, -4 on the single body's MeshRef = 210.
     // Re-derive with: dotnet run --project samples/HeadlessSim -c Debug -- --drive --ticks 600 --save <path>
-    private const string ExpectedDriveMd5 = "97e786f0455a53d856b9ba4affca1003";
-    private const int ExpectedDriveByteLength = 208;
+    private const string ExpectedDriveMd5 = "cf01492e8a9688b666e01d2ef9d63869";
+    private const int ExpectedDriveByteLength = 210;
 
     [Fact]
     public void HeadlessSimDriveScene_SnapshotHash_MatchesPinnedValue()

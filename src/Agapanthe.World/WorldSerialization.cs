@@ -2,11 +2,22 @@ using System.Buffers.Binary;
 using System.Numerics;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
+using System.Text;
 using Agapanthe.Core;
 using Arch.Core;
 using Arch.Core.Extensions;
 
 namespace Agapanthe.World;
+
+/// <summary>Identifies a drawable's <c>MeshRef</c> for a snapshot (Contenu-1): given the process-local handles, the
+/// stable <see cref="AssetKey"/> + local mesh/material indices. Supplied by the caller (it holds the render-side
+/// <c>ResourceRegistry</c>); <c>null</c> ⇒ every drawable serialises as <see cref="MeshRefKey.None"/>.</summary>
+public delegate MeshRefKey MeshRefIdentifier(MeshHandle mesh, MaterialHandle material);
+
+/// <summary>Resolves a snapshot's stored <c>MeshRef</c> identity back to live handles (Contenu-1). It <b>must
+/// throw</b> for a key/index it cannot resolve — the loader trusts the returned pair. <c>null</c> ⇒ every
+/// <c>MeshRef</c> loads with <see cref="MeshHandle.Invalid"/>.</summary>
+public delegate (MeshHandle Mesh, MaterialHandle Material) MeshRefResolver(AssetKey key, int localMesh, int localMat);
 
 // VS-1 — World serialization (save/load snapshot). Lives in GameWorld — like Physics/Propagate/Collect — so it
 // reaches the internal components and Arch entities without exposing the ECS: the public surface is two Stream
@@ -15,7 +26,8 @@ namespace Agapanthe.World;
 // Format (little-endian, blittable): a header, then every entity sorted by GlobalId. Each entity is a GlobalId, a
 // presence bitmask over ComponentRegistry.All (bit i = component index i is present), then each present component's
 // raw bytes IN INDEX ORDER — except InstanceSlot (runtime, re-derived at the next rebuild) which is never written,
-// and Parent, written as the parent's GlobalId (an Arch Entity is a memory handle, not persistable). Determinism:
+// Parent, written as the parent's GlobalId (an Arch Entity is a memory handle, not persistable), and MeshRef
+// (Contenu-1), written as a key-table index + local mesh/material indices, re-resolved at load. Determinism:
 // the GlobalId total order + the fixed component-index order make two Saves of one world byte-identical, and the
 // round-trip byte-identical (Save(Load(bytes)) == bytes), which is the format's regression gate.
 //
@@ -32,11 +44,22 @@ public sealed partial class GameWorld
     // if ComponentRegistry.All is ever reordered (the mask is positional): see the append-only invariant below.
     //
     // v2 (MP-0b W3) inserts UniverseId(16) between componentCount and nextGlobalId:
-    //   magic(4) "AGWD" | version(4)=2 | componentCount(4) | universeId(16) | nextGlobalId(8) | entityCount(4)
-    //   = 40-byte header. v1 had no universeId and is refused outright — no automatic upgrade (a v1 file predates
-    //   universe identity, so there is nothing honest to fill the field with).
+    //   magic(4) "AGWD" | version(4) | componentCount(4) | universeId(16) | nextGlobalId(8) | entityCount(4)
+    //   = 40-byte header. v1 had no universeId; both v1 and v2 are refused outright — no automatic upgrade.
+    //
+    // v3 (Contenu-1) keeps the 40-byte header and adds, immediately after it:
+    //   keyTable: keyCount(4) >= 1, then keyCount × { byteLen(2) | UTF-8 bytes }
+    //     entry 0 = AssetKey.None, written as byteLen 0; entries 1.. = distinct non-None keys, sorted ORDINAL.
+    //   MeshRef (component index 5) is no longer a 16-byte blittable: it is keyIdx(4) | localMesh(4) | localMat(4).
     private static ReadOnlySpan<byte> SerializationMagic => "AGWD"u8;
-    private const uint SerializationVersion = 2;
+    private const uint SerializationVersion = 3;
+
+    // ORDINAL — culture-independent — so the key table's byte layout is stable across machines (Save(Load(x)) == x).
+    private static readonly IComparer<AssetKey> KeyOrdinal =
+        Comparer<AssetKey>.Create(static (a, b) => string.CompareOrdinal(a.Value, b.Value));
+
+    // Throws on malformed bytes instead of substituting U+FFFD — a corrupt key table entry must fail loudly.
+    private static readonly Encoding Utf8Strict = new UTF8Encoding(encoderShouldEmitUTF8Identifier: false, throwOnInvalidBytes: true);
 
     // Components excluded from / specially handled by the format, resolved once from the registry order so a
     // (version-bumped) reorder carries them along instead of drifting against a magic number.
@@ -69,7 +92,14 @@ public sealed partial class GameWorld
     /// written sorted by <see cref="GlobalId"/> and components in registry-index order, so the bytes are stable:
     /// two saves of the same world are identical, and <c>Save(Load(bytes)) == bytes</c>.
     /// </summary>
-    public void Save(Stream stream)
+    public void Save(Stream stream) => Save(stream, identify: null);
+
+    /// <inheritdoc cref="Save(Stream)"/>
+    /// <param name="identify">Contenu-1: maps a drawable's process-local handles to its stable
+    /// <see cref="MeshRefKey"/>. <c>null</c> ⇒ every <c>MeshRef</c> is written as <see cref="MeshRefKey.None"/>
+    /// (a headless world, or one with no real assets). A supplied delegate that is handed a handle it cannot
+    /// identify must throw — the failure surfaces here and no partial file is trusted.</param>
+    public void Save(Stream stream, MeshRefIdentifier? identify)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
         AssertOwnerThread();
@@ -96,6 +126,25 @@ public sealed partial class GameWorld
 
         var componentCount = ComponentRegistry.All.Count;
 
+        // Pass 1 (Contenu-1): identify every drawable's MeshRef, collect the distinct non-None AssetKeys.
+        var meshKeys = new MeshRefKey?[entities.Count];
+        var distinctKeys = new SortedSet<AssetKey>(KeyOrdinal);
+        for (var i = 0; i < entities.Count; i++)
+        {
+            if (!entities[i].Entity.Has<MeshRef>())
+            {
+                continue;
+            }
+
+            var mr = entities[i].Entity.Get<MeshRef>();
+            var k = identify is null ? MeshRefKey.None : identify(mr.Mesh, mr.Material);
+            meshKeys[i] = k;
+            if (!k.IsNone)
+            {
+                distinctKeys.Add(k.Key);
+            }
+        }
+
         // Header.
         stream.Write(SerializationMagic);
         WriteU32(stream, SerializationVersion);
@@ -105,9 +154,23 @@ public sealed partial class GameWorld
         WriteU64(stream, _nextGlobalId);
         WriteU32(stream, (uint)entities.Count);
 
-        // Body.
-        foreach (var (id, entity) in entities)
+        // Key table: entry 0 is AssetKey.None (byteLen 0), entries 1.. the sorted distinct keys.
+        WriteU32(stream, (uint)(distinctKeys.Count + 1));
+        WriteU16(stream, 0); // None
+        var keyToIndex = new Dictionary<AssetKey, uint>(distinctKeys.Count);
+        uint nextIndex = 1;
+        foreach (var key in distinctKeys)
         {
+            var utf8 = Encoding.UTF8.GetBytes(key.Value!);
+            WriteU16(stream, checked((ushort)utf8.Length));
+            stream.Write(utf8);
+            keyToIndex[key] = nextIndex++;
+        }
+
+        // Body.
+        for (var ei = 0; ei < entities.Count; ei++)
+        {
+            var (id, entity) = entities[ei];
             WriteU64(stream, id);
 
             // Presence mask over the registry order. InstanceSlot is never serialized (runtime state).
@@ -124,7 +187,16 @@ public sealed partial class GameWorld
 
             for (var index = 0; index < componentCount; index++)
             {
-                if ((mask & (1u << index)) != 0)
+                if ((mask & (1u << index)) == 0)
+                {
+                    continue;
+                }
+
+                if (index == MeshRefIndex)
+                {
+                    WriteMeshRef(stream, meshKeys[ei] ?? MeshRefKey.None, keyToIndex);
+                }
+                else
                 {
                     WriteComponent(stream, entity, index);
                 }
@@ -132,12 +204,51 @@ public sealed partial class GameWorld
         }
     }
 
+    // Contenu-1: MeshRef is no longer a blittable — three u32 (key-table index, local mesh, local material).
+    private static void WriteMeshRef(Stream s, in MeshRefKey k, IReadOnlyDictionary<AssetKey, uint> keyToIndex)
+    {
+        // A None key writes (0, 0, 0) — canonical: ReadMeshRef ignores the local indices for key 0, so writing
+        // anything else would make two logically-identical worlds serialise to different bytes.
+        if (k.IsNone)
+        {
+            WriteU32(s, 0u);
+            WriteU32(s, 0u);
+            WriteU32(s, 0u);
+            return;
+        }
+
+        WriteU32(s, keyToIndex[k.Key]);
+        WriteU32(s, (uint)k.LocalMesh);
+        WriteU32(s, (uint)k.LocalMat);
+    }
+
+    private static MeshRef ReadMeshRef(Stream s, AssetKey[] keyTable, MeshRefResolver? resolve)
+    {
+        var keyIdx = ReadU32(s);
+        var localMesh = ReadU32(s);
+        var localMat = ReadU32(s);
+
+        if (keyIdx >= (uint)keyTable.Length)
+        {
+            throw new WorldSerializationException($"MeshRef key index {keyIdx} is beyond the {keyTable.Length}-entry key table.");
+        }
+
+        if (keyIdx == 0 || resolve is null)
+        {
+            return new MeshRef { Mesh = MeshHandle.Invalid, Material = MaterialHandle.Invalid };
+        }
+
+        var (mesh, material) = resolve(keyTable[keyIdx], (int)localMesh, (int)localMat);
+        return new MeshRef { Mesh = mesh, Material = material };
+    }
+
     /// <summary>
     /// Restores a world snapshot written by <see cref="Save"/> into this <b>fresh</b> world (VS-1), reconciling
     /// <see cref="UniverseId"/> and adopting the header's id counter (MP-0b W3). Equivalent to
     /// <c>Load(stream, SnapshotAllocatorPolicy.AdoptFromHeader)</c>; see the overload for the full contract.
     /// </summary>
-    public SnapshotLoadResult Load(Stream stream) => Load(stream, SnapshotAllocatorPolicy.AdoptFromHeader);
+    public SnapshotLoadResult Load(Stream stream)
+        => Load(stream, SnapshotAllocatorPolicy.AdoptFromHeader, resolve: null);
 
     /// <summary>
     /// Restores a world snapshot written by <see cref="Save"/> into this <b>fresh</b> world (VS-1). The world must be
@@ -166,13 +277,20 @@ public sealed partial class GameWorld
     /// allocate. A collision between a loaded id and one this world later issues itself throws
     /// <see cref="InvalidOperationException"/> at the point of the later spawn (see <c>RegisterLive</c>) rather than
     /// silently orphaning the earlier entity.</para>
-    /// <para>The caller's contract (Option 1 seam): the same GPU assets must be (re)loaded in the same order BEFORE
-    /// Load, so the serialized <see cref="MeshHandle"/>/<see cref="MaterialHandle"/> values still resolve.</para>
+    /// <para>Contenu-1 (<paramref name="resolve"/>): a v3 snapshot stores each drawable's <c>MeshRef</c> as a
+    /// stable <see cref="AssetKey"/> + local mesh/material indices; <paramref name="resolve"/> turns those back
+    /// into live handles (it holds the render-side registry). <c>null</c> ⇒ every <c>MeshRef</c> loads with
+    /// <see cref="MeshHandle.Invalid"/> (a headless load, or a world with no renderer). A supplied delegate
+    /// <b>must throw</b> for a key/index it cannot resolve — that surfaces as a failed Load.</para>
     /// <para>On a malformed stream the exception may be thrown after some entities were already created: this world is
     /// then partially populated and must be discarded (disposed), not reused — Load is all-or-nothing by contract, not
     /// by rollback.</para>
     /// </summary>
     public SnapshotLoadResult Load(Stream stream, SnapshotAllocatorPolicy policy)
+        => Load(stream, policy, resolve: null);
+
+    /// <inheritdoc cref="Load(Stream, SnapshotAllocatorPolicy)"/>
+    public SnapshotLoadResult Load(Stream stream, SnapshotAllocatorPolicy policy, MeshRefResolver? resolve)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
         AssertOwnerThread();
@@ -194,11 +312,15 @@ public sealed partial class GameWorld
         var version = ReadU32(stream);
         if (version != SerializationVersion)
         {
-            throw new WorldSerializationException(
-                version == 1
-                    ? "Snapshot is format v1, which predates universe identity (MP-0b W3). There is no automatic " +
-                      "upgrade — resave it with this build first, from wherever it was last loadable."
-                    : $"Unsupported snapshot version {version} (this build reads version {SerializationVersion}).");
+            throw new WorldSerializationException(version switch
+            {
+                1 => "Snapshot is format v1, which predates universe identity (MP-0b W3). There is no automatic " +
+                     "upgrade — resave it with this build first, from wherever it was last loadable.",
+                2 => "Snapshot is format v2, which predates stable asset identity (Contenu-1): its MeshRefs are raw " +
+                     "process-local handles with no key table. There is no automatic upgrade — resave it with this " +
+                     "build first, from wherever it was last loadable.",
+                _ => $"Unsupported snapshot version {version} (this build reads version {SerializationVersion}).",
+            });
         }
 
         var componentCount = ReadU32(stream);
@@ -231,6 +353,55 @@ public sealed partial class GameWorld
                 "this snapshot's entities without adopting its allocator state.");
         }
 
+        var entityCount = ReadU32(stream);
+
+        // Key table (Contenu-1): keyCount >= 1, entry 0 = AssetKey.None (byteLen 0), entries 1.. distinct non-None
+        // keys sorted ordinal. Read + validated BEFORE any state changes (below) so a malformed table leaves this
+        // world exactly as the constructor left it — same guarantee as the header fields above.
+        var keyCount = ReadU32(stream);
+        if (keyCount < 1)
+        {
+            throw new WorldSerializationException($"Snapshot key table has {keyCount} entries; entry 0 (AssetKey.None) is mandatory.");
+        }
+
+        var keyTable = new AssetKey[keyCount];
+        for (var k = 0u; k < keyCount; k++)
+        {
+            var byteLen = ReadU16(stream);
+            if (k == 0)
+            {
+                if (byteLen != 0)
+                {
+                    throw new WorldSerializationException($"Snapshot key table entry 0 must be AssetKey.None (byteLen 0), got {byteLen}.");
+                }
+
+                keyTable[0] = AssetKey.None;
+                continue;
+            }
+
+            var utf8 = new byte[byteLen];
+            ReadExact(stream, utf8);
+            try
+            {
+                // Strict decode: invalid UTF-8 throws here rather than silently substituting U+FFFD (which would
+                // load a mangled key and break Save(Load(x)) == x). Caught below with the ctor's own rejections.
+                keyTable[k] = new AssetKey(Utf8Strict.GetString(utf8));
+            }
+            catch (Exception ex) when (ex is ArgumentException or FormatException or DecoderFallbackException)
+            {
+                throw new WorldSerializationException($"Snapshot key table entry {k} is not a valid AssetKey.", ex);
+            }
+
+            // Entries 1.. are written strictly ascending (ordinal) and distinct. Enforce it on read too, so a
+            // hand-forged or reordered table is rejected as corruption instead of loading then re-saving to
+            // different bytes (the symmetry of the "Duplicate GlobalId" guard below).
+            if (k > 1 && string.CompareOrdinal(keyTable[k - 1].Value, keyTable[k].Value) >= 0)
+            {
+                throw new WorldSerializationException(
+                    $"Snapshot key table is not strictly ascending at entry {k} ('{keyTable[k - 1]}' then '{keyTable[k]}').");
+            }
+        }
+
         // Every validation above has passed — only NOW does the call start changing state.
         UniverseOutcome outcome;
         if (_universeId == UniverseId.None)
@@ -257,8 +428,6 @@ public sealed partial class GameWorld
         {
             _nextGlobalId = headerNextGlobalId;
         }
-
-        var entityCount = ReadU32(stream);
 
         // Pass 2 work list: (childGlobalId, parentGlobalId), wired after every entity exists.
         var parentLinks = new List<(ulong Child, ulong Parent)>();
@@ -288,6 +457,10 @@ public sealed partial class GameWorld
                 if (index == ParentIndex)
                 {
                     parentLinks.Add((globalId, ReadU64(stream))); // stored as the parent's GlobalId
+                }
+                else if (index == MeshRefIndex)
+                {
+                    entity.Add(ReadMeshRef(stream, keyTable, resolve)); // (keyIdx, localMesh, localMat), re-resolved
                 }
                 else if (index != InstanceSlotIndex) // InstanceSlot is never in the stream, but never dispatch it either
                 {
@@ -354,23 +527,31 @@ public sealed partial class GameWorld
         Spawn(new Double3(0, 10, 0), Quaternion.Identity, 1f, root);
         FlushStructuralChanges();
 
+        // Contenu-1: exercise the v3 key-table path under the ILC too — UTF-8 encode/decode, the SortedSet<AssetKey>
+        // comparer, the AssetKey ctor, and the resolve delegate invoke are none of them reached by a null-delegate
+        // Save/Load. The identifier folds the local mesh index into MeshRefKey so the resolver can rebuild a handle
+        // the identifier maps back to the same key — keeping the re-save byte-identical.
+        static MeshRefKey Identify(MeshHandle mesh, MaterialHandle material) => new(new AssetKey("aot/probe"), mesh.Index, 0);
+        static (MeshHandle, MaterialHandle) Resolve(AssetKey key, int localMesh, int localMat)
+            => (new MeshHandle(localMesh, 2), new MaterialHandle(3, 4));
+
         byte[] first;
         using (var ms = new MemoryStream())
         {
-            Save(ms);
+            Save(ms, Identify);
             first = ms.ToArray();
         }
 
         using var restored = new GameWorld();
         using (var ms = new MemoryStream(first))
         {
-            restored.Load(ms);
+            restored.Load(ms, SnapshotAllocatorPolicy.AdoptFromHeader, Resolve);
         }
 
         byte[] second;
         using (var ms = new MemoryStream())
         {
-            restored.Save(ms);
+            restored.Save(ms, Identify);
             second = ms.ToArray();
         }
 
@@ -415,7 +596,7 @@ public sealed partial class GameWorld
             case 2: WriteU64(s, e.Get<Parent>().Value.Get<GlobalId>().Value); break; // parent as GlobalId, not Entity
             case 3: WriteBlittable(s, e.Get<WorldTransform>()); break;
             case 4: WriteBlittable(s, e.Get<WorldPosition>()); break;
-            case 5: WriteBlittable(s, e.Get<MeshRef>()); break;
+            // index 5 (MeshRef) is written by WriteMeshRef (key table index + local indices), never here.
             case 6: WriteBlittable(s, e.Get<Bounds>()); break;
             case 7: WriteBlittable(s, e.Get<RenderOrder>()); break;
             case 8: WriteBlittable(s, e.Get<Velocity>()); break;
@@ -435,7 +616,7 @@ public sealed partial class GameWorld
             // index 2 (Parent) is handled by the caller (recorded for pass 2), never here.
             case 3: e.Add(ReadBlittable<WorldTransform>(s)); break;
             case 4: e.Add(ReadBlittable<WorldPosition>(s)); break;
-            case 5: e.Add(ReadBlittable<MeshRef>(s)); break;
+            // index 5 (MeshRef) is handled by the caller (ReadMeshRef, re-resolved through the key table), never here.
             case 6: e.Add(ReadBlittable<Bounds>(s)); break;
             case 7: e.Add(ReadBlittable<RenderOrder>(s)); break;
             case 8: e.Add(ReadBlittable<Velocity>(s)); break;
@@ -462,6 +643,20 @@ public sealed partial class GameWorld
         Span<byte> buffer = stackalloc byte[Unsafe.SizeOf<T>()];
         ReadExact(s, buffer);
         return MemoryMarshal.Read<T>(buffer);
+    }
+
+    private static void WriteU16(Stream s, ushort value)
+    {
+        Span<byte> buffer = stackalloc byte[2];
+        BinaryPrimitives.WriteUInt16LittleEndian(buffer, value);
+        s.Write(buffer);
+    }
+
+    private static ushort ReadU16(Stream s)
+    {
+        Span<byte> buffer = stackalloc byte[2];
+        ReadExact(s, buffer);
+        return BinaryPrimitives.ReadUInt16LittleEndian(buffer);
     }
 
     private static void WriteU32(Stream s, uint value)

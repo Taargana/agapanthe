@@ -37,9 +37,14 @@ public sealed class ResourceRegistry : IDisposable
 
     // Loaded models, by id — the unit of ownership and of unloading. A null entry is an unloaded slot.
     private readonly List<LoadedModel?> _models = [];
+
+    // Contenu-1: the GPU-free AssetKey ⇄ handle map. A world snapshot stores an AssetKey + local indices per
+    // drawable and re-resolves the handles through this at load, so it survives a change in asset load ORDER.
+    private readonly ModelKeyIndex _keyIndex = new();
     private bool _disposed;
 
     private sealed record LoadedModel(
+        AssetKey Key,
         ModelResources Resources,
         MeshHandle[] MeshHandles,
         MaterialHandle[] MaterialHandles);
@@ -58,9 +63,23 @@ public sealed class ResourceRegistry : IDisposable
         GraphicsDevice device,
         ModelAsset model,
         DescriptorSetLayout materialSetLayout,
+        AssetKey key,
         Double3 worldOrigin = default)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
+
+        // Contenu-1: validate the key BEFORE any GPU side effect — a None or duplicate key must not leave an
+        // uploaded model with no owner to free it. The matching _keyIndex.Add at the end is then a pure insert.
+        if (key.IsNone)
+        {
+            throw new ArgumentException("An asset must be loaded under a non-None AssetKey.", nameof(key));
+        }
+
+        if (_keyIndex.Contains(key))
+        {
+            throw new GraphicsException(
+                $"ResourceRegistry.Load: asset key '{key}' is already loaded — Unload it first, or use a distinct key.");
+        }
 
         // ONE descriptor allocator per model (audit M3): a DescriptorAllocator never frees an individual set — its
         // sets die with their pool, and the pool dies with the allocator. Sharing the Renderer's allocator meant
@@ -120,7 +139,9 @@ public sealed class ResourceRegistry : IDisposable
                     (uint)i);
             }
 
-            _models.Add(new LoadedModel(resources, meshHandles, materialHandles));
+            _models.Add(new LoadedModel(key, resources, meshHandles, materialHandles));
+            // Last: a pure insert (key already proven non-None and absent above) — nothing after it can throw.
+            _keyIndex.Add(key, meshHandles, materialHandles);
             return (_models.Count - 1, specs);
         }
         catch
@@ -171,8 +192,27 @@ public sealed class ResourceRegistry : IDisposable
             _meshes.Free(handle.Index);
         }
 
+        _keyIndex.Remove(loaded.Key); // the key is reusable after an Unload
         DisposeResources(loaded.Resources);
         _models[modelId] = null;
+    }
+
+    /// <summary>The serialisable identity (Contenu-1) of a drawable whose mesh + material come from one loaded
+    /// asset — an <see cref="AssetKey"/> plus the local mesh/material indices. A world snapshot stores this in
+    /// place of the raw handles. Throws if either handle belongs to no loaded asset or the two disagree.</summary>
+    public MeshRefKey IdentifyMeshRef(MeshHandle mesh, MaterialHandle material)
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        return _keyIndex.Identify(mesh, material);
+    }
+
+    /// <summary>The current handles for an asset's local mesh/material (Contenu-1) — how a snapshot's stored
+    /// identity is turned back into a live <c>MeshRef</c>. Throws if <paramref name="key"/> is not loaded or an
+    /// index is out of range (the caller must reload the assets before restoring the world).</summary>
+    public (MeshHandle Mesh, MaterialHandle Material) ResolveMeshRef(AssetKey key, int localMesh, int localMat)
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        return _keyIndex.Resolve(key, localMesh, localMat);
     }
 
     /// <summary>The name of a loaded model, for diagnostics.</summary>
@@ -215,6 +255,7 @@ public sealed class ResourceRegistry : IDisposable
         }
 
         _disposed = true;
+        _keyIndex.Clear();
 
         for (var i = _models.Count - 1; i >= 0; i--)
         {

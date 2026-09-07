@@ -2,6 +2,7 @@ using System.Numerics;
 using Agapanthe.App;
 using Agapanthe.Core;
 using Agapanthe.Rendering;
+using Agapanthe.World;
 
 namespace Sandbox;
 
@@ -13,7 +14,10 @@ namespace Sandbox;
 internal static class PlanetStage
 {
     internal readonly record struct PlanetInfo(
-        Double3 WorldOrigin, Vector3 SunTravelDir, double PlanetRadius, Double3 SunOrigin, bool LoadMode);
+        Double3 WorldOrigin, Vector3 SunTravelDir, double PlanetRadius, Double3 SunOrigin, string? LoadPath)
+    {
+        public bool LoadMode => LoadPath is { Length: > 0 };
+    }
 
     public static PlanetInfo Build(SceneContext ctx)
     {
@@ -25,13 +29,6 @@ internal static class PlanetStage
 
         var (sunTravelDir, planetRadius, sunOrigin) = PlanetContent.SetupPlanetScene(
             ctx.Device, ctx.Registry, world, renderer.MaterialSetLayout, worldOrigin, spawnEntities: !loadMode);
-
-        if (loadMode)
-        {
-            using var loadStream = File.OpenRead(loadPath!);
-            var result = world.Load(loadStream);
-            Log.Info($"Sandbox: [VS-1] world restored from '{loadPath}' — {result.EntityCount} entities, universe {result.Universe}.");
-        }
 
         // The Sun is the ONLY emitter: a point light co-located with the Sun sphere (inverse-square), not an
         // abstract directional. At 7.48e10 m the rays reach near-parallel — the same crisp terminator — but the
@@ -58,6 +55,23 @@ internal static class PlanetStage
         renderer.ClearColor = (0f, 0f, 0f, 1f);
         Log.Info("Sandbox: environment = black space (sun-only).");
 
-        return new PlanetInfo(worldOrigin, sunTravelDir, planetRadius, sunOrigin, loadMode);
+        return new PlanetInfo(worldOrigin, sunTravelDir, planetRadius, sunOrigin, loadPath);
+    }
+
+    /// <summary>Restores <c>AGAPANTHE_LOAD</c> (if set) into the world. The caller MUST have loaded every asset the
+    /// snapshot can reference first (planet/Sun here, plus the recipe's own probe/beacon) — Contenu-1's resolver
+    /// throws for a key that is not registered, which is exactly the "wrong asset load order" bug being closed.</summary>
+    public static void RestoreIfRequested(SceneContext ctx, in PlanetInfo info)
+    {
+        if (!info.LoadMode)
+        {
+            return;
+        }
+
+        using var loadStream = File.OpenRead(info.LoadPath!);
+        // The snapshot stores each MeshRef as a stable AssetKey — re-resolve it to live handles through the registry.
+        var result = ctx.World.Load(
+            loadStream, SnapshotAllocatorPolicy.AdoptFromHeader, ctx.Registry.ResolveMeshRef);
+        Log.Info($"Sandbox: [VS-1] world restored from '{info.LoadPath}' — {result.EntityCount} entities, universe {result.Universe}.");
     }
 }

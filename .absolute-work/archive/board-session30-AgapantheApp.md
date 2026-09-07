@@ -2,7 +2,7 @@
 
 **Status**: `completed` 2026-09-07 — all 5 waves + tail + double audit + a 2nd "fix everything fixable" pass.
 `dotnet test` **617 passed**, 0 warning, every pinned hash unchanged JIT + AOT, bad-scene exit 1 JIT + AOT.
-Awaiting human visual verdict, then commit on request.
+Committed `a155f5d` on `main` (not pushed). **Human visual verdict still due** before marking the milestone `done`.
 **Spec**: `docs/plans/2026-09-07-agapanthe-app-design.md` (APPROVED 4.40/5, reviewer 3 rounds + adapter decision)
 **Session**: 30
 **Created**: 2026-09-07

@@ -45,7 +45,8 @@ internal sealed class DriveSceneRecipe : ISceneRecipe
         ModelContent.LogModelStats(model, modelPath);
 
         var worldOrigin = SandboxEnv.ParseDouble3(Environment.GetEnvironmentVariable("AGAPANTHE_WORLD_ORIGIN"));
-        var (_, specs) = registry.Load(device, model, renderer.MaterialSetLayout, worldOrigin);
+        var (_, specs) = registry.Load(
+            device, model, renderer.MaterialSetLayout, new AssetKey($"models/{Path.GetFileName(modelPath)}"), worldOrigin);
 
         var s0 = specs[0];
         var bodyRadius = MathF.Max(s0.BoundsRadius * MathHelpers.MaxStretch(s0.RotationScale), 0.25f);
@@ -68,7 +69,8 @@ internal sealed class DriveSceneRecipe : ISceneRecipe
             var groundOrigin = new Double3(
                 (sceneBounds.Min.X + sceneBounds.Max.X) * 0.5, groundY, (sceneBounds.Min.Z + sceneBounds.Max.Z) * 0.5);
             var (_, groundSpecs) = registry.Load(
-                device, ModelContent.BuildGroundModel(groundSize), renderer.MaterialSetLayout, groundOrigin);
+                device, ModelContent.BuildGroundModel(groundSize), renderer.MaterialSetLayout,
+                new AssetKey("sandbox/ground"), groundOrigin);
             foreach (var spec in groundSpecs)
             {
                 world.SpawnImported(in spec, castsShadow: false);

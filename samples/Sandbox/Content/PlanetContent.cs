@@ -88,7 +88,8 @@ internal static class PlanetContent
             Name = "PlanetSurface",
         };
         var (_, planetSpecs) = registry.Load(
-            device, BuildSphereModel((float)planetRadius, planetMaterial, "Planet", 128, 64), materialLayout, planetOrigin);
+            device, BuildSphereModel((float)planetRadius, planetMaterial, "Planet", 128, 64), materialLayout,
+            new AssetKey("sandbox/planet-surface"), planetOrigin);
         if (spawnEntities)
         {
             foreach (var s in planetSpecs)
@@ -107,7 +108,8 @@ internal static class PlanetContent
             Name = "SunSurface",
         };
         var (_, sunSpecs) = registry.Load(
-            device, BuildSphereModel((float)sunRadius, sunMaterial, "Sun", 64, 32), materialLayout, sunOrigin);
+            device, BuildSphereModel((float)sunRadius, sunMaterial, "Sun", 64, 32), materialLayout,
+            new AssetKey("sandbox/sun-surface"), sunOrigin);
         if (spawnEntities)
         {
             foreach (var s in sunSpecs)
@@ -145,7 +147,7 @@ internal static class PlanetContent
         };
         var dropCentre = planetCentre + new Double3(0.0, planetRadius + dropHeight, 0.0);
         var (_, probeSpecs) = registry.Load(
-            device, BuildProbeSphere(probeRadius, probeMaterial), materialLayout, dropCentre);
+            device, BuildProbeSphere(probeRadius, probeMaterial), materialLayout, new AssetKey("sandbox/probe"), dropCentre);
 
         var g = mu / (planetRadius * planetRadius);
         Log.Info(
@@ -187,7 +189,7 @@ internal static class PlanetContent
             Name = "Probe",
         };
         var (_, probeSpecs) = registry.Load(
-            device, BuildProbeSphere(probeRadius, probeMaterial), materialLayout, target);
+            device, BuildProbeSphere(probeRadius, probeMaterial), materialLayout, new AssetKey("sandbox/probe"), target);
 
         var beaconMaterial = new MaterialAsset
         {
@@ -199,7 +201,8 @@ internal static class PlanetContent
             Name = "Beacon",
         };
         var (_, beaconSpecs) = registry.Load(
-            device, BuildSphereModel((float)targetRadius, beaconMaterial, "Beacon", 32, 16), materialLayout, beacon);
+            device, BuildSphereModel((float)targetRadius, beaconMaterial, "Beacon", 32, 16), materialLayout,
+            new AssetKey("sandbox/beacon"), beacon);
         if (spawnEntities)
         {
             foreach (var s in beaconSpecs)

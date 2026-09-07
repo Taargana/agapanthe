@@ -59,8 +59,9 @@ internal sealed class ModelSceneRecipe : ISceneRecipe
         {
             for (var i = 0; i < unloadCycles; i++)
             {
-                var (throwaway, _) = registry.Load(device, model, renderer.MaterialSetLayout);
-                registry.Unload(throwaway);
+                var (throwaway, _) = registry.Load(
+                    device, model, renderer.MaterialSetLayout, new AssetKey("models/unload-probe"));
+                registry.Unload(throwaway); // frees the key each cycle
             }
 
             Log.Info($"Sandbox: [unload-test] {unloadCycles} load/unload cycles done; the leak report below covers them.");
@@ -76,7 +77,8 @@ internal sealed class ModelSceneRecipe : ISceneRecipe
                 "entirely on the large axes. Fine for a precision capture; unusable for flying around.");
         }
 
-        var (_, specs) = registry.Load(device, model, renderer.MaterialSetLayout, worldOrigin);
+        var (_, specs) = registry.Load(
+            device, model, renderer.MaterialSetLayout, new AssetKey($"models/{Path.GetFileName(modelPath)}"), worldOrigin);
 
         var (rows, cols) = ModelContent.ParseGrid(sceneSpec);
         var dropCount = ModelContent.ParseDrop(sceneSpec);
@@ -139,7 +141,8 @@ internal sealed class ModelSceneRecipe : ISceneRecipe
                 (sceneBounds.Min.Z + sceneBounds.Max.Z) * 0.5);
 
             var (_, groundSpecs) = registry.Load(
-                device, ModelContent.BuildGroundModel(groundSize), renderer.MaterialSetLayout, groundOrigin);
+                device, ModelContent.BuildGroundModel(groundSize), renderer.MaterialSetLayout,
+                new AssetKey("sandbox/ground"), groundOrigin);
             foreach (var spec in groundSpecs)
             {
                 world.SpawnImported(in spec, castsShadow: false);

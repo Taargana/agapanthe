@@ -136,7 +136,8 @@ public static class AppHost
             if (options.SavePath is { } savePath)
             {
                 using var saveStream = File.Create(savePath);
-                world.Save(saveStream);
+                // Contenu-1: MeshRefs serialise as stable AssetKeys, re-resolved at load through the registry.
+                world.Save(saveStream, registry.IdentifyMeshRef);
                 Log.Info($"AppHost: [VS-1] world saved to '{savePath}' ({world.LiveEntityCount} entities).");
             }
 

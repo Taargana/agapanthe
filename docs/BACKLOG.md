@@ -7,7 +7,10 @@
 > Règle de tri : chaque item dit **ce qui casse sans lui** et **à quelle échelle il devient obligatoire**. Un item sans
 > déclencheur clair est une idée, pas du backlog.
 
-Dernière mise à jour : 2026-09-07 (session 30 — **`Agapanthe.App` LIVRÉ** : `Program.cs` 2360→22 l, `AppHost` +
+Dernière mise à jour : 2026-09-07 (session 31 — **Contenu-1 LIVRÉ** : identité d'assets stable, `AssetKey` +
+`ModelKeyIndex` + snapshot **v3** (`MeshRef` = clé + indices locaux, re-résolu au load) ; solde la dette VS-1
+« ordre de chargement différent casse en silence » pour mesh + material ; domaine Contenu décomposé en 3 sous-jalons ;
+double audit ×2 4,3/5 PASS-with-concerns, aucun 🔴 ; verdict visuel DÛ) · 2026-09-07 (session 30 — **`Agapanthe.App` LIVRÉ** : `Program.cs` 2360→22 l, `AppHost` +
 contrat `IGame`/`ISceneRecipe`, `SimulationSettings` = pas fixe source unique, dette MP-0b payée (premier `UniverseId`
 stampé) ; §4quater « Ensuite » item 1 coché ; double audit 4,2/5 · aucun 🔴 côté LL, 1 🔴 exit-code côté archi
 trouvé-et-corrigé ; verdict visuel DÛ) · 2026-09-06 (session 29 — **MP-0d LIVRÉ** : input → commandes horodatées,
@@ -334,10 +337,11 @@ path, tests verts, NativeAOT PASS, GPU==CPU) :
   **Correction de cadrage** : *pas de générateur source-gen* (les composants sont blittables → bulk-copy sans réflexion ;
   le « partage le générateur du rooting AOT » supposait un rooting source-generated qui n'a jamais existé — le rooting est
   écrit à la main). **Seam GPU = handles reproductibles** (Option 1) : le caller recharge les mêmes assets d'abord.
-  *Dette léguée* : la `Generation` des handles n'est pas validée au load → un **ordre de chargement d'assets différent
-  casse en silence**. Correctif futur non bloquant (streaming/prefabs) : un **fingerprint d'assets** (hash count/ordre)
-  fourni par le caller dans le header transformerait le mauvais-asset-silencieux en erreur dure, sans casser le
-  GPU-free du World. *Mord : le jour où l'ordre/le set d'assets chargés varie entre save et load.*
+  ~~*Dette léguée* : la `Generation` des handles n'est pas validée au load → un **ordre de chargement d'assets différent
+  casse en silence**.~~ ✅ **soldée Contenu-1 (S31)** pour mesh + material : snapshot v3 stocke `(AssetKey, index mesh
+  local, index material local)` re-résolus au load via un délégué `MeshRefResolver` — un ordre différent est soit
+  correct soit une `GraphicsException` bruyante. Restent hors scheme : textures/environnement/fonts (pas portés par
+  le snapshot), et l'identité d'asset **côté simulation** (voir §4quater — Contenu-3).
 - ~~**VS-2 — Spawn runtime**~~ ✅ **livrée session 23** (double audit PASS-with-concerns [4,5/5], verdict visuel PASS).
   `SpawnBodyDeferred` + `CommandKind.SpawnBody` (le `StructuralCommand` fat portant vitesse/masse/restitution/rayon,
   `MaterialiseBody` = point de matérialisation unique) — dette P3-M3 soldée. **Élargi (décision humaine)** : gravité
@@ -453,12 +457,27 @@ pas fixe = source de vérité unique (prérequis netcode) — voir §Physique.
   Double audit : 1 🔴 (exit code) trouvé-et-corrigé, ×2 PASS-with-concerns. **Dette majeure laissée** : scission
   `SceneContext` sim/présentation (mord à la 2ᵉ slice + `RunDedicatedServer`), `HostOptions.Scene`, `EngineWindowAdapter`
   → projet dédié à l'app n°2 — détail board §Deferred.
-- **Contenu** : identité d'assets stable (GUID/path — solde la dette VS-1 « ordre de chargement différent casse en
-  silence » ; **exacerbée par S30** — les recipes planet chargent le glTF dans un ordre différent → un `.save`
-  pré-refactor peut ne plus résoudre) → import/cook + graphe de dépendances → **prefabs & scènes déclaratifs** (⚠️ le
-  registry `ISceneRecipe` de S30 est de l'*organisation de code*, PAS un format d'authoring ; le snapshot VS-1 est une
-  **sauvegarde**, PAS un format d'authoring) → définitions **data-driven** (items/recettes = données, pas du code —
-  prérequis du Stardew-like).
+- **Contenu** — domaine **décomposé en 3 sous-jalons** (comme MP-0, décision S31 ; feu vert humain entre chaque,
+  spec + board + double audit + verdict chacun) :
+  - ~~**Contenu-1 — identité d'assets stable**~~ ✅ **LIVRÉ (S31)** — spec `plans/2026-09-07-content-asset-identity-design.md`
+    (4,60/5). `AssetKey` (`readonly record struct`, `Core`, path-based, style `res://`) ; `ModelKeyIndex` (`Rendering`,
+    GPU-free) ; snapshot **v3** : `MeshRef` = `(clé, index mesh local, index material local)` re-résolu au load via
+    `MeshRefResolver` (délégué de l'hôte, `World` ne réfère toujours pas `Rendering`). **Solde la dette VS-1 « ordre de
+    chargement différent casse en silence »** pour mesh + material ; v1 ET v2 refusés. Double audit ×2 4,3/5
+    PASS-with-concerns. **Le mécanisme a attrapé une vraie inversion d'ordre (S30) dans son propre run de validation.**
+  - **Contenu-2 — cook offline + manifest + graphe de dépendances** : `tools/AssetCooker` (patron `FontCooker`), blobs
+    binaires déterministes keyés par `AssetKey`, import glTF → offline, manifest `clé → blob + deps`. **À cadrer** :
+    `AssetKey` devient-elle *aussi* la clé du manifest ; `AssetKey.FromContentPath(root, path)` (aujourd'hui les
+    call sites Sandbox dérivent la clé de `Path.GetFileName`, répertoire jeté).
+  - **Contenu-3 — prefabs & scènes déclaratifs** : `.agscene` / `.agprefab` (**authoring**, PAS une sauvegarde) ;
+    `SceneLoader` ; les 5 recipes Sandbox `ISceneRecipe` → données (⚠️ le registry `ISceneRecipe` de S30 est de
+    l'*organisation de code*). **Décision structurante à prendre ici** : remonter l'identité d'asset **dans la
+    simulation** — un composant sim-side `AssetRef { assetId, localMesh, localMat }` dont `MeshRef` devient la
+    projection client résolue à la matérialisation (aujourd'hui `MeshRef` est render-local → un `Save` headless écrit
+    `AssetKey.None` → un serveur autoritaire ne peut pas émettre d'état visuellement reconstructible). `AssetKey` reste
+    le nom stable, le manifest Contenu-2 fournit l'`assetId` numérique. → aussi lié à la scission `SceneContext`
+    sim/présentation (dette S30) et à un garde-fou `RestoreIfRequested`.
+  - Puis définitions **data-driven** (items/recettes = données, pas du code — prérequis du Stardew-like).
 - **La 2ᵉ slice, dissemblable** : une mini-slice top-down/orthographique. **Le moteur, c'est ce qui est commun aux deux.**
   Test de généralité le moins cher qui existe ; exposera violemment tout ce qui est hardcodé pour l'échelle planétaire.
 - **Texte & UI** (§ ci-dessous), audio, **queries physiques** (raycast/formes/layers — aujourd'hui on ne peut même pas

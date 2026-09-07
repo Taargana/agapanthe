@@ -19,6 +19,7 @@ internal sealed class PlanetSceneRecipe : ISceneRecipe
     public void Build(SceneContext ctx)
     {
         var info = PlanetStage.Build(ctx);
+        PlanetStage.RestoreIfRequested(ctx, in info); // no scene-specific assets — planet/Sun is all it references
         SandboxCameras.FramePlanetCamera(
             ctx.Camera, ctx.Controller, ctx.Renderer, info.WorldOrigin, info.SunOrigin, info.PlanetRadius, info.SunTravelDir);
         RecipeInput.WireFreeFly(ctx);
