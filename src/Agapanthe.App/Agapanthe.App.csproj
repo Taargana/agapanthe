@@ -1,0 +1,44 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- The COMPOSITION-ROOT layer (Agapanthe.App milestone). It owns the client frame loop (AppHost), the
+       GPU + window bootstrap and the strict-order teardown, and defines the game contract (IGame /
+       ISceneRecipe / SceneContext). It sits ABOVE Agapanthe.Engine.Render.
+
+       It does NOT reference Agapanthe.Platform: that would drag this project's whole closure
+       (Engine.Render -> Rendering -> Graphics -> Silk.NET.Vulkan) transitively into Platform, a
+       Vulkan-free leaf. Instead IWindow is an abstraction here and the concrete EngineWindow is
+       adapted in the application (samples/Sandbox/EngineWindowAdapter). -->
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <!-- Phase 2 rule 1: trim/AOT analyzers at build time (permanent gate). samples/Sandbox publishes
+         NativeAOT and now flows through this project, so the gate must stay live here. -->
+    <IsAotCompatible>true</IsAotCompatible>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\Agapanthe.Core\Agapanthe.Core.csproj" />
+    <ProjectReference Include="..\Agapanthe.World\Agapanthe.World.csproj" />
+    <ProjectReference Include="..\Agapanthe.Assets\Agapanthe.Assets.csproj" />
+    <ProjectReference Include="..\Agapanthe.Graphics\Agapanthe.Graphics.csproj" />
+    <ProjectReference Include="..\Agapanthe.Ui\Agapanthe.Ui.csproj" />
+    <ProjectReference Include="..\Agapanthe.Rendering\Agapanthe.Rendering.csproj" />
+    <ProjectReference Include="..\Agapanthe.Engine\Agapanthe.Engine.csproj" />
+    <ProjectReference Include="..\Agapanthe.Engine.Render\Agapanthe.Engine.Render.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- IWindow names Silk.NET.Input.Key and the opaque Silk.NET.Core.Contexts.IVkSurface — neither is a
+         Vulkan type, and Platform already exposes both across its own public boundary. A home-grown Key
+         enum is the (deferred) action-map milestone's job. -->
+    <PackageReference Include="Silk.NET.Input" Version="2.23.0" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- AppHost.SelectRecipe / BuildTeardown / TeardownTargets are internal and asserted by tests
+         (a full RunClient can't run headless — window.Loaded builds a GraphicsDevice). -->
+    <InternalsVisibleTo Include="Agapanthe.Tests" />
+  </ItemGroup>
+
+</Project>

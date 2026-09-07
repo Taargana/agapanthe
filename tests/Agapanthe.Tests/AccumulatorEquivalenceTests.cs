@@ -24,7 +24,9 @@ namespace Agapanthe.Tests;
 [Collection("World")]
 public sealed class AccumulatorEquivalenceTests : IDisposable
 {
-    private const float Fixed = 1f / 60f;
+    // The fixed step comes from the single definition (Agapanthe.App milestone), not a local literal — same
+    // value (1/60), but the provenance is the point: FrameOrchestrator's accumulator reads exactly this.
+    private static readonly float Fixed = SimulationSettings.Default.FixedDeltaSeconds;
 
     // Asymmetric overlapping cluster: distinct mass, restitution and velocity per body, so the trajectory keeps
     // evolving over tens of ticks and is sensitive to how many ran (a symmetric settled scene would be tautological).

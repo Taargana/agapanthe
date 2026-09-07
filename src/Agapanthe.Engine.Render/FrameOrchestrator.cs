@@ -74,7 +74,7 @@ public sealed class FrameOrchestrator
 
     private FrameOrchestrator(
         SimulationHost simulation, GameWorld world, Renderer renderer, ResourceRegistry registry, Camera camera,
-        RenderList render, float fixedTickDeltaSeconds, float maxWallClockDeltaSeconds)
+        RenderList render, float maxWallClockDeltaSeconds)
     {
         _world = world;
         _renderer = renderer;
@@ -82,7 +82,9 @@ public sealed class FrameOrchestrator
         _camera = camera;
         _render = render;
         _simulation = simulation;
-        _accumulator = new FixedTimestepAccumulator(fixedTickDeltaSeconds, maxWallClockDeltaSeconds);
+        // The fixed step comes from the host, not a ctor argument (Agapanthe.App milestone): SimulationSettings is
+        // the single definition and ResolveAccumulatorStep is the one line that reads it.
+        _accumulator = new FixedTimestepAccumulator(ResolveAccumulatorStep(simulation), maxWallClockDeltaSeconds);
         _renderScheduler = new RenderSystemScheduler(world.FlushStructuralChanges);
 
         _renderDelegate = (cmd, frame, target) =>
@@ -99,15 +101,27 @@ public sealed class FrameOrchestrator
     /// BEFORE the first <see cref="Tick"/>.
     /// </summary>
     /// <param name="fixedTickDeltaSeconds">The fixed simulation step, seconds (MP-0c) — a PERIOD, not a rate.
-    /// Default 1/60.</param>
+    /// <c>0</c> (the default) means "use <see cref="SimulationSettings.Default"/>", the single definition; a
+    /// positive value builds a host bound to that step instead; a negative value is rejected.</param>
     /// <param name="maxWallClockDeltaSeconds">The accumulator's input clamp, seconds — the anti-spiral-of-death
     /// ceiling. Default 250 ms.</param>
     public static FrameOrchestrator CreateDefault(
         GameWorld world, Renderer renderer, ResourceRegistry registry, Camera camera, RenderList render,
-        float fixedTickDeltaSeconds = 1f / 60f, float maxWallClockDeltaSeconds = 0.25f)
-        => CreateDefault(
-            SimulationHost.CreateDefault(world), world, renderer, registry, camera, render,
-            fixedTickDeltaSeconds, maxWallClockDeltaSeconds);
+        float fixedTickDeltaSeconds = 0f, float maxWallClockDeltaSeconds = 0.25f)
+    {
+        ArgumentOutOfRangeException.ThrowIfNegative(fixedTickDeltaSeconds);
+        var step = fixedTickDeltaSeconds == 0f
+            ? SimulationSettings.Default.FixedDeltaSeconds
+            : fixedTickDeltaSeconds;
+        var simulation = SimulationHost.CreateDefault(world, new SimulationSettings { FixedDeltaSeconds = step });
+        return CreateDefault(simulation, world, renderer, registry, camera, render, maxWallClockDeltaSeconds);
+    }
+
+    /// <summary>The one line that reads the fixed-step single definition (<see cref="SimulationSettings"/>): the
+    /// private ctor feeds the accumulator from it. <c>internal</c> so a test can assert the wiring without a GPU
+    /// <c>Renderer</c> (a real orchestrator cannot be built headless).</summary>
+    internal static float ResolveAccumulatorStep(SimulationHost simulation)
+        => simulation.Settings.FixedDeltaSeconds;
 
     /// <summary>
     /// Attaches presentation to an <b>existing</b> <see cref="SimulationHost"/>.
@@ -118,13 +132,14 @@ public sealed class FrameOrchestrator
     /// "client + server" and "client only" must be able to build and configure the host itself, then hand it over.
     /// </para>
     /// </summary>
-    /// <param name="fixedTickDeltaSeconds">The fixed simulation step, seconds (MP-0c) — a PERIOD, not a rate.
-    /// Default 1/60.</param>
     /// <param name="maxWallClockDeltaSeconds">The accumulator's input clamp, seconds — the anti-spiral-of-death
     /// ceiling. Default 250 ms.</param>
+    /// <remarks>The fixed step is <b>not</b> a parameter here: it comes from
+    /// <paramref name="simulation"/>'s <see cref="SimulationHost.Settings"/> (the single definition). A composition
+    /// root that wants a non-default step builds the host with it, then hands the host over.</remarks>
     public static FrameOrchestrator CreateDefault(
         SimulationHost simulation, GameWorld world, Renderer renderer, ResourceRegistry registry, Camera camera,
-        RenderList render, float fixedTickDeltaSeconds = 1f / 60f, float maxWallClockDeltaSeconds = 0.25f)
+        RenderList render, float maxWallClockDeltaSeconds = 0.25f)
     {
         ArgumentNullException.ThrowIfNull(simulation);
         ArgumentNullException.ThrowIfNull(world);
@@ -134,7 +149,7 @@ public sealed class FrameOrchestrator
         ArgumentNullException.ThrowIfNull(render);
 
         var o = new FrameOrchestrator(
-            simulation, world, renderer, registry, camera, render, fixedTickDeltaSeconds, maxWallClockDeltaSeconds);
+            simulation, world, renderer, registry, camera, render, maxWallClockDeltaSeconds);
         o._renderScheduler.Add(new SceneViewSystem(o));
         return o;
     }

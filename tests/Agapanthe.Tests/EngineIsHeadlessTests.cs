@@ -49,6 +49,15 @@ public sealed class EngineIsHeadlessTests
     // The milestone's headline artifact. Its own csproj comment promises this file is guarded — so guard it.
     [InlineData(
         "samples/HeadlessSim/HeadlessSim.csproj", "Agapanthe.Core", "Agapanthe.Engine", "Agapanthe.World")]
+    // Agapanthe.App milestone: the composition-root layer may reference the whole engine — EXCEPT Agapanthe.Platform.
+    // App→Platform would drag Rendering/Graphics/Silk.NET.Vulkan transitively into Platform, a Vulkan-free leaf;
+    // the concrete window is adapted in the application (samples/Sandbox/EngineWindowAdapter), not named here. The
+    // MSBuild cycle only catches half of this (a re-added ProjectReference the compiler elides stays green until
+    // first use) — the same one-commit blind spot MP-0a's static allowlist exists to close.
+    [InlineData(
+        "src/Agapanthe.App/Agapanthe.App.csproj",
+        "Agapanthe.Assets", "Agapanthe.Core", "Agapanthe.Engine", "Agapanthe.Engine.Render",
+        "Agapanthe.Graphics", "Agapanthe.Rendering", "Agapanthe.Ui", "Agapanthe.World")]
     public void ProjectFile_ReferencesExactlyTheAllowedProjects(string relativePath, params string[] allowed)
     {
         var csproj = Path.Combine(RepositoryRoot(), relativePath.Replace('/', Path.DirectorySeparatorChar));

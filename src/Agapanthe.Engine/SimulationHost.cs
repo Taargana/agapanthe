@@ -37,12 +37,13 @@ public sealed class SimulationHost
 
     private readonly SimCommandHandler _discard;
 
-    private SimulationHost(GameWorld world)
+    private SimulationHost(GameWorld world, SimulationSettings settings)
     {
         // The structural barrier the scheduler runs at the end of every stage IS the world's deferred-change flush
         // (P3-M2 D2): a system enqueues spawns/despawns, the barrier applies them before the next stage iterates.
         _scheduler = new SystemScheduler(world.FlushStructuralChanges);
         _discard = Discard; // cached once — `ApplyCommand ?? _discard` then allocates nothing per tick
+        Settings = settings;
     }
 
     /// <summary>
@@ -50,13 +51,29 @@ public sealed class SimulationHost
     /// The application adds its own with <see cref="Add"/> BEFORE the first <see cref="Tick"/>.
     /// </summary>
     public static SimulationHost CreateDefault(GameWorld world)
+        => CreateDefault(world, SimulationSettings.Default);
+
+    /// <summary>
+    /// Builds a default host bound to explicit <paramref name="settings"/> — the composition root (the
+    /// <c>Agapanthe.App</c> milestone) that owns the fixed step passes it here so
+    /// <see cref="FrameOrchestrator"/> and the application's physics both read one value.
+    /// </summary>
+    public static SimulationHost CreateDefault(GameWorld world, SimulationSettings settings)
     {
         ArgumentNullException.ThrowIfNull(world);
+        ArgumentNullException.ThrowIfNull(settings);
 
-        var host = new SimulationHost(world);
+        var host = new SimulationHost(world, settings);
         host._scheduler.Add(Stage.PostSimulation, new PropagateSystem(world));
         return host;
     }
+
+    /// <summary>
+    /// The simulation's protocol constants — today the fixed step (<see cref="SimulationSettings"/>). The single
+    /// definition: <c>FrameOrchestrator</c>'s accumulator and the application's <c>PhysicsSettings</c> both derive
+    /// from it.
+    /// </summary>
+    public SimulationSettings Settings { get; }
 
     /// <summary>Registers a simulation system (Input / Simulation / PostSimulation). See
     /// <see cref="SystemScheduler.Add(Stage, ISystem)"/>: registration order is execution order, frozen at first tick.</summary>

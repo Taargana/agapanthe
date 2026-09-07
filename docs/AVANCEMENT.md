@@ -495,10 +495,62 @@ Spec : [2026-07-25-vs2-spawn-runtime-newtonian-gravity-design.md](plans/2026-07-
 > in-process (avec la dette `FixedTimestepAccumulator.Reset()`) · cap anti-flood de `SimCommandQueue` ·
 > `OriginatorId` / identité de pair · format fil (send/recv) · le clone `RunDrive` dans les tests.
 >
-> ### ▶️ Reprise — `Agapanthe.App` (premier hôte de prod) ou UI-3 (timestamps GPU)
-> MP-0 est CLOS (4/4). Le prochain grand pas du cap moteur : **`Agapanthe.App`** — extraire `Program.cs` (2 300+
-> lignes : bootstrap + contenu + 6 scènes + 4 caméras + input + gameplay) en un host + un contrat `Game`, et **c'est
-> là que le premier `UniverseId` réel se stampe** (dette MP-0b) et que la topologie de déploiement se choisit.
+> ### ✅ **`Agapanthe.App` CLOS (S30)** — premier hôte de production : `Program.cs` (2360 l) → `AppHost` + contrat `IGame`
+> Spec : **[plans/2026-09-07-agapanthe-app-design.md](plans/2026-09-07-agapanthe-app-design.md)** (APPROVED **4,40/5**,
+> **3 tours** — v1 3,13 référence de projet circulaire `App↔Platform` ; v2 3,88 test factice ; v3 4,40 + décision adapter).
+> Détail par vague : **[.absolute-work/board.md](../.absolute-work/board.md)**.
+>
+> **Livré** : nouveau **`src/Agapanthe.App`** — `IWindow` (abstrait le backend fenêtre, expose `Silk.NET.Input.Key`),
+> `IGame` (Title / Scenes / DefaultScene / `Universe => UniverseId.None` DIM) + `ISceneRecipe.Build(SceneContext)`,
+> `HostOptions.FromEnvironment(Func<string,string?>?)`, **`AppHost.RunClient(IGame, IWindow, string[], HostOptions?)`**
+> (bootstrap GPU + frame loop fixed-step + harness capture + **teardown ordre-strict M4-11 = le gate 0-leak**, portés
+> verbatim ; `BuildTeardown` = liste ordonnée que le `finally` itère ET qu'un test assert). **`App` NE référence PAS
+> `Platform`** (sinon Vulkan entre transitivement dans un leaf) → `EngineWindowAdapter : IWindow` vit dans
+> `samples/Sandbox` ; `EngineIsHeadlessTests` a une `[InlineData]` sur `App.csproj` (allowlist statique MP-0a).
+> **Couture composition-root MP-0a exercée pour de vrai** : `SimulationHost.CreateDefault(world, SimulationSettings.Default)`
+> puis `FrameOrchestrator.CreateDefault(sim, world, …)`. **`SimulationSettings { FixedDeltaSeconds }` sur `SimulationHost`
+> = définition unique du pas fixe** (`ResolveAccumulatorStep` le lit ; recipes + `HeadlessSim` le lisent ; le `const
+> FixedDt` de `HeadlessSim` supprimé ; `PhysicsSettings` garde son littéral, réconcilié par `RatesMatch`). **Dette MP-0b
+> payée** : `AppHost.ResolveUniverse` = `options.Universe ?? game.Universe` → `new GameWorld(GlobalIdRange.Default,
+> resolved)` — premier hôte qui stampe un `UniverseId` ; `SandboxGame` reste `None` → hashs inchangés ; override
+> `AGAPANTHE_UNIVERSE`. **Sandbox thin** : `Program.cs` **2360 → 22 l** ; **5 recipes** (`ModelSceneRecipe` couvre
+> `model`/`grid:`/`drop:`, `Planet`/`PlanetDrop`/`PlanetChallenge` partagent `PlanetStage`, `Drive`) + `Content/` +
+> `Cameras/` + `Systems/` + `Tools/IblTestTool`. Caméra free-fly : recipes → `ctx.Window.Updated` (verbatim, pas
+> `SampleInput`) via `RecipeInput.WireFreeFly` ; clavier host = Escape/sensibilité/exposition/N/L/F3, `B`/`X`/`F5` → recipes.
+>
+> **Métriques** : **617 tests** (+28) · 0 warning · captures HDR `12638eddd7f3f67ab161b298ffbcd15e` / UI
+> `034213575932dabcff41c2e0c72addfa` **inchangées** ×3 · `model` baseline `df55d444b74c7aa94fd0ab18d795cc9c` ·
+> `HeadlessSim` défaut `7e8dc68f5a25914c84677a7a53ad3a58` (1868 o) + `--drive` `97e786f0455a53d856b9ba4affca1003`
+> **inchangés** · **Sandbox + HeadlessSim JIT == NativeAOT** · `AotComponentProbe` PASS · 0 leak / 0 validation ·
+> une scène inconnue sort en **exit 1** (JIT + AOT).
+> Double audit : `engine-architect` PASS-with-concerns **4,2/5** (**1 🔴 trouvé-et-corrigé** — `RunClient` renvoyait 0
+> sur échec d'init, `clean` écrasé par l'étape Report du teardown → flag `failed` + `return clean && !failed`) ;
+> `csharp-lowlevel` PASS-with-concerns **aucun 🔴** (teardown ordre EXACT vérifié, hot path 0-alloc, extractions fidèles).
+> **Tous les 🔴/🟠/🟡 contenables corrigés** (2 passes) : isolation par étape du teardown, `[InlineData]` `App↛Platform`,
+> `HostOptions.Scene`/`SavePath`/`VerifyCull`/`ShaderReloadTest` (`RunClient` ne lit plus aucune env var), surface
+> morte `IWindow` retirée, garde de longueur `Ppm`, `IWindowSurfaceTests` (équivalent du test 5), dédups.
+> **Verdict visuel humain : DÛ.**
+>
+> **Découvertes / notes** : (1) `App→Platform` aurait tiré `Rendering/Graphics/Silk.NET.Vulkan` transitivement dans
+> `Platform`, un leaf Vulkan-free → adapter dans Sandbox, contrainte de layering, pas de la spéculation ; (2) l'ordre
+> des captures byte-identique à travers un déplacement de 2360 lignes **entre assemblies** (JIT==AOT) — la baseline
+> `model` enregistrée en W1 *avant* de bouger quoi que ce soit était le bon réflexe ; (3) les recipes planet chargent
+> le glTF **après** `SetupPlanetScene` (l'ancien `Program.cs` avant) → un `.save` **pré-refactor** peut ne plus résoudre
+> ses handles (seam Option 1 VS-1) ; la nouvelle build est auto-cohérente.
+>
+> **Dette laissée** (board §Deferred, S30 — après les corrections) : 🟠 **`SceneContext` indissociablement client** —
+> tout `required` → une recipe ne se construit pas headless, `HeadlessSim` partage 0 code de peuplement ; **mord à la
+> 2ᵉ slice + `RunDedicatedServer`** · 🟠 `EngineWindowAdapter` (~75 l) → projet `Platform.App` dédié à l'app n°2 · 🟠
+> helpers caméra/lumière/sol/sky → `App` au jalon contenu · 🟡 exit code modèle-introuvable 2→1 (check game-specific,
+> vit dans la recipe) · 🟡 `FrameOrchestrator` param optionnel médian retiré (note API) · 🟡 ordre de chargement
+> d'assets planet changé (un `.save` pré-refactor peut ne plus résoudre).
+>
+> ### ▶️ Reprise — contenu (identité d'assets / cook / prefabs) ou 2ᵉ slice dissemblable, ou UI-3
+> **`Agapanthe.App` est CLOS.** Prochain d'après backlog §4quater « Ensuite » : **contenu** — identité d'assets stable
+> (GUID/path, solde la dette VS-1) → import/cook + graphe de dépendances → **prefabs & scènes déclaratifs** (⚠️ le
+> registry `ISceneRecipe` actuel est de l'*organisation de code*, PAS un format d'authoring ; le snapshot VS-1 est une
+> **sauvegarde**, pas un format d'authoring) → définitions data-driven. Puis **2ᵉ slice dissemblable** (top-down — test
+> de généralité ; exposera ce qui est hardcodé pour l'échelle planétaire, et fera mordre la scission `SceneContext`).
 > Alternative courte : **UI-3** (timestamps GPU + refactor du seam `FrameProfiler` réservé par UI-2).
 >
 > ### Contexte — **Cap moteur** (réorientation S25)

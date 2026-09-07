@@ -21,7 +21,10 @@ using Agapanthe.World;
 
 const int DefaultTicks = 600;
 const int DefaultBodies = 8;
-const float FixedDt = 1f / 60f;
+
+// The fixed step is the simulation's single definition (Agapanthe.App milestone): read it off the host's
+// SimulationSettings rather than re-literalling 1/60. Same value — SimulationHost.CreateDefault binds
+// SimulationSettings.Default — so the pinned snapshot hashes are unchanged.
 
 // MP-0d --drive command kinds (opaque bytes — the app owns them) and the steering model.
 const byte DriveMoveKind = 1;
@@ -122,7 +125,8 @@ try
     // The engine's default simulation schedule, plus physics. Note what is absent: no Renderer, no ResourceRegistry,
     // no Camera, no swapchain — none of which SimulationHost can even name.
     var host = SimulationHost.CreateDefault(world);
-    var settings = new PhysicsSettings(new Vector3(0f, -9.81f, 0f), groundY: 0f, fixedDt: FixedDt);
+    var fixedDt = host.Settings.FixedDeltaSeconds;
+    var settings = new PhysicsSettings(new Vector3(0f, -9.81f, 0f), groundY: 0f, fixedDt: fixedDt);
     host.Add(Stage.Simulation, new PhysicsSystem(world, in settings));
 
     // One tick per "frame" here. A real server will grow an accumulator; BeginFrame stays outside that inner loop,
@@ -130,7 +134,7 @@ try
     for (var i = 0; i < ticks; i++)
     {
         host.BeginFrame();
-        host.Tick(FixedDt);
+        host.Tick(fixedDt);
         host.EndFrame();
     }
 
@@ -166,7 +170,8 @@ static int RunDrive(GameWorld world, int ticks, string? savePath)
     world.FlushStructuralChanges();
 
     var host = SimulationHost.CreateDefault(world);
-    var settings = new PhysicsSettings(Vector3.Zero, groundY: -100_000f, fixedDt: FixedDt);
+    var fixedDt = host.Settings.FixedDeltaSeconds;
+    var settings = new PhysicsSettings(Vector3.Zero, groundY: -100_000f, fixedDt: fixedDt);
     host.Add(Stage.Simulation, new PhysicsSystem(world, in settings));
 
     var map = new InputMap();
@@ -212,7 +217,7 @@ static int RunDrive(GameWorld world, int ticks, string? savePath)
     for (var i = 0; i < ticks; i++)
     {
         host.BeginFrame();
-        host.Tick(FixedDt);
+        host.Tick(fixedDt);
         host.EndFrame();
     }
 

@@ -7,8 +7,11 @@
 > Règle de tri : chaque item dit **ce qui casse sans lui** et **à quelle échelle il devient obligatoire**. Un item sans
 > déclencheur clair est une idée, pas du backlog.
 
-Dernière mise à jour : 2026-09-06 (session 29 — **MP-0d LIVRÉ** : input → commandes horodatées, **MP-0 CLOS (4/4)** ;
-§4quater item 4 coché ; double audit PASS-with-concerns, 1 🔴 trouvé-et-corrigé) ·
+Dernière mise à jour : 2026-09-07 (session 30 — **`Agapanthe.App` LIVRÉ** : `Program.cs` 2360→22 l, `AppHost` +
+contrat `IGame`/`ISceneRecipe`, `SimulationSettings` = pas fixe source unique, dette MP-0b payée (premier `UniverseId`
+stampé) ; §4quater « Ensuite » item 1 coché ; double audit 4,2/5 · aucun 🔴 côté LL, 1 🔴 exit-code côté archi
+trouvé-et-corrigé ; verdict visuel DÛ) · 2026-09-06 (session 29 — **MP-0d LIVRÉ** : input → commandes horodatées,
+**MP-0 CLOS (4/4)** ; §4quater item 4 coché ; double audit PASS-with-concerns, 1 🔴 trouvé-et-corrigé) ·
 2026-09-05 (session 28 — **MP-0c livré** : autorité du temps, `FixedTimestepAccumulator`
 découple le tick de sim de la frame ; `FrameIndex`→`TickIndex` + off-by-one `CurrentTick` corrigé ; §4quater item 5
 coché ; §Physique accumulateur ✅ / interpolation reste 🟡) · 2026-09-02 (session 27 — **MP-0b livré** : identité
@@ -441,10 +444,19 @@ pas fixe = source de vérité unique (prérequis netcode) — voir §Physique.
 
 ### Ensuite, dans l'ordre
 
-- **`Agapanthe.App`** — le host + le contrat `Game` (`OnLoad`/`OnUpdate`/`OnRender`), extraction de `Program.cs`.
-  *Placé APRÈS MP-0 volontairement* : le split headless fait naître la couture que `App` doit formaliser.
+- ~~**`Agapanthe.App`** — le host + le contrat `Game`, extraction de `Program.cs`.~~ ✅ **LIVRÉ (S30)** — spec
+  `plans/2026-09-07-agapanthe-app-design.md` (approuvée 4,40/5 après 3 tours ; v1 3,13 = référence de projet
+  circulaire). `AppHost.RunClient(IGame, IWindow, string[], HostOptions?)` — **configuration, pas callbacks**
+  (`OnLoad/OnUpdate/OnRender` rejeté : le host possède la frame loop, `ISceneRecipe.Build` peuple + enregistre les
+  systèmes, colle au scheduler à étages de MP-0a). `Program.cs` 2360 → 22 l. `SimulationSettings` = définition unique
+  du pas fixe (prérequis netcode). Dette MP-0b payée (`AppHost.ResolveUniverse` → premier `UniverseId` stampé).
+  Double audit : 1 🔴 (exit code) trouvé-et-corrigé, ×2 PASS-with-concerns. **Dette majeure laissée** : scission
+  `SceneContext` sim/présentation (mord à la 2ᵉ slice + `RunDedicatedServer`), `HostOptions.Scene`, `EngineWindowAdapter`
+  → projet dédié à l'app n°2 — détail board §Deferred.
 - **Contenu** : identité d'assets stable (GUID/path — solde la dette VS-1 « ordre de chargement différent casse en
-  silence ») → import/cook + graphe de dépendances → **prefabs & scènes déclaratifs** (⚠️ le snapshot VS-1 est une
+  silence » ; **exacerbée par S30** — les recipes planet chargent le glTF dans un ordre différent → un `.save`
+  pré-refactor peut ne plus résoudre) → import/cook + graphe de dépendances → **prefabs & scènes déclaratifs** (⚠️ le
+  registry `ISceneRecipe` de S30 est de l'*organisation de code*, PAS un format d'authoring ; le snapshot VS-1 est une
   **sauvegarde**, PAS un format d'authoring) → définitions **data-driven** (items/recettes = données, pas du code —
   prérequis du Stardew-like).
 - **La 2ᵉ slice, dissemblable** : une mini-slice top-down/orthographique. **Le moteur, c'est ce qui est commun aux deux.**
@@ -453,6 +465,41 @@ pas fixe = source de vérité unique (prérequis netcode) — voir §Physique.
   demander « qu'y a-t-il sous le curseur ? »), **job system** (tout est mono-thread, `AssertOwnerThread` partout =
   plafond dur), transparence triée.
 - **Netcode réel** : transport, réplication delta, prediction/reconciliation.
+
+### Dette `Agapanthe.App` (S30) — à corriger, par échéance
+
+*Aucune n'est bloquante ; le double audit signe PASS. Le 🔴 exit-code + tous les 🟠/🟡 contenables ont été
+corrigés avant clôture ; ce qui suit reste, avec l'accord explicite des deux auditeurs.*
+
+- **`SceneContext` indissociablement client — la plus importante.** Les 10 membres sont `required` et
+  non-nullables (`Device`, `Renderer`, `Camera`, `Window`…) → une `ISceneRecipe` **ne se construit pas sans GPU
+  ni fenêtre**, et `samples/HeadlessSim` continue de bâtir son monde à la main : le contrat de scène partage
+  **zéro** code de peuplement entre client et serveur, alors que c'était son premier bénéfice attendu. Symptôme :
+  `LandingChallengeSystem` est un `ISystem` en `PostSimulation` (moitié headless) qui **tient un `IWindow`** pour
+  écrire le titre — logique de jeu qui ne tourne pas sans présentation.
+  **Fix** : scinder `SceneContext` en un noyau simulation (`World`, `Orchestrator`/`Simulation`, `Args`, options)
+  + un volet présentation optionnel. **Mord au moment de la 2ᵉ slice dissemblable et de `RunDedicatedServer`.**
+- **`EngineWindowAdapter` (~75 l) à recopier par toute 2ᵉ application.** C'est du glue moteur générique
+  (forwarding pur `EngineWindow` → `IWindow`), pas du Sandbox. **Fix** : projet `src/Agapanthe.Platform.App`
+  (réf. Platform + App, un fichier) **quand l'app n°2 arrive** — prématuré aujourd'hui. *(La couverture partielle
+  est en place : `IWindowSurfaceTests` assère que `IWindow` reste un sous-ensemble de `EngineWindow` par
+  réflexion, et qu'`EngineWindow` n'implémente jamais `IWindow` directement.)*
+- **Helpers génériques restés dans le Sandbox** (`Cameras/SandboxCameras`, `Content/ModelContent` :
+  `FrameCamera`, `SetupLights`, `NarrowBounds`, `BuildGroundModel`, `BuildSkyEnvironment`,
+  `RecipeInput.WireFreeFly`). Rien de spécifique au Sandbox → une 2ᵉ app les copie. **Fix** : remonter dans
+  `Agapanthe.App` au **jalon contenu** (avec extraction d'un `Content/ModelStage` — `ModelSceneRecipe` fait ~200 l).
+- **Mineurs** : `FrameOrchestrator.CreateDefault(SimulationHost, …)` a perdu un paramètre optionnel *médian*
+  (un appel positionnel `…, 0.5f)` lie maintenant `0.5f` au clamp au lieu du pas fixe — aucun appelant du dépôt
+  ne le fait ; note d'API publique) · modèle introuvable : code de sortie 2 → 1 et bring-up Vulkan complète avant
+  l'échec (le check de chemin est game-specific, il vit dans `ModelSceneRecipe.Build`) · les recipes planet
+  chargent le glTF **après** `SetupPlanetScene` (l'ancien code avant) → un `.save` **antérieur à S30** peut ne
+  plus résoudre ses handles (la build actuelle est auto-cohérente).
+
+**Corrigé en W5 (post-audit)** : 🔴 exit code · isolation par étape du teardown · `[InlineData]` `App↛Platform` ·
+`Log.Warn` `AGAPANTHE_LOAD` non consommé · catch F5 élargi · `WireFreeFly`/`ResolveShaderDirectory` dédupliqués ·
+**`HostOptions.Scene` + `SavePath` + `VerifyCull` + `ShaderReloadTest`** (plus aucune lecture d'env dans `RunClient`) ·
+surface morte `IWindow` (`Closing`, `CaptureMouseOnClick`) retirée · garde de longueur sur `Ppm.WriteSwapchain` ·
+`IWindowSurfaceTests` (l'équivalent atteignable du test 5).
 
 ### Hooks « massif/persistant » — à prévoir, PAS à implémenter
 

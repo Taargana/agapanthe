@@ -4,6 +4,7 @@
     <Project Path="samples/Sandbox/Sandbox.csproj" />
   </Folder>
   <Folder Name="/src/">
+    <Project Path="src/Agapanthe.App/Agapanthe.App.csproj" />
     <Project Path="src/Agapanthe.Assets/Agapanthe.Assets.csproj" />
     <Project Path="src/Agapanthe.Core/Agapanthe.Core.csproj" />
     <Project Path="src/Agapanthe.Engine/Agapanthe.Engine.csproj" />

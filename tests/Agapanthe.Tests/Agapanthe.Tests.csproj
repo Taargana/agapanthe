@@ -19,6 +19,8 @@
   </ItemGroup>
 
   <ItemGroup>
+    <ProjectReference Include="..\..\src\Agapanthe.App\Agapanthe.App.csproj" />
+    <ProjectReference Include="..\..\src\Agapanthe.Platform\Agapanthe.Platform.csproj" />
     <ProjectReference Include="..\..\src\Agapanthe.Core\Agapanthe.Core.csproj" />
     <ProjectReference Include="..\..\src\Agapanthe.Graphics\Agapanthe.Graphics.csproj" />
     <ProjectReference Include="..\..\src\Agapanthe.Assets\Agapanthe.Assets.csproj" />

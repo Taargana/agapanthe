@@ -18,6 +18,12 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <!-- FrameOrchestrator.ResolveAccumulatorStep is asserted by a test (a real orchestrator can't be built
+         headless — it needs a GPU Renderer). Same grant pattern as Agapanthe.Engine / Agapanthe.Rendering. -->
+    <InternalsVisibleTo Include="Agapanthe.Tests" />
+  </ItemGroup>
+
+  <ItemGroup>
     <ProjectReference Include="..\Agapanthe.Core\Agapanthe.Core.csproj" />
     <ProjectReference Include="..\Agapanthe.World\Agapanthe.World.csproj" />
     <ProjectReference Include="..\Agapanthe.Engine\Agapanthe.Engine.csproj" />
