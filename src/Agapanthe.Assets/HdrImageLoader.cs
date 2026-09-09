@@ -9,7 +9,7 @@ namespace Agapanthe.Assets;
 /// RGBE) — the equirectangular environment maps used for IBL (spec §3.6, board M7) — and always forces
 /// 4 channels (the 4th is padding, filled with 1.0) so the result matches a 4-component float GPU format.
 /// <para>
-/// Unlike <see cref="ImageLoader"/>, there is <b>no</b> <c>isSrgb</c> parameter: Radiance HDR stores linear
+/// Unlike <c>ImageLoader</c> (the cook-side glTF-image decoder), there is <b>no</b> <c>isSrgb</c> parameter: Radiance HDR stores linear
 /// radiance, so the pixels are unconditionally linear and are handed to the GPU as-is. This is a CPU-only
 /// asset step with zero Graphics/Vulkan dependency, so it is unit-testable without a device.
 /// </para>

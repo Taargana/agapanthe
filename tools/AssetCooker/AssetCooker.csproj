@@ -1,0 +1,22 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- Build-time asset cooker (Contenu-2). Globs *.glb under a content root, cooks each into a deterministic
+       .agmodel blob, and writes content.agmanifest. Same stance as tools/FontCooker / tools/ShaderPrecompiler:
+       a dev-machine tool, NOT AOT, and deliberately NOT referenced by any shipping project — a ProjectReference
+       to Agapanthe.Assets.Pipeline would drag glTF parsing + StbImageSharp into the AOT closure. Invoked by an
+       MSBuild target via `dotnet exec`. -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <AssemblyName>AssetCooker</AssemblyName>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\Agapanthe.Assets.Pipeline\Agapanthe.Assets.Pipeline.csproj" />
+    <ProjectReference Include="..\..\src\Agapanthe.Core\Agapanthe.Core.csproj" />
+  </ItemGroup>
+
+</Project>

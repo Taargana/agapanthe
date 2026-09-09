@@ -42,12 +42,10 @@
     <Content Include="..\..\shaders\**\*" Link="shaders\%(RecursiveDir)%(Filename)%(Extension)">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </Content>
-    <!-- Copy the Khronos glTF fixtures into models/ next to the executable so the default model
-         (DamagedHelmet.glb) and any fixture passed by bare name resolve independently of the shell's
-         working directory. Files are copied flat, preserving names, so a .gltf's relative uri references
-         to its .bin / .png siblings still resolve inside models/. Fixtures live under tests/ (git-tracked
-         there, M4-01); this glob is the sample's own copy of them, authorised by M4-11. -->
-    <Content Include="..\..\tests\Agapanthe.Tests\Fixtures\**\*" Link="models\%(RecursiveDir)%(Filename)%(Extension)">
+    <!-- Contenu-2: models now ship COOKED (content/*.agmodel + content.agmanifest, see CookAssets below).
+         The only fixture still copied raw into models/ is the HDR environment — AGAPANTHE_HDRI / the IBL
+         default path-load it directly (standalone HDR is Contenu-2b, not cooked yet). -->
+    <Content Include="..\..\tests\Agapanthe.Tests\Fixtures\studio_small_1k.hdr" Link="models\studio_small_1k.hdr">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </Content>
   </ItemGroup>
@@ -160,6 +158,60 @@
     <ItemGroup>
       <_CookedFont Include="$(FontCacheStageDir)*.agfont" />
       <Content Include="@(_CookedFont)" Link="fonts\%(Filename)%(Extension)">
+        <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      </Content>
+    </ItemGroup>
+  </Target>
+
+  <!-- ============================ Offline asset cook (Contenu-2) ============================
+       Twin of CookFonts / PrecompileShaders, same reason: the RUNTIME must never parse glTF, generate tangents,
+       or decode an image. tools/AssetCooker cooks every content/**/*.glb into a deterministic .agmodel blob and
+       writes content.agmanifest; AssetCatalog reads them. AssetCooker is deliberately NOT a ProjectReference —
+       that would drag Agapanthe.Assets.Pipeline + StbImageSharp + the glTF parser into the AOT closure. -->
+  <PropertyGroup>
+    <ContentSourceDir>$([MSBuild]::NormalizeDirectory('$(MSBuildThisFileDirectory)..\..\content'))</ContentSourceDir>
+    <AssetCookerProject>$([MSBuild]::NormalizePath('$(MSBuildThisFileDirectory)..\..\tools\AssetCooker\AssetCooker.csproj'))</AssetCookerProject>
+    <AssetCacheStageDir>$([MSBuild]::NormalizeDirectory('$(MSBuildProjectDirectory)\obj\assetcache'))</AssetCacheStageDir>
+    <AssetCacheStamp>$(AssetCacheStageDir).cooked.stamp</AssetCacheStamp>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- Every source model is an input. So are the cooker's + pipeline's own sources: CookRunner is content-hash
+         incremental internally, but a change to the .agmodel layout or the glTF decode must still force a re-cook. -->
+    <AssetSourceFile Include="$(ContentSourceDir)**\*" />
+    <AssetSourceFile Include="$(MSBuildThisFileDirectory)..\..\tools\AssetCooker\**\*.cs"
+                     Exclude="$(MSBuildThisFileDirectory)..\..\tools\AssetCooker\obj\**;$(MSBuildThisFileDirectory)..\..\tools\AssetCooker\bin\**" />
+    <AssetSourceFile Include="$(MSBuildThisFileDirectory)..\..\src\Agapanthe.Assets.Pipeline\**\*.cs"
+                     Exclude="$(MSBuildThisFileDirectory)..\..\src\Agapanthe.Assets.Pipeline\obj\**;$(MSBuildThisFileDirectory)..\..\src\Agapanthe.Assets.Pipeline\bin\**" />
+  </ItemGroup>
+
+  <!-- Same two hard-won details as PrecompileShaders/CookFonts: RemoveProperties keeps the tool a plain managed
+       net10.0 assembly under an outer `dotnet publish -r`, and trailing backslashes are trimmed so a quoted "...\"
+       cannot escape the quote and merge the arguments. -->
+  <Target Name="CookAssets"
+          Inputs="@(AssetSourceFile)"
+          Outputs="$(AssetCacheStamp)">
+    <MSBuild Projects="$(AssetCookerProject)"
+             Targets="Build"
+             Properties="Configuration=$(Configuration)"
+             RemoveProperties="RuntimeIdentifier;SelfContained;PublishAot;PublishTrimmed;PublishSingleFile">
+      <Output TaskParameter="TargetOutputs" ItemName="_AssetCookerAssembly" />
+    </MSBuild>
+    <MakeDir Directories="$(AssetCacheStageDir)" />
+    <Exec Command="dotnet exec &quot;@(_AssetCookerAssembly)&quot; &quot;$(ContentSourceDir.TrimEnd('\'))&quot; &quot;$(AssetCacheStageDir.TrimEnd('\'))&quot;" />
+    <Touch Files="$(AssetCacheStamp)" AlwaysCreate="true" />
+  </Target>
+
+  <!-- Always runs (after CookAssets, before Content target-paths are assigned) so the cooked content ships even
+       when the cook above was up to date and skipped. Wildcard pre-expanded into concrete items first. -->
+  <Target Name="IncludeCookedAssets"
+          DependsOnTargets="CookAssets"
+          BeforeTargets="AssignTargetPaths">
+    <ItemGroup>
+      <!-- .cookstate + the stamp are dev-machine build state — AssetCatalog never reads them, they don't ship. -->
+      <_CookedAsset Include="$(AssetCacheStageDir)**\*"
+                    Exclude="$(AssetCacheStageDir).cookstate;$(AssetCacheStageDir).cooked.stamp" />
+      <Content Include="@(_CookedAsset)" Link="content\%(RecursiveDir)%(Filename)%(Extension)">
         <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
       </Content>
     </ItemGroup>

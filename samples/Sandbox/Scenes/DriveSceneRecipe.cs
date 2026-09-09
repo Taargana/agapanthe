@@ -32,21 +32,19 @@ internal sealed class DriveSceneRecipe : ISceneRecipe
         var renderer = ctx.Renderer;
         var camera = ctx.Camera;
         var controller = ctx.Controller;
-        var modelsDir = Path.Combine(AppContext.BaseDirectory, "models");
 
         if (Environment.GetEnvironmentVariable("AGAPANTHE_LOAD") is { Length: > 0 })
         {
             Log.Warn("Sandbox: AGAPANTHE_LOAD is set but the 'drive' scene does not restore snapshots — it is ignored.");
         }
 
-        var modelPath = ModelContent.ResolveModelPath(ctx.Args, modelsDir)
-            ?? throw new InvalidOperationException($"Sandbox: model '{ctx.Args[0]}' not found (under '{modelsDir}').");
-        var model = GltfLoader.Load(modelPath);
-        ModelContent.LogModelStats(model, modelPath);
+        var modelKey = ModelContent.ResolveModelKey(ctx.Args, ctx.Catalog);
+        var model = ctx.Catalog.LoadModel(modelKey);
+        ModelContent.LogModelStats(model, modelKey.ToString());
 
         var worldOrigin = SandboxEnv.ParseDouble3(Environment.GetEnvironmentVariable("AGAPANTHE_WORLD_ORIGIN"));
         var (_, specs) = registry.Load(
-            device, model, renderer.MaterialSetLayout, new AssetKey($"models/{Path.GetFileName(modelPath)}"), worldOrigin);
+            device, model, renderer.MaterialSetLayout, modelKey, worldOrigin);
 
         var s0 = specs[0];
         var bodyRadius = MathF.Max(s0.BoundsRadius * MathHelpers.MaxStretch(s0.RotationScale), 0.25f);
@@ -92,7 +90,7 @@ internal sealed class DriveSceneRecipe : ISceneRecipe
         }
         else
         {
-            var iblHdrPath = Path.Combine(modelsDir, "studio_small_1k.hdr");
+            var iblHdrPath = Path.Combine(AppContext.BaseDirectory, "models", "studio_small_1k.hdr");
             if (File.Exists(iblHdrPath))
             {
                 renderer.SetEnvironment(HdrImageLoader.Load(iblHdrPath));

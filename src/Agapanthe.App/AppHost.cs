@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using Agapanthe.Assets;
 using Agapanthe.Assets.Font;
 using Agapanthe.Core;
 using Agapanthe.Engine;
@@ -116,12 +117,27 @@ public static class AppHost
                 Log.Warn($"AppHost: [ui] no cooked font at '{fontPath}' — text overlay disabled.");
             }
 
+            // Contenu-2: the cooked-content catalog — recipes resolve models by AssetKey through it, no glTF at runtime.
+            // A fully-procedural scene (planet*) needs no cooked content, so a missing manifest is a warning, not a
+            // fatal — LoadModel on the empty catalog then fails with an actionable message only if a scene asks.
+            AssetCatalog catalog;
+            try
+            {
+                catalog = AssetCatalog.Open(ResolveContentRoot(options));
+            }
+            catch (AssetException ex)
+            {
+                Log.Warn($"AppHost: {ex.Message} — procedural scenes still run; a model scene will fail.");
+                catalog = AssetCatalog.Empty;
+            }
+
             // The game builds its scene: spawn entities, register systems, frame the camera, wire input.
             var recipe = SelectRecipe(game, options.Scene);
             recipe.Build(new SceneContext
             {
                 Device = device,
                 Registry = registry,
+                Catalog = catalog,
                 World = world,
                 Orchestrator = orchestrator,
                 Renderer = renderer,
@@ -458,6 +474,13 @@ public static class AppHost
 
         return binShaders;
     }
+
+    /// <summary>Resolves the cooked-content root (Contenu-2): <see cref="HostOptions.ContentRoot"/> if set, else
+    /// <c>&lt;AppContext.BaseDirectory&gt;/content</c> — where the <c>CookAssets</c> MSBuild target ships the
+    /// <c>.agmodel</c> blobs + <c>content.agmanifest</c>. Unlike shaders it is NOT walked up to a repo source: the
+    /// cooked blobs only exist under <c>bin/</c>.</summary>
+    internal static string ResolveContentRoot(HostOptions options)
+        => options.ContentRoot ?? Path.Combine(AppContext.BaseDirectory, "content");
 }
 
 /// <summary>The disposables the strict teardown acts on. All nullable — <see cref="AppHost.RunClient"/> fills what

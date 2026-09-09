@@ -6,6 +6,7 @@
   <Folder Name="/src/">
     <Project Path="src/Agapanthe.App/Agapanthe.App.csproj" />
     <Project Path="src/Agapanthe.Assets/Agapanthe.Assets.csproj" />
+    <Project Path="src/Agapanthe.Assets.Pipeline/Agapanthe.Assets.Pipeline.csproj" />
     <Project Path="src/Agapanthe.Core/Agapanthe.Core.csproj" />
     <Project Path="src/Agapanthe.Engine/Agapanthe.Engine.csproj" />
     <Project Path="src/Agapanthe.Engine.Render/Agapanthe.Engine.Render.csproj" />
@@ -20,6 +21,7 @@
   </Folder>
   <Folder Name="/tools/">
     <Project Path="tools/AotComponentProbe/AotComponentProbe.csproj" />
+    <Project Path="tools/AssetCooker/AssetCooker.csproj" />
     <Project Path="tools/FontCooker/FontCooker.csproj" />
     <Project Path="tools/ShaderPrecompiler/ShaderPrecompiler.csproj" />
   </Folder>

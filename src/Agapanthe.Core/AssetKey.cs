@@ -38,6 +38,26 @@ public readonly record struct AssetKey
     /// snapshot. <c>AssetKey.None == default(AssetKey)</c>.</summary>
     public static AssetKey None => default;
 
+    /// <summary>The key for a source file under a content root (Contenu-2): the path of
+    /// <paramref name="sourcePath"/> relative to <paramref name="contentRoot"/>, normalised by the constructor.
+    /// <c>&lt;root&gt;/models/sub/x.glb</c> → <c>AssetKey("models/sub/x.glb")</c>.</summary>
+    /// <exception cref="ArgumentException"><paramref name="sourcePath"/> is not under <paramref name="contentRoot"/>
+    /// (the relative path escapes with <c>..</c>), or either argument is null/empty/whitespace.</exception>
+    public static AssetKey FromContentPath(string contentRoot, string sourcePath)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(contentRoot);
+        ArgumentException.ThrowIfNullOrWhiteSpace(sourcePath);
+
+        var relative = Path.GetRelativePath(contentRoot, sourcePath);
+        if (relative.StartsWith("..", StringComparison.Ordinal) || Path.IsPathRooted(relative))
+        {
+            throw new ArgumentException(
+                $"'{sourcePath}' is not under the content root '{contentRoot}'.", nameof(sourcePath));
+        }
+
+        return new AssetKey(relative);
+    }
+
     /// <summary>True for <see cref="None"/> / <c>default</c>. A constructed key is never <see cref="IsNone"/>.</summary>
     public bool IsNone => string.IsNullOrEmpty(Value);
 
@@ -62,6 +82,16 @@ public readonly record struct AssetKey
         if (normalised.StartsWith('/'))
         {
             throw new FormatException($"AssetKey '{value}' must be relative — a leading '/' is not allowed.");
+        }
+
+        foreach (var ch in normalised)
+        {
+            // Control characters (a tab or newline in a filename is legal on Linux) would corrupt the cooker's
+            // line-based .cookstate and any path the key is spliced into. A key is a logical path, not arbitrary text.
+            if (char.IsControl(ch))
+            {
+                throw new FormatException($"AssetKey '{value}' contains a control character (U+{(int)ch:X4}).");
+            }
         }
 
         foreach (var segment in normalised.Split('/'))

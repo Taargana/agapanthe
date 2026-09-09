@@ -1,3 +1,4 @@
+using Agapanthe.Assets;
 using Agapanthe.Core;
 using Agapanthe.Engine;
 using Agapanthe.Engine.Render;
@@ -18,6 +19,10 @@ public sealed class SceneContext
 
     /// <summary>Owns the GPU resources; hands back GPU-free <c>ImportedEntitySpec</c>s the world spawns.</summary>
     public required ResourceRegistry Registry { get; init; }
+
+    /// <summary>Cooked content (Contenu-2): <c>Catalog.LoadModel(key)</c> → a decoded <c>ModelAsset</c> a recipe
+    /// then hands to <c>Registry.Load(Device, model, layout, key, origin)</c>. The runtime never parses glTF.</summary>
+    public required AssetCatalog Catalog { get; init; }
 
     /// <summary>The entities.</summary>
     public required GameWorld World { get; init; }

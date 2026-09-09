@@ -38,6 +38,26 @@ public sealed class AssetKeyTests
     public void RejectsBadPaths(string input)
         => Assert.Throws<FormatException>(() => new AssetKey(input));
 
+    // ── Contenu-2 — FromContentPath ──────────────────────────────────────────────────────────────────────────
+
+    [Fact]
+    public void FromContentPath_IsRelativeToRoot()
+    {
+        var root = Path.Combine(Path.GetTempPath(), "agcontent");
+        Assert.Equal("models/DamagedHelmet.glb",
+            AssetKey.FromContentPath(root, Path.Combine(root, "models", "DamagedHelmet.glb")).Value);
+        Assert.Equal("models/sub/x.glb",
+            AssetKey.FromContentPath(root, Path.Combine(root, "models", "sub", "x.glb")).Value);
+    }
+
+    [Fact]
+    public void FromContentPath_RejectsPathOutsideRoot()
+    {
+        var root = Path.Combine(Path.GetTempPath(), "agcontent");
+        Assert.Throws<ArgumentException>(
+            () => AssetKey.FromContentPath(root, Path.Combine(Path.GetTempPath(), "elsewhere", "x.glb")));
+    }
+
     // ── Test 3 — None is default ──────────────────────────────────────────────────────────────────────────────
 
     [Fact]

@@ -7,7 +7,11 @@
 > Règle de tri : chaque item dit **ce qui casse sans lui** et **à quelle échelle il devient obligatoire**. Un item sans
 > déclencheur clair est une idée, pas du backlog.
 
-Dernière mise à jour : 2026-09-07 (session 31 — **Contenu-1 LIVRÉ** : identité d'assets stable, `AssetKey` +
+Dernière mise à jour : 2026-09-08 (session 32 — **Contenu-2 LIVRÉ** : cook offline + content manifest —
+`tools/AssetCooker` (glTF → blob `.agmodel` autonome déterministe) + `content.agmanifest` binaire + `AssetCatalog`
+runtime ; le runtime ne parse plus glTF (migré dans `src/Agapanthe.Assets.Pipeline`, cook-side, non-AOT) ;
+`AssetsPipelineIsolationTests` ; l'arg CLU Sandbox devient une clé ; capture `model` re-épinglée `9030f6a6…` ;
+double audit ×2 4,1-4,2/5 PASS-with-concerns, aucun bloquant ; 689 tests ; verdict visuel DÛ) · 2026-09-07 (session 31 — **Contenu-1 LIVRÉ** : identité d'assets stable, `AssetKey` +
 `ModelKeyIndex` + snapshot **v3** (`MeshRef` = clé + indices locaux, re-résolu au load) ; solde la dette VS-1
 « ordre de chargement différent casse en silence » pour mesh + material ; domaine Contenu décomposé en 3 sous-jalons ;
 double audit ×2 4,3/5 PASS-with-concerns, aucun 🔴 ; verdict visuel DÛ) · 2026-09-07 (session 30 — **`Agapanthe.App` LIVRÉ** : `Program.cs` 2360→22 l, `AppHost` +
@@ -465,10 +469,25 @@ pas fixe = source de vérité unique (prérequis netcode) — voir §Physique.
     `MeshRefResolver` (délégué de l'hôte, `World` ne réfère toujours pas `Rendering`). **Solde la dette VS-1 « ordre de
     chargement différent casse en silence »** pour mesh + material ; v1 ET v2 refusés. Double audit ×2 4,3/5
     PASS-with-concerns. **Le mécanisme a attrapé une vraie inversion d'ordre (S30) dans son propre run de validation.**
-  - **Contenu-2 — cook offline + manifest + graphe de dépendances** : `tools/AssetCooker` (patron `FontCooker`), blobs
-    binaires déterministes keyés par `AssetKey`, import glTF → offline, manifest `clé → blob + deps`. **À cadrer** :
-    `AssetKey` devient-elle *aussi* la clé du manifest ; `AssetKey.FromContentPath(root, path)` (aujourd'hui les
-    call sites Sandbox dérivent la clé de `Path.GetFileName`, répertoire jeté).
+  - ~~**Contenu-2 — cook offline + content manifest**~~ ✅ **LIVRÉ (S32)** — spec
+    `plans/2026-09-08-content-asset-cook-design.md` (4,24/5). `tools/AssetCooker` (glTF → blob `.agmodel` autonome,
+    `DeflateStream`, déterministe) ; `content.agmanifest` binaire (`AssetKey → {blob, kind, hash}`) ; `AssetCatalog`
+    runtime ; **le runtime ne parse plus glTF** (`src/Agapanthe.Assets.Pipeline`, cook-side, non-AOT) ;
+    `AssetKey.FromContentPath` solde la dette Contenu-1. Double audit ×2 4,1-4,2/5 PASS-with-concerns.
+  - **Contenu-2b — l'asset non-modèle** : `.gltf` + son graphe de deps de sources (siblings `.bin`/image — nécessite
+    une API d'énumération d'URIs sur `GltfDocument`) ; HDR / textures / fonts standalone dans le catalog
+    (`AssetKind.Environment` déjà réservé, `AssetCatalog.LoadEnvironment`, `.agenv`) ; **décodeur RGBE maison** (~60 l)
+    pour migrer `HdrImageLoader` dans `Pipeline` et sortir `StbImageSharp` du runtime — même geste que faire entrer
+    l'HDR dans le manifest. `HostOptions.VerifyContentHashes` (le `contentHash[32]` du manifest est écrit/shippé,
+    pas encore lu). Extraction des ~170 l de targets de cook de `Sandbox.csproj` → `build/Agapanthe.Cook.targets`
+    (à l'app n°2, même déclencheur que la dette `EngineWindowAdapter`).
+  - **Séparation géométrie / images du blob `.agmodel`** — aujourd'hui `DamagedHelmet.glb` (3,7 Mo source) →
+    `.agmodel` **21 Mo** (RGBA8 décodé, Deflate ~inefficace sur de la photo), ratio **structurel** ~×6. Un serveur
+    dédié ship et lit des Mo de pixels qu'il n'upload jamais. **Groupé avec BC7/BC5** (compression bloc GPU — jalon
+    RENDU, change le format GPU + l'upload `SceneBuilder`) : les deux disent « la charge image doit être séparable
+    de la géométrie ». Réversible (bump `AgModelFormat.Version` + split côté cook, le runtime ne voit qu'un reader).
+    **Déclencheur** : `content/` dépasse ~10 modèles texturés ou ~200 Mo de blobs (le `CookSummary` logge la taille
+    totale à chaque build pour rendre la dérive visible).
   - **Contenu-3 — prefabs & scènes déclaratifs** : `.agscene` / `.agprefab` (**authoring**, PAS une sauvegarde) ;
     `SceneLoader` ; les 5 recipes Sandbox `ISceneRecipe` → données (⚠️ le registry `ISceneRecipe` de S30 est de
     l'*organisation de code*). **Décision structurante à prendre ici** : remonter l'identité d'asset **dans la

@@ -9,7 +9,8 @@ using Sandbox;
 // scene (spawn entities, register systems, frame the camera, wire input).
 //
 //   dotnet run --project samples/Sandbox                        -> AGAPANTHE_SCENE (default "model")
-//   dotnet run --project samples/Sandbox -- MetalRoughSpheres.glb   -> model viewer, a fixture by bare name
+//   dotnet run --project samples/Sandbox -- MetalRoughSpheres.glb   -> model viewer; the arg is a content key
+//     (bare name -> models/<name>), resolved against the cooked content manifest (Contenu-2)
 //   AGAPANTHE_IBL_TEST=<prefix>                                  -> the standalone M7 IBL-generation tool
 
 if (Environment.GetEnvironmentVariable("AGAPANTHE_IBL_TEST") is { Length: > 0 } iblPrefix)

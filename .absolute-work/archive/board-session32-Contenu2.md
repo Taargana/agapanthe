@@ -3,10 +3,7 @@
 **Status**: `completed` 2026-09-08 — W1–W4 + tail + double audit (`csharp-lowlevel` 4.1/5,
 `engine-architect` 4.2/5, both PASS-with-concerns, no blocker) + findings applied. `dotnet test`
 **689 passed**, 0 warning, all pinned captures/snapshots unchanged, Sandbox + HeadlessSim JIT == AOT.
-**Human visual verdict: PASS** (2026-09-09, session 33 — `model` renders DamagedHelmet from cooked
-`.agmodel`, byte-identical MD5 `9030f6a6…`; `-- MetalRoughSpheres.glb` resolves via the manifest +
-renders; `AGAPANTHE_SCENE=planet-drop` runs on `AssetCatalog.Empty` with only a boot warning).
-Shared verdict — closes Agapanthe.App S30 + Contenu-1 S31 + Contenu-2 S32.
+**Human visual verdict still due** (shared with the Agapanthe.App S30 + Contenu-1 S31 verdicts).
 **Spec**: `docs/plans/2026-09-08-content-asset-cook-design.md` (APPROVED 4.24/5, reviewer 2 rounds: 3.52 → 4.24)
 **Session**: 32
 **Created**: 2026-09-08
@@ -510,14 +507,4 @@ milestone (Decision Log). Watch the shipped-`bin` size in W2.
 - `dotnet build Agapanthe.slnx` 0 warning · `dotnet test` **689 passed** · captures `model`
   `9030f6a6…` / `planet-drop` HDR `12638edd…` / UI `03421357…` **unchanged** · `HeadlessSim`
   `80ced166…` / `cf01492e…` **unchanged** · `AotComponentProbe` **PASS** · Sandbox + HeadlessSim
-  **JIT == NativeAOT** · double audit applied.
-
-### Session 33 (2026-09-09) — resume + visual verdict
-
-- Fresh-device resume checks: `dotnet build` 0 warning · `dotnet test` **689 passed**.
-- Headless captures regenerated (Debug, `AGAPANTHE_MAX_FRAMES=2`): `model` MD5
-  `9030f6a64e9587b05d5abb99b487b1b9` — **byte-identical to the pinned gate**; `MetalRoughSpheres`
-  (CLI key → `models/MetalRoughSpheres.glb`) resolves + renders.
-- **Human visual verdict: PASS** — `model` (cooked DamagedHelmet), `MetalRoughSpheres` (manifest
-  key resolution), `planet-drop` (procedural, `AssetCatalog.Empty` + boot warning, no crash).
-  Closes the shared S30 + S31 + S32 verdict.
+  **JIT == NativeAOT** · double audit applied. **Human visual verdict: DUE.**

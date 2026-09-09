@@ -31,6 +31,10 @@ public sealed class HostOptions
     /// <summary><c>AGAPANTHE_SAVE</c> — snapshot the fully-built world to this path before the first tick.</summary>
     public string? SavePath { get; init; }
 
+    /// <summary>Root of the cooked-content tree (<c>AGAPANTHE_CONTENT</c>). Null →
+    /// <c>&lt;AppContext.BaseDirectory&gt;/content</c>. Must hold a <c>content.agmanifest</c>.</summary>
+    public string? ContentRoot { get; init; }
+
     /// <summary>Start the debug overlay visible (<c>AGAPANTHE_OVERLAY</c> != "0").</summary>
     public bool OverlayVisible { get; init; } = true;
 
@@ -74,6 +78,7 @@ public sealed class HostOptions
             CapturePath = NullIfEmpty(read("AGAPANTHE_CAPTURE")),
             CaptureUiPath = NullIfEmpty(read("AGAPANTHE_CAPTURE_UI")),
             SavePath = NullIfEmpty(read("AGAPANTHE_SAVE")),
+            ContentRoot = NullIfEmpty(read("AGAPANTHE_CONTENT")),
             OverlayVisible = read("AGAPANTHE_OVERLAY") is not "0",
             CullStats = read("AGAPANTHE_CULL_STATS") is { Length: > 0 },
             VerifyCull = read("AGAPANTHE_CULL_VERIFY") is "1",

@@ -10,23 +10,40 @@ namespace Sandbox;
 /// verbatim from the pre-extraction <c>Program.cs</c>.</summary>
 internal static class ModelContent
 {
-    /// <summary>Resolves the model path: an explicit CLI arg is tried verbatim then as a bare fixture name under
-    /// <paramref name="modelsDir"/>; with no arg the default fixture is used. Null when an explicit arg matches nothing.</summary>
-    public static string? ResolveModelPath(string[] args, string modelsDir)
+    /// <summary>Resolves the CLI arg to a content <see cref="AssetKey"/> (Contenu-2): no arg → the default
+    /// <c>models/DamagedHelmet.glb</c>; a bare name <c>X</c> → <c>models/X</c> or <c>models/X.glb</c>; a
+    /// <c>models/…</c> arg → verbatim. Throws if the resulting key is not in the cooked content manifest.</summary>
+    public static AssetKey ResolveModelKey(string[] args, AssetCatalog catalog)
     {
         if (args.Length == 0)
         {
-            return Path.Combine(modelsDir, "DamagedHelmet.glb");
+            return new AssetKey("models/DamagedHelmet.glb");
         }
 
-        var arg = args[0];
-        if (File.Exists(arg))
+        var arg = args[0].Replace('\\', '/').Trim();
+        // AssetKey is case-sensitive (Contenu-1) — match the prefix the same way.
+        foreach (var candidate in arg.StartsWith("models/", StringComparison.Ordinal)
+                     ? [arg]
+                     : new[] { "models/" + arg, "models/" + arg + ".glb" })
         {
-            return Path.GetFullPath(arg);
+            AssetKey key;
+            try
+            {
+                key = new AssetKey(candidate);
+            }
+            catch (Exception ex) when (ex is ArgumentException or FormatException)
+            {
+                continue;
+            }
+
+            if (catalog.Contains(key))
+            {
+                return key;
+            }
         }
 
-        var underModels = Path.Combine(modelsDir, arg);
-        return File.Exists(underModels) ? underModels : null;
+        throw new InvalidOperationException(
+            $"Sandbox: model '{args[0]}' is not in the content manifest — add it under content/models/ and rebuild.");
     }
 
     public static void LogModelStats(ModelAsset model, string path)

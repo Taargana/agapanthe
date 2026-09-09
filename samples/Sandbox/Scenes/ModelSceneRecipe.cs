@@ -34,7 +34,6 @@ internal sealed class ModelSceneRecipe : ISceneRecipe
         var renderer = ctx.Renderer;
         var camera = ctx.Camera;
         var controller = ctx.Controller;
-        var modelsDir = Path.Combine(AppContext.BaseDirectory, "models");
         var sceneSpec = Environment.GetEnvironmentVariable("AGAPANTHE_SCENE");
 
         if (Environment.GetEnvironmentVariable("AGAPANTHE_LOAD") is { Length: > 0 })
@@ -44,15 +43,9 @@ internal sealed class ModelSceneRecipe : ISceneRecipe
                 + "it is ignored. Use AGAPANTHE_SCENE=planet (or planet-challenge) to resume a saved world.");
         }
 
-        var modelPath = ModelContent.ResolveModelPath(ctx.Args, modelsDir);
-        if (modelPath is null)
-        {
-            throw new InvalidOperationException(
-                $"Sandbox: model '{ctx.Args[0]}' not found (tried as-is and under '{modelsDir}').");
-        }
-
-        var model = GltfLoader.Load(modelPath);
-        ModelContent.LogModelStats(model, modelPath);
+        var modelKey = ModelContent.ResolveModelKey(ctx.Args, ctx.Catalog);
+        var model = ctx.Catalog.LoadModel(modelKey);
+        ModelContent.LogModelStats(model, modelKey.ToString());
 
         if (int.TryParse(Environment.GetEnvironmentVariable("AGAPANTHE_UNLOAD_TEST"), out var unloadCycles)
             && unloadCycles > 0)
@@ -78,7 +71,7 @@ internal sealed class ModelSceneRecipe : ISceneRecipe
         }
 
         var (_, specs) = registry.Load(
-            device, model, renderer.MaterialSetLayout, new AssetKey($"models/{Path.GetFileName(modelPath)}"), worldOrigin);
+            device, model, renderer.MaterialSetLayout, modelKey, worldOrigin);
 
         var (rows, cols) = ModelContent.ParseGrid(sceneSpec);
         var dropCount = ModelContent.ParseDrop(sceneSpec);
@@ -169,7 +162,7 @@ internal sealed class ModelSceneRecipe : ISceneRecipe
         }
         else
         {
-            var iblHdrPath = Path.Combine(modelsDir, "studio_small_1k.hdr");
+            var iblHdrPath = Path.Combine(AppContext.BaseDirectory, "models", "studio_small_1k.hdr");
             if (File.Exists(iblHdrPath))
             {
                 renderer.SetEnvironment(HdrImageLoader.Load(iblHdrPath));

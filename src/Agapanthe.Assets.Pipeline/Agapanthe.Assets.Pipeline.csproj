@@ -1,0 +1,28 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- Cook-side asset pipeline (Contenu-2). Turns source models into deterministic .agmodel blobs + a
+       content manifest, so the RUNTIME never parses glTF and never generates tangents. Same stance as
+       tools/FontCooker / tools/ShaderPrecompiler: a dev-machine library, NOT AOT, and — critically — NOT a
+       ProjectReference of any shipped project (a ProjectReference would drag glTF parsing + StbImageSharp back
+       into the AOT closure). Only tools/AssetCooker and tests/Agapanthe.Tests reference this project;
+       AssetsPipelineIsolationTests pins that.
+
+       The glTF parsing (GltfLoader, Gltf/*, TangentGenerator, ImageLoader) lives here (W3 `git mv` from
+       Agapanthe.Assets) with StbImageSharp — the runtime never parses glTF. -->
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\Agapanthe.Assets\Agapanthe.Assets.csproj" />
+    <ProjectReference Include="..\Agapanthe.Core\Agapanthe.Core.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="StbImageSharp" Version="2.30.15" />
+  </ItemGroup>
+
+</Project>

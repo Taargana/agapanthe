@@ -9,10 +9,18 @@
     <IsAotCompatible>true</IsAotCompatible>
   </PropertyGroup>
 
-  <!-- Assets is GPU-free by design (spec §5: glTF parsing is unit-testable without a GPU).
-       It must never reference Agapanthe.Graphics or any Silk.NET package. -->
+  <!-- Assets is GPU-free by design (spec §5) and must never reference Agapanthe.Graphics or any Silk.NET package.
+       Contenu-2: the glTF parser + tangent gen + glTF-image decode moved to Agapanthe.Assets.Pipeline (cook-side) —
+       the RUNTIME no longer parses glTF. StbImageSharp stays here for HdrImageLoader (standalone .hdr environments
+       are a runtime path-load; Contenu-2b would move that out too). -->
   <ItemGroup>
     <ProjectReference Include="..\Agapanthe.Core\Agapanthe.Core.csproj" />
+  </ItemGroup>
+
+  <!-- The cook-side pipeline drives the internal .agmodel / content.agmanifest writers.
+       (Agapanthe.Tests visibility + FontCooker's come from FontAssetFormat.cs's in-file [assembly:] attributes.) -->
+  <ItemGroup>
+    <InternalsVisibleTo Include="Agapanthe.Assets.Pipeline" />
   </ItemGroup>
 
   <ItemGroup>
