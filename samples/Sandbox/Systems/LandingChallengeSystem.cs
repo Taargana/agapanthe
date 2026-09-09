@@ -10,7 +10,9 @@ namespace Sandbox;
 // physics). Each tick it queries the world (generic spatial counts), evaluates the pure latched rule, and — only
 // when a shown value changed — rewrites the window title (0-alloc in steady state) and logs terminal transitions.
 // TryShoot() (called by the B keypress) drops an AIMED probe radially below the camera, budget-checked by the
-// authoritative _shotsIssued. Both counters seed from the world at construction, so a reloaded game resumes right.
+// authoritative _shotsIssued. Both counters seed from the world on the FIRST TICK — not the constructor: Contenu-3a
+// (D7) moved the AGAPANTHE_LOAD restore to AFTER Build() returns, so at construction the world is still empty on a
+// resume. Seeding on the first Execute is after any host-applied restore, by construction, and order-independent.
 internal sealed class LandingChallengeSystem : ISystem
 {
     private readonly GameWorld _world;
@@ -28,6 +30,7 @@ internal sealed class LandingChallengeSystem : ISystem
     private readonly int _shotBudget;
     private int _shotsIssued;
     private LandingStatus _status;
+    private bool _seeded;
     private int _lastInZone = -1;
     private int _lastShots = -1;
     private LandingStatus _lastStatus = (LandingStatus)(-1);
@@ -50,15 +53,22 @@ internal sealed class LandingChallengeSystem : ISystem
         _targetCount = targetCount;
         _shotBudget = shotBudget;
         _rule = new LandingChallengeRule(targetCount, shotBudget);
-
-        var seed = _world.QuerySurfaceContacts(_attractorCenter, _surfaceRadius, _surfaceBand, _zoneCenter, _zoneRadius);
-        _shotsIssued = seed.Total;
-        _status = _rule.Evaluate(seed, _shotsIssued, LandingStatus.InProgress);
+        _status = LandingStatus.InProgress;
     }
 
     public void Execute(in TickContext ctx)
     {
         var counts = _world.QuerySurfaceContacts(_attractorCenter, _surfaceRadius, _surfaceBand, _zoneCenter, _zoneRadius);
+
+        if (!_seeded)
+        {
+            // First tick — the host has applied any AGAPANTHE_LOAD restore by now (Contenu-3a D7). Seed the
+            // authoritative shot count from the bodies already at rest, exactly as the pre-3a constructor did.
+            _seeded = true;
+            _shotsIssued = counts.Total;
+            _status = _rule.Evaluate(counts, _shotsIssued, LandingStatus.InProgress);
+        }
+
         var prev = _status;
         _status = _rule.Evaluate(counts, _shotsIssued, _status);
 
@@ -81,6 +91,16 @@ internal sealed class LandingChallengeSystem : ISystem
     // Budget-checked against _shotsIssued so a pending drop still counts; no-op once over or the budget is spent.
     public void TryShoot(Double3 cameraPosition)
     {
+        // A B-key command can be drained (input phase) before this system's first Execute (PostSimulation) — seed
+        // here too so a shot fired on the resume tick counts against the restored budget, not a stale zero.
+        if (!_seeded)
+        {
+            var seed = _world.QuerySurfaceContacts(_attractorCenter, _surfaceRadius, _surfaceBand, _zoneCenter, _zoneRadius);
+            _seeded = true;
+            _shotsIssued = seed.Total;
+            _status = _rule.Evaluate(seed, _shotsIssued, LandingStatus.InProgress);
+        }
+
         if (_status != LandingStatus.InProgress || _shotsIssued >= _shotBudget)
         {
             return;
@@ -97,7 +117,7 @@ internal sealed class LandingChallengeSystem : ISystem
         var spawn = _attractorCenter + (n * (_surfaceRadius + _dropHeight));
         var spec = new ImportedEntitySpec(
             _probeSpec.Mesh, _probeSpec.Material, spawn, _probeSpec.RotationScale,
-            _probeSpec.BoundsCenter, _probeSpec.BoundsRadius, _probeSpec.Order);
+            _probeSpec.BoundsCenter, _probeSpec.BoundsRadius, _probeSpec.Order, _probeSpec.Identity); // Contenu-3a: identity
         _world.SpawnBodyDeferred(in spec, Vector3.Zero, inverseMass: 1f, restitution: 0.4f, radius: _probeRadius);
         _shotsIssued++;
     }

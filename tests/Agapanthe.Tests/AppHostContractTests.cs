@@ -1,4 +1,8 @@
+using System.Numerics;
 using Agapanthe.App;
+using Agapanthe.Assets;
+using Agapanthe.Core;
+using Agapanthe.Engine;
 using Agapanthe.World;
 
 namespace Agapanthe.Tests;
@@ -33,7 +37,8 @@ public sealed class AppHostContractTests
                 && familyPrefixes.Any(p => sceneToken.StartsWith(p + ":", StringComparison.OrdinalIgnoreCase));
         }
 
-        public void Build(SceneContext ctx) => throw new NotSupportedException("not built in these tests");
+        public void Build(SimSceneContext sim, PresentationSceneContext? presentation)
+            => throw new NotSupportedException("not built in these tests");
     }
 
     private sealed class FakeGame(string defaultScene, params ISceneRecipe[] scenes) : IGame
@@ -100,6 +105,7 @@ public sealed class AppHostContractTests
             ["AGAPANTHE_MAX_FRAMES"] = "420",
             ["AGAPANTHE_CAPTURE"] = "hdr.ppm",
             ["AGAPANTHE_SAVE"] = "w.save",
+            ["AGAPANTHE_LOAD"] = "r.save",
             ["AGAPANTHE_OVERLAY"] = "0",
             ["AGAPANTHE_CULL_STATS"] = "1",
             ["AGAPANTHE_CULL_VERIFY"] = "1",
@@ -113,6 +119,7 @@ public sealed class AppHostContractTests
         Assert.Equal("hdr.ppm", opts.CapturePath);
         Assert.Null(opts.CaptureUiPath);
         Assert.Equal("w.save", opts.SavePath);
+        Assert.Equal("r.save", opts.LoadPath);
         Assert.False(opts.OverlayVisible);
         Assert.True(opts.CullStats);
         Assert.True(opts.VerifyCull);
@@ -146,6 +153,7 @@ public sealed class AppHostContractTests
         Assert.Null(opts.CapturePath);
         Assert.Null(opts.CaptureUiPath);
         Assert.Null(opts.SavePath);
+        Assert.Null(opts.LoadPath);
         Assert.True(opts.OverlayVisible);
         Assert.False(opts.CullStats);
         Assert.False(opts.VerifyCull);
@@ -206,6 +214,124 @@ public sealed class AppHostContractTests
 
         using var target = new GameWorld(GlobalIdRange.Default, new UniverseId(9, 9));
         Assert.Throws<WorldSerializationException>(() => target.Load(buffer));
+    }
+
+    // ── Contenu-3a — the SceneContext split: a recipe can build with no presentation ──────────────────────────
+
+    private sealed class CountingSystem : ISystem
+    {
+        public int Ticks { get; private set; }
+
+        public void Execute(in TickContext ctx) => Ticks++;
+    }
+
+    private sealed class HeadlessFixtureRecipe : ISceneRecipe
+    {
+        public string Name => "headless-fixture";
+        public CountingSystem? System { get; private set; }
+
+        public void Build(SimSceneContext sim, PresentationSceneContext? presentation)
+        {
+            // Populate a world and register a sim system — no presentation touched.
+            for (var i = 0; i < 3; i++)
+            {
+                sim.World.Spawn(new Double3(i, 0, 0), Quaternion.Identity, 1f);
+            }
+
+            sim.World.FlushStructuralChanges();
+            System = new CountingSystem();
+            sim.AddSystem(Stage.Simulation, System);
+        }
+    }
+
+    [Fact]
+    public void Recipe_BuildsHeadless_WithNullPresentation()
+    {
+        using var world = new GameWorld();
+        var host = SimulationHost.CreateDefault(world);
+        var sim = new SimSceneContext
+        {
+            World = world,
+            Simulation = host,
+            Catalog = AssetCatalog.Empty,
+            Args = [],
+            Options = HostOptions.FromEnvironment(_ => null),
+        };
+
+        var recipe = new HeadlessFixtureRecipe();
+        recipe.Build(sim, presentation: null); // must not throw
+
+        Assert.Equal(3, world.LiveEntityCount);
+
+        host.BeginFrame();
+        host.Tick(1f / 60f);
+        host.EndFrame();
+        Assert.Equal(1, recipe.System!.Ticks); // the registered system ran
+    }
+
+    // Contenu-3a D7 hazard (both audits, 🔴): the restore now runs AFTER Build returns, so anything in Build that
+    // reads world CONTENT (e.g. LandingChallengeSystem's old constructor seed) sees an empty world on a resume.
+    // This pins the ordering: the world is populated by ApplyPendingRestore, not by RequestRestore.
+    [Fact]
+    public void ApplyPendingRestore_PopulatesTheWorld_RequestAlone_DoesNot()
+    {
+        using var source = new GameWorld();
+        for (var i = 0; i < 4; i++)
+        {
+            source.Spawn(new Double3(i, 0, 0), Quaternion.Identity, 1f);
+        }
+
+        source.FlushStructuralChanges();
+        var path = Path.Combine(Path.GetTempPath(), $"aw-restore-{Guid.NewGuid():N}.save");
+        try
+        {
+            using (var fs = File.Create(path))
+            {
+                source.Save(fs);
+            }
+
+            using var world = new GameWorld();
+            var sim = new SimSceneContext
+            {
+                World = world,
+                Simulation = SimulationHost.CreateDefault(world),
+                Catalog = AssetCatalog.Empty,
+                Args = [],
+                Options = HostOptions.FromEnvironment(_ => null),
+            };
+
+            sim.RequestRestore(path, SnapshotAllocatorPolicy.AdoptFromHeader);
+            Assert.Equal(0, world.LiveEntityCount);          // a request alone changes nothing — Build would see this
+            Assert.Equal(path, sim.PendingRestorePath);
+
+            var result = sim.ApplyPendingRestore(resolve: null);
+            Assert.Equal(4, result.EntityCount);
+            Assert.Equal(4, world.LiveEntityCount);          // now the entities exist — this is the post-Build state
+            Assert.False(sim.HasPendingRestore);
+        }
+        finally
+        {
+            File.Delete(path);
+        }
+    }
+
+    [Fact]
+    public void SimSceneContext_RequestRestore_Twice_Throws()
+    {
+        using var world = new GameWorld();
+        var sim = new SimSceneContext
+        {
+            World = world,
+            Simulation = SimulationHost.CreateDefault(world),
+            Catalog = AssetCatalog.Empty,
+            Args = [],
+            Options = HostOptions.FromEnvironment(_ => null),
+        };
+
+        sim.RequestRestore("a.save", SnapshotAllocatorPolicy.AdoptFromHeader);
+        Assert.True(sim.HasPendingRestore);
+        Assert.Throws<InvalidOperationException>(
+            () => sim.RequestRestore("b.save", SnapshotAllocatorPolicy.AdoptFromHeader));
     }
 
     // ── Test 9 — the strict teardown list ─────────────────────────────────────────────────────────────────────

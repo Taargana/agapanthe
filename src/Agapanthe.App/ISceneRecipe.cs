@@ -1,11 +1,10 @@
 namespace Agapanthe.App;
 
 /// <summary>
-/// One scene family. <see cref="Build"/> spawns entities, registers systems on
-/// <see cref="SceneContext.Orchestrator"/> / <see cref="SceneContext.Simulation"/>, frames the camera, and — for a
-/// free-fly scene — subscribes to <see cref="SceneContext.Window"/>'s <c>Updated</c> event to drive the controller
-/// (that is the one place <c>MouseDelta</c> is valid; it is zeroed right after <c>Updated</c> fires). It also
-/// subscribes to <c>KeyPressed</c> for this scene's own keys.
+/// One scene family. <see cref="Build"/> spawns entities, registers simulation systems via
+/// <see cref="SimSceneContext.AddSystem"/>, and — for a client scene — frames the camera and subscribes to the
+/// window's <c>Updated</c>/<c>KeyPressed</c> events (Contenu-3a splits the sim half from the presentation half so
+/// a recipe can also be built headless).
 /// <para>
 /// <b>This is code organisation, not a data format.</b> A recipe is a class; the declarative scene/prefab format
 /// is a separate, later milestone.
@@ -22,7 +21,9 @@ public interface ISceneRecipe
     bool Matches(string? sceneToken)
         => sceneToken is not null && string.Equals(sceneToken, Name, StringComparison.OrdinalIgnoreCase);
 
-    /// <summary>Builds the scene. Called ONCE, after <see cref="AppHost"/> has built the GPU stack and the
-    /// orchestrator (and wired the debug overlay), before the first tick.</summary>
-    void Build(SceneContext ctx);
+    /// <summary>Builds the scene. Called ONCE, after <see cref="AppHost"/> has built the simulation (and, for a
+    /// client run, the GPU stack + orchestrator + debug overlay), before the first tick.
+    /// <paramref name="presentation"/> is <c>null</c> for a headless build — a client-only recipe guards with
+    /// <c>?? throw</c>.</summary>
+    void Build(SimSceneContext sim, PresentationSceneContext? presentation);
 }

@@ -37,6 +37,13 @@ public readonly struct ImportedEntitySpec
 
     public readonly uint Order;
 
+    /// <summary>
+    /// The drawable's stable asset identity (Contenu-3a): the <see cref="AssetKey"/> it comes from plus its local
+    /// mesh/material index. Filled by <c>ResourceRegistry.Load</c>. <see cref="MeshRefKey.None"/> (the default) for
+    /// a hand-authored spec with no asset behind it — that serialises as the key-index-0 sentinel.
+    /// </summary>
+    public readonly MeshRefKey Identity;
+
     public ImportedEntitySpec(
         MeshHandle mesh,
         MaterialHandle material,
@@ -44,7 +51,8 @@ public readonly struct ImportedEntitySpec
         in Matrix4x4 rotationScale,
         Vector3 boundsCenter,
         float boundsRadius,
-        uint order)
+        uint order,
+        MeshRefKey identity = default)
     {
         Mesh = mesh;
         Material = material;
@@ -53,5 +61,6 @@ public readonly struct ImportedEntitySpec
         BoundsCenter = boundsCenter;
         BoundsRadius = boundsRadius;
         Order = order;
+        Identity = identity;
     }
 }

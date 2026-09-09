@@ -17,8 +17,10 @@ internal sealed class ModelKeyIndex
     private readonly record struct Entry(MeshHandle[] Meshes, MaterialHandle[] Materials);
 
     private readonly Dictionary<AssetKey, Entry> _byKey = [];
-    private readonly Dictionary<MeshHandle, (AssetKey Key, int Local)> _byMesh = [];
-    private readonly Dictionary<MaterialHandle, (AssetKey Key, int Local)> _byMaterial = [];
+    // Contenu-3a: after Identify() was deleted these hold no per-handle payload any more — Add() only asks
+    // "is this handle already mapped?" (the MP-0b W4 atomic-collision guard). Sets, not maps.
+    private readonly HashSet<MeshHandle> _mappedMeshes = [];
+    private readonly HashSet<MaterialHandle> _mappedMaterials = [];
 
     /// <summary>True if <paramref name="key"/> is currently registered.</summary>
     public bool Contains(AssetKey key) => _byKey.ContainsKey(key);
@@ -44,7 +46,7 @@ internal sealed class ModelKeyIndex
         // it either registers the whole model or throws having changed nothing.
         foreach (var h in meshHandles)
         {
-            if (_byMesh.ContainsKey(h))
+            if (_mappedMeshes.Contains(h))
             {
                 throw new GraphicsException($"mesh handle {h} is already mapped — asset '{key}' collides with a loaded model.");
             }
@@ -52,21 +54,21 @@ internal sealed class ModelKeyIndex
 
         foreach (var h in materialHandles)
         {
-            if (_byMaterial.ContainsKey(h))
+            if (_mappedMaterials.Contains(h))
             {
                 throw new GraphicsException($"material handle {h} is already mapped — asset '{key}' collides with a loaded model.");
             }
         }
 
         _byKey.Add(key, new Entry(meshHandles, materialHandles));
-        for (var i = 0; i < meshHandles.Length; i++)
+        foreach (var h in meshHandles)
         {
-            _byMesh.Add(meshHandles[i], (key, i));
+            _mappedMeshes.Add(h);
         }
 
-        for (var i = 0; i < materialHandles.Length; i++)
+        foreach (var h in materialHandles)
         {
-            _byMaterial.Add(materialHandles[i], (key, i));
+            _mappedMaterials.Add(h);
         }
     }
 
@@ -80,12 +82,12 @@ internal sealed class ModelKeyIndex
 
         foreach (var handle in entry.Meshes)
         {
-            _byMesh.Remove(handle);
+            _mappedMeshes.Remove(handle);
         }
 
         foreach (var handle in entry.Materials)
         {
-            _byMaterial.Remove(handle);
+            _mappedMaterials.Remove(handle);
         }
     }
 
@@ -93,41 +95,13 @@ internal sealed class ModelKeyIndex
     public void Clear()
     {
         _byKey.Clear();
-        _byMesh.Clear();
-        _byMaterial.Clear();
+        _mappedMeshes.Clear();
+        _mappedMaterials.Clear();
     }
 
-    /// <summary>The serialisable identity of a drawable whose mesh + material come from ONE loaded model.</summary>
-    /// <exception cref="GraphicsException"><paramref name="mesh"/> or <paramref name="material"/> belongs to no
-    /// loaded model, or the two come from different models.</exception>
-    public MeshRefKey Identify(MeshHandle mesh, MaterialHandle material)
-    {
-        // A drawable whose handles are Invalid (e.g. restored from a snapshot that had no resolver) serialises
-        // straight back to None — re-saving such a world must not be a hard error.
-        if (!mesh.IsValid && !material.IsValid)
-        {
-            return MeshRefKey.None;
-        }
-
-        if (!_byMesh.TryGetValue(mesh, out var m))
-        {
-            throw new GraphicsException($"mesh handle {mesh} belongs to no loaded asset — cannot serialize it.");
-        }
-
-        if (!_byMaterial.TryGetValue(material, out var mat))
-        {
-            throw new GraphicsException($"material handle {material} belongs to no loaded asset — cannot serialize it.");
-        }
-
-        if (m.Key != mat.Key)
-        {
-            throw new GraphicsException(
-                $"a drawable's mesh (asset '{m.Key}') and material (asset '{mat.Key}') come from different assets — "
-                + "the snapshot format assumes one asset per drawable.");
-        }
-
-        return new MeshRefKey(m.Key, m.Local, mat.Local);
-    }
+    // Contenu-3a: Identify() is gone — the entity carries its AssetRef from spawn, so Save no longer does a
+    // handle→key lookup. _mappedMeshes / _mappedMaterials stay: Add() consults them for its atomic per-handle
+    // collision check (the MP-0b W4 bug class), and Remove/Clear keep them in step.
 
     /// <summary>The current handles for an asset's local mesh/material — how a snapshot's MeshRef is restored.</summary>
     /// <exception cref="GraphicsException"><paramref name="key"/> is not loaded, or an index is out of range.</exception>

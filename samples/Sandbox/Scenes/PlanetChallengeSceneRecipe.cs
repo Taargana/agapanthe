@@ -14,30 +14,31 @@ internal sealed class PlanetChallengeSceneRecipe : ISceneRecipe
 {
     public string Name => "planet-challenge";
 
-    public void Build(SceneContext ctx)
+    public void Build(SimSceneContext sim, PresentationSceneContext? presentation)
     {
-        var info = PlanetStage.Build(ctx);
+        var p = presentation ?? throw new InvalidOperationException("planet-challenge scene requires a presentation context");
+        var info = PlanetStage.Build(sim, p);
 
         var setup = PlanetContent.SetupPlanetChallenge(
-            ctx.Device, ctx.Registry, ctx.World, ctx.Renderer.MaterialSetLayout,
-            info.WorldOrigin, info.PlanetRadius, ctx.Simulation.Settings.FixedDeltaSeconds, spawnEntities: !info.LoadMode);
+            p.Device, p.Registry, sim.World, p.Renderer.MaterialSetLayout,
+            info.WorldOrigin, info.PlanetRadius, sim.Simulation.Settings.FixedDeltaSeconds, spawnEntities: !info.LoadMode);
 
         // The probe + beacon assets are now registered — safe to restore a snapshot that references them.
-        PlanetStage.RestoreIfRequested(ctx, in info);
+        PlanetStage.RequestRestoreIfRequested(sim, in info);
 
         var physics = setup.Physics;
-        ctx.Orchestrator.Add(Stage.Simulation, new PhysicsSystem(ctx.World, in physics));
+        sim.AddSystem(Stage.Simulation, new PhysicsSystem(sim.World, in physics));
 
         var probeSpec = setup.ProbeSpec;
         var challenge = new LandingChallengeSystem(
-            ctx.World, ctx.Window, info.WorldOrigin, info.PlanetRadius, setup.SurfaceBand, setup.Target,
+            sim.World, p.Window, info.WorldOrigin, info.PlanetRadius, setup.SurfaceBand, setup.Target,
             setup.TargetRadius, in probeSpec, setup.ProbeRadius, setup.DropHeight, setup.TargetCount, setup.ShotBudget);
-        ctx.Orchestrator.Add(Stage.PostSimulation, challenge);
+        sim.AddSystem(Stage.PostSimulation, challenge);
         Log.Info(
             $"Sandbox: [challenge] planet-challenge enabled — land {setup.TargetCount} probes in ≤ {setup.ShotBudget} shots; "
             + "fly, B drops (aimed radial), F5 saves. Relaunch with AGAPANTHE_LOAD to resume.");
 
-        ctx.Simulation.ApplyCommand = (in SimCommand cmd) =>
+        sim.Simulation.ApplyCommand = (in SimCommand cmd) =>
         {
             if (cmd.Kind == RecipeInput.SpawnProbeCommandKind)
             {
@@ -46,13 +47,12 @@ internal sealed class PlanetChallengeSceneRecipe : ISceneRecipe
         };
 
         SandboxCameras.FramePlanetChallengeCamera(
-            ctx.Camera, ctx.Controller, ctx.Renderer, info.WorldOrigin, info.SunOrigin, info.PlanetRadius, setup.Beacon);
-        RecipeInput.WireFreeFly(ctx);
-        RecipeInput.WireProbeKey(ctx);
+            p.Camera, p.Controller, p.Renderer, info.WorldOrigin, info.SunOrigin, info.PlanetRadius, setup.Beacon);
+        RecipeInput.WireFreeFly(sim, p);
+        RecipeInput.WireProbeKey(sim, p);
 
-        var world = ctx.World;
-        var registry = ctx.Registry;
-        ctx.Window.KeyPressed += key =>
+        var world = sim.World;
+        p.Window.KeyPressed += key =>
         {
             if (key != Key.F5)
             {
@@ -63,7 +63,7 @@ internal sealed class PlanetChallengeSceneRecipe : ISceneRecipe
             try
             {
                 using var fs = File.Create(saveTarget);
-                world.Save(fs, registry.IdentifyMeshRef); // Contenu-1: MeshRefs → stable AssetKeys
+                world.Save(fs); // Contenu-3a: entities carry their AssetRef → stable AssetKeys, no delegate
                 Log.Info($"Sandbox: [challenge] quicksaved to '{saveTarget}'. Relaunch AGAPANTHE_SCENE=planet-challenge " +
                          $"AGAPANTHE_LOAD={saveTarget} to resume.");
             }

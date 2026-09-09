@@ -37,7 +37,8 @@ public sealed class HeadlessSimSnapshotFormatTests
         {
             var spec = new ImportedEntitySpec(
                 new MeshHandle(0, 1), new MaterialHandle(0, 1),
-                new Double3(i * 0.9, 4 + (i * 1.7), 0), Matrix4x4.Identity, Vector3.Zero, 1f, (uint)i);
+                new Double3(i * 0.9, 4 + (i * 1.7), 0), Matrix4x4.Identity, Vector3.Zero, 1f, (uint)i,
+                new MeshRefKey(new AssetKey("headless/body"), 0, 0)); // mirrors HeadlessSim/Program.cs
             world.SpawnBody(in spec, new Vector3(0.05f * i, 0f, 0f), inverseMass: 1f, restitution: 0.4f, radius: 1f);
         }
 
@@ -62,13 +63,12 @@ public sealed class HeadlessSimSnapshotFormatTests
         return ms.ToArray();
     }
 
-    // Pinned 2026-09-07 (Contenu-1, format v3): reproduced identically by `dotnet run` (JIT) and a NativeAOT
-    // win-x64 publish of samples/HeadlessSim. Superseded 7e8dc68f5a25914c84677a7a53ad3a58 (v2, 1868 bytes) — v3
-    // adds a 6-byte key table (keyCount + the mandatory AssetKey.None entry) and shrinks each of the 8 bodies'
-    // MeshRef from a 16-byte blittable to 12 bytes (keyIdx|localMesh|localMat): 1868 + 6 - 8*4 = 1842. No
-    // identifier is passed, so every MeshRef serialises as AssetKey.None.
-    private const string ExpectedMd5 = "80ced166fdf3076119a62970f63d683b";
-    private const int ExpectedByteLength = 1842;
+    // Pinned 2026-09-09 (Contenu-3a, format v4 + audit fix): reproduced identically by `dotnet run` (JIT) and a
+    // NativeAOT win-x64 publish of samples/HeadlessSim. Superseded b3fa79d8… (v4, all-None, 1842 bytes) after the
+    // engine-architect finding — BuildScene's specs now carry a real AssetKey("headless/body"), so the headless
+    // artifact's snapshot proves genuine asset identity. +15 bytes = the one key-table entry.
+    private const string ExpectedMd5 = "6a13dd54c1db32d35a15332bff0395e7";
+    private const int ExpectedByteLength = 1857;
 
     [Fact]
     public void HeadlessSimDefaultScene_SnapshotHash_MatchesPinnedValue()
@@ -87,7 +87,8 @@ public sealed class HeadlessSimSnapshotFormatTests
         using var world = new GameWorld();
 
         var spec = new ImportedEntitySpec(
-            new MeshHandle(0, 1), new MaterialHandle(0, 1), Double3.Zero, Matrix4x4.Identity, Vector3.Zero, 1f, 0u);
+            new MeshHandle(0, 1), new MaterialHandle(0, 1), Double3.Zero, Matrix4x4.Identity, Vector3.Zero, 1f, 0u,
+            new MeshRefKey(new AssetKey("headless/drive-body"), 0, 0)); // mirrors HeadlessSim/Program.cs RunDrive
         var body = world.SpawnBody(in spec, Vector3.Zero, inverseMass: 1f, restitution: 0f, radius: 1f);
         world.FlushStructuralChanges();
 
@@ -147,8 +148,10 @@ public sealed class HeadlessSimSnapshotFormatTests
     // win-x64 publish of samples/HeadlessSim (`--drive --ticks 600 --save`). Supersedes
     // 97e786f0455a53d856b9ba4affca1003 (v2, 208 bytes): +6 key table, -4 on the single body's MeshRef = 210.
     // Re-derive with: dotnet run --project samples/HeadlessSim -c Debug -- --drive --ticks 600 --save <path>
-    private const string ExpectedDriveMd5 = "cf01492e8a9688b666e01d2ef9d63869";
-    private const int ExpectedDriveByteLength = 210;
+    // Pinned 2026-09-09 (Contenu-3a, format v4 + audit fix). Superseded f8120d25… (v4, all-None, 210 bytes) — the
+    // RunDrive body now carries AssetKey("headless/drive-body"). +21 bytes = the one key-table entry.
+    private const string ExpectedDriveMd5 = "f6053226f8c13b55589b29be103a8e66";
+    private const int ExpectedDriveByteLength = 231;
 
     [Fact]
     public void HeadlessSimDriveScene_SnapshotHash_MatchesPinnedValue()

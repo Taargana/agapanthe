@@ -26,25 +26,26 @@ internal sealed class ModelSceneRecipe : ISceneRecipe
            || sceneToken.StartsWith("grid:", StringComparison.OrdinalIgnoreCase)
            || sceneToken.StartsWith("drop:", StringComparison.OrdinalIgnoreCase);
 
-    public void Build(SceneContext ctx)
+    public void Build(SimSceneContext sim, PresentationSceneContext? presentation)
     {
-        var device = ctx.Device;
-        var registry = ctx.Registry;
-        var world = ctx.World;
-        var renderer = ctx.Renderer;
-        var camera = ctx.Camera;
-        var controller = ctx.Controller;
+        var p = presentation ?? throw new InvalidOperationException("model scene requires a presentation context");
+        var device = p.Device;
+        var registry = p.Registry;
+        var world = sim.World;
+        var renderer = p.Renderer;
+        var camera = p.Camera;
+        var controller = p.Controller;
         var sceneSpec = Environment.GetEnvironmentVariable("AGAPANTHE_SCENE");
 
-        if (Environment.GetEnvironmentVariable("AGAPANTHE_LOAD") is { Length: > 0 })
+        if (sim.Options.LoadPath is { Length: > 0 })
         {
             Log.Warn(
                 $"Sandbox: AGAPANTHE_LOAD is set but scene '{sceneSpec ?? "model"}' does not restore snapshots — "
                 + "it is ignored. Use AGAPANTHE_SCENE=planet (or planet-challenge) to resume a saved world.");
         }
 
-        var modelKey = ModelContent.ResolveModelKey(ctx.Args, ctx.Catalog);
-        var model = ctx.Catalog.LoadModel(modelKey);
+        var modelKey = ModelContent.ResolveModelKey(sim.Args, sim.Catalog);
+        var model = sim.Catalog.LoadModel(modelKey);
         ModelContent.LogModelStats(model, modelKey.ToString());
 
         if (int.TryParse(Environment.GetEnvironmentVariable("AGAPANTHE_UNLOAD_TEST"), out var unloadCycles)
@@ -176,12 +177,12 @@ internal sealed class ModelSceneRecipe : ISceneRecipe
 
         if (benchMode)
         {
-            ctx.Orchestrator.Add(Stage.Simulation, new BenchSpinSystem(world, camera));
+            sim.AddSystem(Stage.Simulation, new BenchSpinSystem(world, camera));
         }
 
         if (int.TryParse(Environment.GetEnvironmentVariable("AGAPANTHE_CHURN"), out var churn) && churn > 0)
         {
-            ctx.Orchestrator.Add(Stage.Simulation, new ChurnSystem(world, churn));
+            sim.AddSystem(Stage.Simulation, new ChurnSystem(world, churn));
         }
 
         if (physicsGroundY is { } physGroundY && Environment.GetEnvironmentVariable("AGAPANTHE_PHYSICS") is "1")
@@ -189,13 +190,13 @@ internal sealed class ModelSceneRecipe : ISceneRecipe
             // The fixed step comes from the single definition (SimulationSettings), not a re-literalled 1/60 —
             // same value, but PhysicsSystem.RatesMatch's assert now covers this seam.
             var settings = new PhysicsSettings(
-                new Vector3(0f, -9.81f, 0f), (float)physGroundY, ctx.Simulation.Settings.FixedDeltaSeconds);
-            ctx.Orchestrator.Add(Stage.Simulation, new PhysicsSystem(world, in settings));
+                new Vector3(0f, -9.81f, 0f), (float)physGroundY, sim.Simulation.Settings.FixedDeltaSeconds);
+            sim.AddSystem(Stage.Simulation, new PhysicsSystem(world, in settings));
             Log.Info($"Sandbox: [physics] enabled — gravity {settings.Gravity}, ground y={settings.GroundY:F2}, " +
                      $"fixed dt {settings.FixedDt:F4}s.");
         }
 
-        RecipeInput.WireFreeFly(ctx);
+        RecipeInput.WireFreeFly(sim, p);
 
         Log.Info($"Sandbox: [scene] model at world origin {worldOrigin}, eye at {camera.Position}.");
     }

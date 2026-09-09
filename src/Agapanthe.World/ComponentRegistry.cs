@@ -76,6 +76,7 @@ public static class ComponentRegistry
             Root<RigidBody>();
             Root<NoShadowCast>();
             Root<InstanceSlot>();
+            Root<AssetRef>(); // Contenu-3a — index 12, appended; a MANAGED component (carries an AssetKey string)
 
             _initialized = true;
         }

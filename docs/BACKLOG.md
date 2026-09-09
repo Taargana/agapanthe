@@ -488,14 +488,25 @@ pas fixe = source de vérité unique (prérequis netcode) — voir §Physique.
     de la géométrie ». Réversible (bump `AgModelFormat.Version` + split côté cook, le runtime ne voit qu'un reader).
     **Déclencheur** : `content/` dépasse ~10 modèles texturés ou ~200 Mo de blobs (le `CookSummary` logge la taille
     totale à chaque build pour rendre la dérive visible).
-  - **Contenu-3 — prefabs & scènes déclaratifs** : `.agscene` / `.agprefab` (**authoring**, PAS une sauvegarde) ;
-    `SceneLoader` ; les 5 recipes Sandbox `ISceneRecipe` → données (⚠️ le registry `ISceneRecipe` de S30 est de
-    l'*organisation de code*). **Décision structurante à prendre ici** : remonter l'identité d'asset **dans la
-    simulation** — un composant sim-side `AssetRef { assetId, localMesh, localMat }` dont `MeshRef` devient la
-    projection client résolue à la matérialisation (aujourd'hui `MeshRef` est render-local → un `Save` headless écrit
-    `AssetKey.None` → un serveur autoritaire ne peut pas émettre d'état visuellement reconstructible). `AssetKey` reste
-    le nom stable, le manifest Contenu-2 fournit l'`assetId` numérique. → aussi lié à la scission `SceneContext`
-    sim/présentation (dette S30) et à un garde-fou `RestoreIfRequested`.
+  - **Contenu-3 — prefabs & scènes déclaratifs** : décomposé en **3 sous-jalons** (interview S33).
+    - **3a ✅ (S33)** — `AssetRef` (composant #13 managé, sim-side, porte un `MeshRefKey`) + snapshot **v4**
+      (sérialise `AssetRef`, `MeshRef` = cache render dérivé, `MeshRefIdentifier` supprimé, upgrade v3→v4 en
+      place) + scission `SceneContext` → `SimSceneContext` + `PresentationSceneContext` + garde-fou restore
+      (`RequestRestore`/`ApplyPendingRestore`). **Un `Save` headless émet de vraies `AssetKey`.** Spec
+      `docs/plans/2026-09-09-content-3a-sim-asset-identity-design.md` 4,55/5 ; double audit 3,9/4,0
+      PASS-with-concerns, 1 🔴 (`LandingChallengeSystem` seed) trouvé-et-corrigé.
+    - **3b** — `.agscene`/`.agprefab` : authoring **TOML** sous `content/scenes|prefabs|procedural/` →
+      `tools/AssetCooker` → blobs binaires déterministes dans `content.agmanifest` (`AssetKind.Scene`/`Prefab` ;
+      sphères UV / quad de sol / ciel equirect cuits) ; `SceneLoader` runtime GPU-free via `AssetCatalog` ;
+      prouvé sur `model` ; `HeadlessSim` charge le même fichier.
+    - **3c** — 3 registres de fabriques via `IGame` (systèmes, générateurs procéduraux, command-handlers) ;
+      `ProbeDrop`/`LandingChallenge`/`BenchSpin`/`Churn` paramétrés par la scène ; nom d'entité → `GlobalId` ;
+      `drive` = table de bindings ; migration `drive` + `planet*` ; ~30 env vars → champs de scène.
+    - Dette 3a → 3b/3c : règle « rien dans `Build` ne lit le contenu du monde » à inscrire dans `ISceneRecipe` ;
+      supprimer les 5+ copies champ-à-champ de spec quand `SceneLoader` est le chemin unique ; `Agapanthe.App` →
+      `App` + `App.Client` avant `RunDedicatedServer` (Vulkan dans la closure) ; mesurer le coût GC du
+      `AssetRef[]` managé (fallback D1-alt : id blittable + side-table) ; identité d'asset non-modèle
+      (textures/env/fonts) toujours hors snapshot.
   - Puis définitions **data-driven** (items/recettes = données, pas du code — prérequis du Stardew-like).
 - **La 2ᵉ slice, dissemblable** : une mini-slice top-down/orthographique. **Le moteur, c'est ce qui est commun aux deux.**
   Test de généralité le moins cher qui existe ; exposera violemment tout ce qui est hardcodé pour l'échelle planétaire.

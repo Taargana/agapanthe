@@ -24,22 +24,23 @@ internal sealed class DriveSceneRecipe : ISceneRecipe
 
     public string Name => "drive";
 
-    public void Build(SceneContext ctx)
+    public void Build(SimSceneContext sim, PresentationSceneContext? presentation)
     {
-        var device = ctx.Device;
-        var registry = ctx.Registry;
-        var world = ctx.World;
-        var renderer = ctx.Renderer;
-        var camera = ctx.Camera;
-        var controller = ctx.Controller;
+        var p = presentation ?? throw new InvalidOperationException("drive scene requires a presentation context");
+        var device = p.Device;
+        var registry = p.Registry;
+        var world = sim.World;
+        var renderer = p.Renderer;
+        var camera = p.Camera;
+        var controller = p.Controller;
 
-        if (Environment.GetEnvironmentVariable("AGAPANTHE_LOAD") is { Length: > 0 })
+        if (sim.Options.LoadPath is { Length: > 0 })
         {
             Log.Warn("Sandbox: AGAPANTHE_LOAD is set but the 'drive' scene does not restore snapshots — it is ignored.");
         }
 
-        var modelKey = ModelContent.ResolveModelKey(ctx.Args, ctx.Catalog);
-        var model = ctx.Catalog.LoadModel(modelKey);
+        var modelKey = ModelContent.ResolveModelKey(sim.Args, sim.Catalog);
+        var model = sim.Catalog.LoadModel(modelKey);
         ModelContent.LogModelStats(model, modelKey.ToString());
 
         var worldOrigin = SandboxEnv.ParseDouble3(Environment.GetEnvironmentVariable("AGAPANTHE_WORLD_ORIGIN"));
@@ -50,7 +51,8 @@ internal sealed class DriveSceneRecipe : ISceneRecipe
         var bodyRadius = MathF.Max(s0.BoundsRadius * MathHelpers.MaxStretch(s0.RotationScale), 0.25f);
         var steerable = world.SpawnBody(
             new ImportedEntitySpec(
-                s0.Mesh, s0.Material, worldOrigin, s0.RotationScale, s0.BoundsCenter, s0.BoundsRadius, s0.Order),
+                s0.Mesh, s0.Material, worldOrigin, s0.RotationScale, s0.BoundsCenter, s0.BoundsRadius, s0.Order,
+                s0.Identity), // Contenu-3a: keep asset identity
             Vector3.Zero, inverseMass: 1f, restitution: 0f, radius: bodyRadius);
         Log.Info("Sandbox: [scene] drive — one steerable zero-gravity body (WASD move, Space/C up-down, X brake).");
 
@@ -99,15 +101,15 @@ internal sealed class DriveSceneRecipe : ISceneRecipe
 
         // Zero-gravity physics + the declarative InputMap + an ApplyCommand steering the one body.
         var driveSettings = new PhysicsSettings(
-            Vector3.Zero, groundY: -100_000f, fixedDt: ctx.Simulation.Settings.FixedDeltaSeconds);
-        ctx.Orchestrator.Add(Stage.Simulation, new PhysicsSystem(world, in driveSettings));
+            Vector3.Zero, groundY: -100_000f, fixedDt: sim.Simulation.Settings.FixedDeltaSeconds);
+        sim.AddSystem(Stage.Simulation, new PhysicsSystem(world, in driveSettings));
 
         var driveMap = new InputMap();
         driveMap.BindAxisVector(DriveMoveCommandKind, axisX: 0, axisY: 1, axisZ: 2);
         driveMap.BindButton(DriveBrakeBit, DriveBrakeCommandKind, ButtonTrigger.OnPress);
-        ctx.Simulation.InputMap = driveMap;
+        sim.Simulation.InputMap = driveMap;
 
-        ctx.Simulation.ApplyCommand = (in SimCommand cmd) =>
+        sim.Simulation.ApplyCommand = (in SimCommand cmd) =>
         {
             if (!world.IsAlive(steerable))
             {
@@ -125,8 +127,8 @@ internal sealed class DriveSceneRecipe : ISceneRecipe
             }
         };
 
-        var window = ctx.Window;
-        ctx.Simulation.SampleInput = () =>
+        var window = p.Window;
+        sim.Simulation.SampleInput = () =>
         {
             var snap = default(InputSnapshot);
             snap.Axes[0] = (window.IsKeyDown(Key.D) ? 1f : 0f)

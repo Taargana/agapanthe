@@ -174,3 +174,24 @@ internal struct RigidBody
     public float Restitution;
     public float Radius;
 }
+
+/// <summary>
+/// The drawable's <b>asset identity</b> (Contenu-3a): which asset it comes from and which local mesh/material
+/// index within it, as a <see cref="MeshRefKey"/> (<see cref="Agapanthe.Core.AssetKey"/> + two ints). Present on
+/// every drawable and body, set at materialisation from <see cref="ImportedEntitySpec.Identity"/>.
+/// <para>
+/// This is the <b>stored</b> identity of what the simulation draws; <see cref="MeshRef"/> is its process-local
+/// <b>render cache</b>, derived from it at load time via the host's resolver. A headless <c>Save</c> serialises
+/// this (a real <see cref="Agapanthe.Core.AssetKey"/>) with no delegate — the simulation owns the identity.
+/// </para>
+/// <para>
+/// Unlike every other component this is a <b>managed</b> struct (it carries a <c>string</c> through
+/// <see cref="Agapanthe.Core.AssetKey"/>). It is never touched on the per-frame hot path — only at spawn and at
+/// serialisation.
+/// </para>
+/// </summary>
+[Component]
+internal struct AssetRef
+{
+    public MeshRefKey Value;
+}

@@ -6,9 +6,9 @@ namespace Agapanthe.Tests;
 
 /// <summary>
 /// MP-0b W3: the v2 snapshot header (<see cref="UniverseId"/> + a validated/policy-controlled id allocator), plus
-/// Contenu-1's v3 additions (the <see cref="AssetKey"/> key table + <c>MeshRef</c> re-resolution via
-/// <see cref="MeshRefIdentifier"/>/<see cref="MeshRefResolver"/>). v1's structural guarantees (component fidelity,
-/// hierarchy remap, byte-identical round-trip) stay covered by <see cref="WorldSerializationTests"/>.
+/// Contenu-3a's v4 additions (the <see cref="AssetKey"/> key table + <c>AssetRef</c> as the stored drawable
+/// identity, <c>MeshRef</c> derived on load via <see cref="MeshRefResolver"/>) and the in-place v3→v4 upgrade.
+/// v1's structural guarantees stay covered by <see cref="WorldSerializationTests"/>.
 /// </summary>
 [Collection("World")]
 public sealed class WorldSerializationV3Tests
@@ -30,11 +30,11 @@ public sealed class WorldSerializationV3Tests
     // --- Version -----------------------------------------------------------------------------------------------
 
     [Fact]
-    public void Save_WritesVersion3()
+    public void Save_WritesVersion4()
     {
         using var world = new GameWorld();
         var bytes = Save(world);
-        Assert.Equal(3u, System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(bytes.AsSpan(4, 4)));
+        Assert.Equal(4u, System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(bytes.AsSpan(4, 4)));
     }
 
     [Fact]
@@ -275,17 +275,14 @@ public sealed class WorldSerializationV3Tests
         Assert.Throws<InvalidOperationException>(() => target.SpawnImported(in spec));
     }
 
-    // --- Contenu-1: the AssetKey key table + MeshRef re-resolution ---------------------------------------------
+    // --- Contenu-3a: the AssetKey key table + AssetRef stored identity / MeshRef derivation --------------------
 
     private static readonly MeshHandle KnownMesh = new(7, 1);
     private static readonly MaterialHandle KnownMaterial = new(9, 1);
     private static readonly AssetKey KnownKey = new("models/x");
+    private static readonly MeshRefKey KnownIdentity = new(KnownKey, 3, 5);
 
-    // identify: the one drawable's handles → (KnownKey, local 3, local 5); anything else → None.
-    private static MeshRefKey Identify(MeshHandle mesh, MaterialHandle material)
-        => mesh == KnownMesh && material == KnownMaterial ? new MeshRefKey(KnownKey, 3, 5) : MeshRefKey.None;
-
-    // resolve: the inverse — only KnownKey/3/5 is resolvable, everything else throws (the delegate contract).
+    // resolve: only KnownKey/3/5 is resolvable, everything else throws (the delegate contract).
     private static (MeshHandle, MaterialHandle) Resolve(AssetKey key, int localMesh, int localMat)
         => key == KnownKey && localMesh == 3 && localMat == 5
             ? (KnownMesh, KnownMaterial)
@@ -295,19 +292,26 @@ public sealed class WorldSerializationV3Tests
     {
         var world = new GameWorld();
         world.SpawnImported(new ImportedEntitySpec(
-            KnownMesh, KnownMaterial, new Double3(1, 2, 3), Matrix4x4.Identity, Vector3.Zero, 1f, 0));
+            KnownMesh, KnownMaterial, new Double3(1, 2, 3), Matrix4x4.Identity, Vector3.Zero, 1f, 0, KnownIdentity));
+        world.FlushStructuralChanges();
+        return world;
+    }
+
+    private static GameWorld WorldWithOneUnkeyedDrawable()
+    {
+        var world = new GameWorld();
+        world.SpawnImported(new ImportedEntitySpec(
+            KnownMesh, KnownMaterial, new Double3(1, 2, 3), Matrix4x4.Identity, Vector3.Zero, 1f, 0)); // identity None
         world.FlushStructuralChanges();
         return world;
     }
 
     [Fact]
-    public void Save_WithIdentifier_WritesTheKeyInTheTable()
+    public void Save_DrawableWithIdentity_WritesTheKeyInTheTable()
     {
         using var world = WorldWithOneKnownDrawable();
 
-        using var ms = new MemoryStream();
-        world.Save(ms, Identify);
-        var bytes = ms.ToArray();
+        var bytes = Save(world);
 
         // keyCount at offset 40, then entry 0 (byteLen 0), then entry 1 = "models/x".
         Assert.Equal(2u, System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(bytes.AsSpan(40, 4)));
@@ -317,50 +321,40 @@ public sealed class WorldSerializationV3Tests
     }
 
     [Fact]
-    public void RoundTrip_WithDelegates_RebuildsHandles_AndIsByteIdentical()
+    public void RoundTrip_ResolverRebuildsMeshRef_AssetRefIntact_ByteIdentical()
     {
         using var original = WorldWithOneKnownDrawable();
         var drawableId = original.NextGlobalIdForTest - 1; // the id just consumed by SpawnImported
 
-        using var ms = new MemoryStream();
-        original.Save(ms, Identify);
-        var bytes = ms.ToArray();
+        var bytes = Save(original);
 
         using var restored = new GameWorld();
         restored.Load(new MemoryStream(bytes), SnapshotAllocatorPolicy.AdoptFromHeader, Resolve);
 
-        Assert.Equal((KnownMesh, KnownMaterial), restored.MeshRefForTest(drawableId));
+        Assert.Equal((KnownMesh, KnownMaterial), restored.MeshRefForTest(drawableId)); // MeshRef derived
+        Assert.Equal(KnownIdentity, restored.AssetRefForTest(drawableId));             // AssetRef preserved
 
-        using var ms2 = new MemoryStream();
-        restored.Save(ms2, Identify);
-        Assert.Equal(bytes, ms2.ToArray()); // re-save reproduces the exact key table + indices
+        Assert.Equal(bytes, Save(restored)); // re-save reproduces the exact key table + indices
     }
 
     [Fact]
     public void RoundTrip_WithDeterministicKeyTable_IsByteIdenticalRunToRun()
     {
         using var world = new GameWorld();
-        // Three drawables that map to three different keys — the table must come out ordinal-sorted, stably.
+        // Three drawables carrying three different keys — the table must come out ordinal-sorted, stably.
         foreach (var (mh, key) in new[] { (10, "b"), (11, "a"), (12, "c") })
         {
             world.SpawnImported(new ImportedEntitySpec(
-                new MeshHandle(mh, 1), new MaterialHandle(1, 1), Double3.Zero, Matrix4x4.Identity, Vector3.Zero, 1f, 0));
+                new MeshHandle(mh, 1), new MaterialHandle(1, 1), Double3.Zero, Matrix4x4.Identity, Vector3.Zero, 1f, 0,
+                new MeshRefKey(new AssetKey(key), 0, 0)));
         }
 
         world.FlushStructuralChanges();
 
-        MeshRefKey Id(MeshHandle m, MaterialHandle _) => m.Index switch
-        {
-            10 => new MeshRefKey(new AssetKey("b"), 0, 0),
-            11 => new MeshRefKey(new AssetKey("a"), 0, 0),
-            12 => new MeshRefKey(new AssetKey("c"), 0, 0),
-            _ => MeshRefKey.None,
-        };
-
         byte[] Once()
         {
             using var ms = new MemoryStream();
-            world.Save(ms, Id);
+            world.Save(ms);
             return ms.ToArray();
         }
 
@@ -373,38 +367,35 @@ public sealed class WorldSerializationV3Tests
         using var original = WorldWithOneKnownDrawable();
         var drawableId = original.NextGlobalIdForTest - 1;
 
-        using var ms = new MemoryStream();
-        original.Save(ms, Identify); // key table has "models/x"
-        var bytes = ms.ToArray();
+        var bytes = Save(original); // key table has "models/x"
 
         using var restored = new GameWorld();
         restored.Load(new MemoryStream(bytes)); // 1-arg Load → resolve is null
 
         Assert.Equal((MeshHandle.Invalid, MaterialHandle.Invalid), restored.MeshRefForTest(drawableId));
+        Assert.Equal(KnownIdentity, restored.AssetRefForTest(drawableId)); // AssetRef survives without a resolver
     }
 
     [Fact]
-    public void Save_NoIdentifier_MeshRefRoundTripsAsNone()
+    public void Save_UnkeyedDrawable_RoundTripsAsNone()
     {
-        using var original = WorldWithOneKnownDrawable();
+        using var original = WorldWithOneUnkeyedDrawable();
         var drawableId = original.NextGlobalIdForTest - 1;
 
-        var bytes = Save(original); // no identifier → every MeshRef is None
+        var bytes = Save(original); // identity None → key table is just the mandatory None entry
         Assert.Equal(1u, System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(bytes.AsSpan(40, 4)));
 
         using var restored = new GameWorld();
         restored.Load(new MemoryStream(bytes), SnapshotAllocatorPolicy.AdoptFromHeader, Resolve);
         Assert.Equal((MeshHandle.Invalid, MaterialHandle.Invalid), restored.MeshRefForTest(drawableId));
+        Assert.Equal(MeshRefKey.None, restored.AssetRefForTest(drawableId));
     }
 
     [Fact]
     public void Load_ResolverThatThrows_PropagatesTheFailure()
     {
         using var original = WorldWithOneKnownDrawable();
-
-        using var ms = new MemoryStream();
-        original.Save(ms, Identify);
-        var bytes = ms.ToArray();
+        var bytes = Save(original);
 
         using var restored = new GameWorld();
         (MeshHandle, MaterialHandle) Boom(AssetKey key, int a, int b) => throw new InvalidOperationException("no such asset");
@@ -414,19 +405,16 @@ public sealed class WorldSerializationV3Tests
     }
 
     [Fact]
-    public void Load_RejectsMeshRefKeyIndexBeyondTheTable()
+    public void Load_RejectsAssetKeyIndexBeyondTheTable()
     {
         using var original = WorldWithOneKnownDrawable();
+        var bytes = Save(original);
 
-        using var ms = new MemoryStream();
-        original.Save(ms, Identify);
-        var bytes = ms.ToArray();
-
-        // The MeshRef payload is written as keyIdx(1) | localMesh(3) | localMat(5) — a unique LE byte run in a
+        // The AssetRef payload is written as keyIdx(1) | localMesh(3) | localMat(5) — a unique LE byte run in a
         // world with one drawable. Overwrite the keyIdx with a value past the 2-entry key table.
-        ReadOnlySpan<byte> meshRefRun = [1, 0, 0, 0, 3, 0, 0, 0, 5, 0, 0, 0];
-        var at = bytes.AsSpan().IndexOf(meshRefRun);
-        Assert.True(at >= 0, "MeshRef payload run not found");
+        ReadOnlySpan<byte> identityRun = [1, 0, 0, 0, 3, 0, 0, 0, 5, 0, 0, 0];
+        var at = bytes.AsSpan().IndexOf(identityRun);
+        Assert.True(at >= 0, "AssetRef payload run not found");
         System.Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(bytes.AsSpan(at, 4), 999);
 
         using var restored = new GameWorld();
@@ -468,15 +456,12 @@ public sealed class WorldSerializationV3Tests
         foreach (var mh in new[] { 10, 11 })
         {
             world.SpawnImported(new ImportedEntitySpec(
-                new MeshHandle(mh, 1), new MaterialHandle(1, 1), Double3.Zero, Matrix4x4.Identity, Vector3.Zero, 1f, 0));
+                new MeshHandle(mh, 1), new MaterialHandle(1, 1), Double3.Zero, Matrix4x4.Identity, Vector3.Zero, 1f, 0,
+                new MeshRefKey(new AssetKey(mh == 10 ? "a" : "b"), 0, 0)));
         }
 
         world.FlushStructuralChanges();
-        MeshRefKey Id(MeshHandle m, MaterialHandle _) => new(new AssetKey(m.Index == 10 ? "a" : "b"), 0, 0);
-
-        using var ms = new MemoryStream();
-        world.Save(ms, Id);
-        var bytes = ms.ToArray();
+        var bytes = Save(world);
 
         // Table is ["", "a", "b"] at offset 40: keyCount(4)=3, [len(2)=0], [len(2)=1 "a"], [len(2)=1 "b"].
         // Swap the two payload bytes 'a' (0x61) and 'b' (0x62) → table becomes ["", "b", "a"], not ascending.
@@ -492,9 +477,7 @@ public sealed class WorldSerializationV3Tests
     public void Load_RejectsInvalidUtf8InKeyTable()
     {
         using var world = WorldWithOneKnownDrawable();
-        using var ms = new MemoryStream();
-        world.Save(ms, Identify); // table ["", "models/x"]
-        var bytes = ms.ToArray();
+        var bytes = Save(world); // table ["", "models/x"]
 
         // Corrupt the first byte of "models/x" to a lone continuation byte (0x80) — invalid UTF-8.
         var mi = bytes.AsSpan().IndexOf("models/x"u8);
@@ -523,18 +506,80 @@ public sealed class WorldSerializationV3Tests
     }
 
     [Fact]
-    public void Save_AfterLoadWithoutResolver_DoesNotThrowOnInvalidHandles()
+    public void Save_AfterLoadWithoutResolver_KeepsTheKey_ByteIdentical()
     {
         using var original = WorldWithOneKnownDrawable();
-        using var ms = new MemoryStream();
-        original.Save(ms, Identify);
+        var bytes = Save(original);
 
         using var restored = new GameWorld();
-        restored.Load(new MemoryStream(ms.ToArray())); // no resolver → MeshRef becomes Invalid
+        restored.Load(new MemoryStream(bytes)); // no resolver → MeshRef Invalid, AssetRef intact
 
-        // Re-saving with an identifier must treat the Invalid drawable as None, not blow up (audit finding).
-        using var ms2 = new MemoryStream();
-        restored.Save(ms2, Identify);
-        Assert.Equal(1u, System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(ms2.ToArray().AsSpan(40, 4)));
+        // Contenu-3a: Save reads AssetRef, never the handles — a resolver-less round-trip is byte-identical and
+        // keeps "models/x" in the table. (The old audit finding — "re-saving an Invalid drawable must not throw" —
+        // is structurally moot now.)
+        var reBytes = Save(restored);
+        Assert.Equal(2u, System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(reBytes.AsSpan(40, 4)));
+        Assert.Equal(bytes, reBytes);
+    }
+
+    // --- Contenu-3a: v3 → v4 in-place upgrade -----------------------------------------------------------------
+
+    [Fact]
+    public void Load_UpgradesV3Fixture_ToV4_PreservingAssetIdentity()
+    {
+        var v3 = File.ReadAllBytes(Path.Combine(AppContext.BaseDirectory, "Fixtures", "world-v3.save"));
+        Assert.Equal(3u, System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(v3.AsSpan(4, 4)));
+
+        // resolver for the fixture's one key "models/helmet" @ (2, 4)
+        static (MeshHandle, MaterialHandle) Res(AssetKey k, int lm, int lt)
+            => k == new AssetKey("models/helmet") && lm == 2 && lt == 4
+                ? (new MeshHandle(7, 1), new MaterialHandle(9, 1))
+                : throw new InvalidOperationException($"unexpected {k} [{lm},{lt}]");
+
+        using var world = new GameWorld();
+        var result = world.Load(new MemoryStream(v3), SnapshotAllocatorPolicy.AdoptFromHeader, Res);
+        Assert.Equal(4, result.EntityCount); // drawable + body + root node + child
+
+        var reSaved = Save(world);
+        Assert.Equal(4u, System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(reSaved.AsSpan(4, 4)));
+        Assert.Equal(13u, System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(reSaved.AsSpan(8, 4)));
+        Assert.Equal(reSaved, Save(world)); // stable
+
+        // the "models/helmet" key survived the upgrade into the v4 table
+        Assert.True(reSaved.AsSpan().IndexOf("models/helmet"u8) >= 0);
+    }
+
+    // Finding #2 regression guard: a by-hand copy of a Load-sourced spec (grid cell, drop cluster, probe, beacon)
+    // must carry .Identity through, or client-keyed content silently serialises as None after the identifier's
+    // removal. Mirrors ModelContent.SpawnGrid's field-by-field rebuild.
+    [Fact]
+    public void ClientKeyedContent_RebuiltSpec_KeepsIdentityInTheKeyTable()
+    {
+        using var world = new GameWorld();
+        var source = new ImportedEntitySpec(
+            KnownMesh, KnownMaterial, Double3.Zero, Matrix4x4.Identity, Vector3.Zero, 1f, 0, KnownIdentity);
+
+        for (var i = 0; i < 4; i++)
+        {
+            world.SpawnImported(new ImportedEntitySpec(
+                source.Mesh, source.Material, new Double3(i * 5, 0, 0), source.RotationScale,
+                source.BoundsCenter, source.BoundsRadius, (uint)i, source.Identity)); // <- the copied field
+        }
+
+        world.FlushStructuralChanges();
+        var bytes = Save(world);
+
+        Assert.Equal(2u, System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(bytes.AsSpan(40, 4))); // None + 1
+        Assert.True(bytes.AsSpan().IndexOf("models/x"u8) >= 0);
+    }
+
+    [Fact]
+    public void Load_RejectsV3Fixture_WhenComponentCountIsNot12()
+    {
+        var v3 = File.ReadAllBytes(Path.Combine(AppContext.BaseDirectory, "Fixtures", "world-v3.save"));
+        System.Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(v3.AsSpan(8, 4), 13); // v3 must be 12
+
+        using var world = new GameWorld();
+        Assert.Throws<WorldSerializationException>(() => world.Load(new MemoryStream(v3)));
     }
 }

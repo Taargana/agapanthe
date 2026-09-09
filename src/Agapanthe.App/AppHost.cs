@@ -132,28 +132,45 @@ public static class AppHost
             }
 
             // The game builds its scene: spawn entities, register systems, frame the camera, wire input.
+            // Contenu-3a: the context is split — a sim half (headless-safe) + a presentation half.
             var recipe = SelectRecipe(game, options.Scene);
-            recipe.Build(new SceneContext
+            var sim = new SimSceneContext
+            {
+                World = world,
+                Simulation = orchestrator.Simulation,
+                Catalog = catalog,
+                Args = args,
+                Options = options,
+            };
+            var presentation = new PresentationSceneContext
             {
                 Device = device,
                 Registry = registry,
-                Catalog = catalog,
-                World = world,
-                Orchestrator = orchestrator,
                 Renderer = renderer,
                 Camera = camera,
                 Controller = controller,
                 Window = window,
                 RenderList = renderList,
-                Args = args,
-            });
+                Orchestrator = orchestrator,
+            };
+            recipe.Build(sim, presentation);
+            WarnIfDrawablesMissingIdentity(world);
+
+            // Contenu-3a: apply a restore the recipe requested (AGAPANTHE_LOAD) — after Build, so every asset the
+            // snapshot can reference is registered. The resolver rebuilds the MeshRef render cache from AssetRef.
+            if (sim.HasPendingRestore)
+            {
+                var from = sim.PendingRestorePath;
+                var loaded = sim.ApplyPendingRestore(registry.ResolveMeshRef);
+                Log.Info($"AppHost: [Contenu-3a] world restored from '{from}' — {loaded.EntityCount} entities, universe {loaded.Universe}.");
+            }
 
             // VS-1: AGAPANTHE_SAVE snapshots the fully-built world (Save flushes pending structural changes first).
             if (options.SavePath is { } savePath)
             {
                 using var saveStream = File.Create(savePath);
-                // Contenu-1: MeshRefs serialise as stable AssetKeys, re-resolved at load through the registry.
-                world.Save(saveStream, registry.IdentifyMeshRef);
+                // Contenu-3a: each entity carries its AssetRef, so Save emits stable AssetKeys with no delegate.
+                world.Save(saveStream);
                 Log.Info($"AppHost: [VS-1] world saved to '{savePath}' ({world.LiveEntityCount} entities).");
             }
 
@@ -387,6 +404,21 @@ public static class AppHost
     /// recipe can claim the default on a side condition (e.g. <c>AGAPANTHE_LOAD</c> forces the planet scene). When
     /// nothing claims a null/empty token, <see cref="IGame.DefaultScene"/> is the fallback. Throws if a non-empty
     /// token matches none, or if <c>DefaultScene</c> names no recipe.</summary>
+    // Contenu-3a (audit 🟠): the deleted MeshRefIdentifier turned "a by-hand ImportedEntitySpec copy forgot
+    // .Identity" from a loud GraphicsException at save time into a silent AssetKey.None on disk. This catches that
+    // class right after Build, in Debug only.
+    [Conditional("DEBUG")]
+    private static void WarnIfDrawablesMissingIdentity(GameWorld world)
+    {
+        var missing = world.DrawablesMissingIdentity();
+        if (missing > 0)
+        {
+            Log.Warn(
+                $"AppHost: {missing} drawable(s) have a resolved MeshRef but AssetRef.None — a spec copy dropped "
+                + ".Identity. They will render now but serialise as AssetKey.None (invisible after a reload).");
+        }
+    }
+
     internal static ISceneRecipe SelectRecipe(IGame game, string? sceneToken)
     {
         sceneToken = sceneToken?.Trim();

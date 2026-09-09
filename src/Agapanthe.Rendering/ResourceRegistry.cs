@@ -136,7 +136,10 @@ public sealed class ResourceRegistry : IDisposable
                     entry.RotationScale,
                     entry.BoundsCenter, // local sphere — independent of where the model is placed in the world
                     entry.BoundsRadius,
-                    (uint)i);
+                    (uint)i,
+                    // Contenu-3a: the stable asset identity the entity carries (AssetRef). Local mesh index = i,
+                    // local material index = entry.LocalMaterialIndex — the same pair ModelKeyIndex maps.
+                    new MeshRefKey(key, i, entry.LocalMaterialIndex));
             }
 
             _models.Add(new LoadedModel(key, resources, meshHandles, materialHandles));
@@ -195,15 +198,6 @@ public sealed class ResourceRegistry : IDisposable
         _keyIndex.Remove(loaded.Key); // the key is reusable after an Unload
         DisposeResources(loaded.Resources);
         _models[modelId] = null;
-    }
-
-    /// <summary>The serialisable identity (Contenu-1) of a drawable whose mesh + material come from one loaded
-    /// asset — an <see cref="AssetKey"/> plus the local mesh/material indices. A world snapshot stores this in
-    /// place of the raw handles. Throws if either handle belongs to no loaded asset or the two disagree.</summary>
-    public MeshRefKey IdentifyMeshRef(MeshHandle mesh, MaterialHandle material)
-    {
-        ObjectDisposedException.ThrowIf(_disposed, this);
-        return _keyIndex.Identify(mesh, material);
     }
 
     /// <summary>The current handles for an asset's local mesh/material (Contenu-1) — how a snapshot's stored

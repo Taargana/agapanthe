@@ -150,6 +150,33 @@ public sealed class EngineIsHeadlessTests
         }
     }
 
+    /// <summary>Contenu-3a: <see cref="Agapanthe.App.SimSceneContext"/> is the "headless-safe" half of the scene
+    /// contract, but it lives in <c>Agapanthe.App</c> (which legitimately references Graphics/Rendering), so the
+    /// closure/allowlist checks above cannot guard it. This does: every member type it names — public AND internal,
+    /// properties + method params/returns — must be GPU/window-free, so a future commit cannot quietly add a
+    /// <c>GraphicsDevice</c> property and keep the split in name only.</summary>
+    [Fact]
+    public void SimSceneContext_NamesNoGpuOrWindowType()
+    {
+        var t = typeof(Agapanthe.App.SimSceneContext);
+        const BindingFlags flags = BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance
+            | BindingFlags.Static | BindingFlags.DeclaredOnly;
+
+        foreach (var prop in t.GetProperties(flags))
+        {
+            AssertAllowed(prop.PropertyType, $"SimSceneContext.{prop.Name}");
+        }
+
+        foreach (var method in t.GetMethods(flags))
+        {
+            AssertAllowed(method.ReturnType, $"SimSceneContext.{method.Name} return");
+            foreach (var p in method.GetParameters())
+            {
+                AssertAllowed(p.ParameterType, $"SimSceneContext.{method.Name} param '{p.Name}'");
+            }
+        }
+    }
+
     private static void AssertAllowed(Type type, string where)
     {
         var owner = type.Assembly.GetName().Name ?? string.Empty;

@@ -1,34 +1,23 @@
-using Agapanthe.Assets;
 using Agapanthe.Core;
-using Agapanthe.Engine;
 using Agapanthe.Engine.Render;
 using Agapanthe.Graphics;
 using Agapanthe.Rendering;
-using Agapanthe.World;
 
 namespace Agapanthe.App;
 
 /// <summary>
-/// The toolbox handed to <see cref="ISceneRecipe.Build"/>: the full GPU + simulation stack <see cref="AppHost"/>
-/// built, exactly what the pre-extraction <c>Program.cs</c> touched inline. Recipes are trusted first-party code.
+/// The <b>presentation</b> half of what <see cref="ISceneRecipe.Build"/> receives (Contenu-3a): the GPU device,
+/// the resource registry, the renderer, the camera + free-fly controller, the window and the per-frame render
+/// list. <c>null</c> when the recipe is built headless — a client recipe opens <c>Build</c> with a guard
+/// (<c>?? throw</c>). The sim-only half is <see cref="SimSceneContext"/>.
 /// </summary>
-public sealed class SceneContext
+public sealed class PresentationSceneContext
 {
     /// <summary>The GPU device — for <see cref="Registry"/> uploads.</summary>
     public required GraphicsDevice Device { get; init; }
 
     /// <summary>Owns the GPU resources; hands back GPU-free <c>ImportedEntitySpec</c>s the world spawns.</summary>
     public required ResourceRegistry Registry { get; init; }
-
-    /// <summary>Cooked content (Contenu-2): <c>Catalog.LoadModel(key)</c> → a decoded <c>ModelAsset</c> a recipe
-    /// then hands to <c>Registry.Load(Device, model, layout, key, origin)</c>. The runtime never parses glTF.</summary>
-    public required AssetCatalog Catalog { get; init; }
-
-    /// <summary>The entities.</summary>
-    public required GameWorld World { get; init; }
-
-    /// <summary>The frame assembly — register systems here (<c>Add(Stage, ISystem)</c> / <c>Add(IRenderSystem)</c>).</summary>
-    public required FrameOrchestrator Orchestrator { get; init; }
 
     /// <summary>The renderer — lights, environment, shadow distance, <c>MaterialSetLayout</c>.</summary>
     public required Renderer Renderer { get; init; }
@@ -46,10 +35,7 @@ public sealed class SceneContext
     /// <summary>The reused per-frame render list.</summary>
     public required RenderList RenderList { get; init; }
 
-    /// <summary>The raw process command line — the host does not parse it; a recipe may
-    /// (e.g. a model viewer picks the glTF).</summary>
-    public required string[] Args { get; init; }
-
-    /// <summary>The simulation half (input phase, tick schedule, <c>SimulationSettings</c>).</summary>
-    public SimulationHost Simulation => Orchestrator.Simulation;
+    /// <summary>The frame assembly — register <c>IRenderSystem</c>s here. Simulation systems go through
+    /// <see cref="SimSceneContext.AddSystem"/>.</summary>
+    public required FrameOrchestrator Orchestrator { get; init; }
 }

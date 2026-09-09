@@ -1,4 +1,5 @@
 using System.Buffers.Binary;
+using System.Diagnostics;
 using System.Numerics;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
@@ -9,14 +10,10 @@ using Arch.Core.Extensions;
 
 namespace Agapanthe.World;
 
-/// <summary>Identifies a drawable's <c>MeshRef</c> for a snapshot (Contenu-1): given the process-local handles, the
-/// stable <see cref="AssetKey"/> + local mesh/material indices. Supplied by the caller (it holds the render-side
-/// <c>ResourceRegistry</c>); <c>null</c> ⇒ every drawable serialises as <see cref="MeshRefKey.None"/>.</summary>
-public delegate MeshRefKey MeshRefIdentifier(MeshHandle mesh, MaterialHandle material);
-
-/// <summary>Resolves a snapshot's stored <c>MeshRef</c> identity back to live handles (Contenu-1). It <b>must
-/// throw</b> for a key/index it cannot resolve — the loader trusts the returned pair. <c>null</c> ⇒ every
-/// <c>MeshRef</c> loads with <see cref="MeshHandle.Invalid"/>.</summary>
+/// <summary>Resolves a snapshot's stored drawable identity (Contenu-3a: <c>AssetRef</c>) back to live handles for
+/// the <c>MeshRef</c> render cache. It <b>must throw</b> for a key/index it cannot resolve — the loader trusts the
+/// returned pair. <c>null</c> ⇒ every <c>MeshRef</c> loads with <see cref="MeshHandle.Invalid"/> (a headless /
+/// authoritative world that keeps only the <c>AssetRef</c>).</summary>
 public delegate (MeshHandle Mesh, MaterialHandle Material) MeshRefResolver(AssetKey key, int localMesh, int localMat);
 
 // VS-1 — World serialization (save/load snapshot). Lives in GameWorld — like Physics/Propagate/Collect — so it
@@ -51,8 +48,21 @@ public sealed partial class GameWorld
     //   keyTable: keyCount(4) >= 1, then keyCount × { byteLen(2) | UTF-8 bytes }
     //     entry 0 = AssetKey.None, written as byteLen 0; entries 1.. = distinct non-None keys, sorted ORDINAL.
     //   MeshRef (component index 5) is no longer a 16-byte blittable: it is keyIdx(4) | localMesh(4) | localMat(4).
+    //
+    // v4 (Contenu-3a) moves asset identity into the simulation. The drawable carries AssetRef (component index 12,
+    //   a MeshRefKey) as its STORED identity; MeshRef becomes a process-local render cache derived at load. So:
+    //   - AssetRef (index 12) is written as keyIdx(4) | localMesh(4) | localMat(4) — the shape v3 wrote at index 5.
+    //   - MeshRef (index 5) is no longer written at all (derived from AssetRef + the resolver, like InstanceSlot).
+    //   - Save takes no identifier delegate: the entity already holds its key (from ImportedEntitySpec.Identity).
+    //   A v3 file is upgraded IN PLACE on load: its index-5 bytes are read as the AssetRef identity.
     private static ReadOnlySpan<byte> SerializationMagic => "AGWD"u8;
-    private const uint SerializationVersion = 3;
+    private const uint SerializationVersion = 4;
+
+    // A v3 file predates AssetRef — 12 components; a v4 file has 13. Both are frozen consts: appending component
+    // #14 without a version bump must fail at the registry (the frozen-order test), not by rejecting every genuine
+    // v4 file at load. The static check below ties V4ComponentCount to the live registry so they cannot drift.
+    private const uint V3ComponentCount = 12;
+    private const uint V4ComponentCount = 13;
 
     // ORDINAL — culture-independent — so the key table's byte layout is stable across machines (Save(Load(x)) == x).
     private static readonly IComparer<AssetKey> KeyOrdinal =
@@ -65,7 +75,10 @@ public sealed partial class GameWorld
     // (version-bumped) reorder carries them along instead of drifting against a magic number.
     private static readonly int ParentIndex = IndexOfComponent(typeof(Parent));
     private static readonly int InstanceSlotIndex = IndexOfComponent(typeof(InstanceSlot));
+    // Contenu-3a: MeshRef (index 5) is no longer serialised (a derived render cache); AssetRef (index 12) is the
+    // stored identity, written in MeshRef's former 3-u32 shape.
     private static readonly int MeshRefIndex = IndexOfComponent(typeof(MeshRef));
+    private static readonly int AssetRefIndex = IndexOfComponent(typeof(AssetRef));
 
     private static int IndexOfComponent(Type t)
     {
@@ -92,14 +105,7 @@ public sealed partial class GameWorld
     /// written sorted by <see cref="GlobalId"/> and components in registry-index order, so the bytes are stable:
     /// two saves of the same world are identical, and <c>Save(Load(bytes)) == bytes</c>.
     /// </summary>
-    public void Save(Stream stream) => Save(stream, identify: null);
-
-    /// <inheritdoc cref="Save(Stream)"/>
-    /// <param name="identify">Contenu-1: maps a drawable's process-local handles to its stable
-    /// <see cref="MeshRefKey"/>. <c>null</c> ⇒ every <c>MeshRef</c> is written as <see cref="MeshRefKey.None"/>
-    /// (a headless world, or one with no real assets). A supplied delegate that is handed a handle it cannot
-    /// identify must throw — the failure surfaces here and no partial file is trusted.</param>
-    public void Save(Stream stream, MeshRefIdentifier? identify)
+    public void Save(Stream stream)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
         AssertOwnerThread();
@@ -126,19 +132,19 @@ public sealed partial class GameWorld
 
         var componentCount = ComponentRegistry.All.Count;
 
-        // Pass 1 (Contenu-1): identify every drawable's MeshRef, collect the distinct non-None AssetKeys.
-        var meshKeys = new MeshRefKey?[entities.Count];
+        // Pass 1 (Contenu-3a): read every drawable's stored AssetRef identity, collect the distinct non-None keys.
+        // No handle→key lookup any more — the entity already carries its key, so a headless Save just works.
+        var assetKeys = new MeshRefKey?[entities.Count];
         var distinctKeys = new SortedSet<AssetKey>(KeyOrdinal);
         for (var i = 0; i < entities.Count; i++)
         {
-            if (!entities[i].Entity.Has<MeshRef>())
+            if (!entities[i].Entity.Has<AssetRef>())
             {
                 continue;
             }
 
-            var mr = entities[i].Entity.Get<MeshRef>();
-            var k = identify is null ? MeshRefKey.None : identify(mr.Mesh, mr.Material);
-            meshKeys[i] = k;
+            var k = entities[i].Entity.Get<AssetRef>().Value;
+            assetKeys[i] = k;
             if (!k.IsNone)
             {
                 distinctKeys.Add(k.Key);
@@ -162,7 +168,14 @@ public sealed partial class GameWorld
         foreach (var key in distinctKeys)
         {
             var utf8 = Encoding.UTF8.GetBytes(key.Value!);
-            WriteU16(stream, checked((ushort)utf8.Length));
+            if (utf8.Length > ushort.MaxValue)
+            {
+                // Contenu-3a: keys now come from entity state, not a host delegate — surface an over-long key as the
+                // format's own exception, not a raw OverflowException.
+                throw new WorldSerializationException($"Asset key '{key}' is {utf8.Length} UTF-8 bytes; the key table entry length is a u16.");
+            }
+
+            WriteU16(stream, (ushort)utf8.Length);
             stream.Write(utf8);
             keyToIndex[key] = nextIndex++;
         }
@@ -173,11 +186,13 @@ public sealed partial class GameWorld
             var (id, entity) = entities[ei];
             WriteU64(stream, id);
 
-            // Presence mask over the registry order. InstanceSlot is never serialized (runtime state).
+            // Presence mask over the registry order. Never serialized: InstanceSlot (runtime state) and MeshRef
+            // (v4 — the render cache, derived from AssetRef on load). AssetRef (index 12) IS written, in MeshRef's
+            // former shape.
             uint mask = 0;
             for (var index = 0; index < componentCount; index++)
             {
-                if (index != InstanceSlotIndex && EntityHasComponent(entity, index))
+                if (index != InstanceSlotIndex && index != MeshRefIndex && EntityHasComponent(entity, index))
                 {
                     mask |= 1u << index;
                 }
@@ -192,9 +207,9 @@ public sealed partial class GameWorld
                     continue;
                 }
 
-                if (index == MeshRefIndex)
+                if (index == AssetRefIndex)
                 {
-                    WriteMeshRef(stream, meshKeys[ei] ?? MeshRefKey.None, keyToIndex);
+                    WriteAssetRef(stream, assetKeys[ei] ?? MeshRefKey.None, keyToIndex);
                 }
                 else
                 {
@@ -204,10 +219,11 @@ public sealed partial class GameWorld
         }
     }
 
-    // Contenu-1: MeshRef is no longer a blittable — three u32 (key-table index, local mesh, local material).
-    private static void WriteMeshRef(Stream s, in MeshRefKey k, IReadOnlyDictionary<AssetKey, uint> keyToIndex)
+    // Contenu-3a: the drawable's identity on disk — three u32 (key-table index, local mesh, local material). Same
+    // shape v3 wrote at the MeshRef slot (index 5); v4 writes it at the AssetRef slot (index 12).
+    private static void WriteAssetRef(Stream s, in MeshRefKey k, IReadOnlyDictionary<AssetKey, uint> keyToIndex)
     {
-        // A None key writes (0, 0, 0) — canonical: ReadMeshRef ignores the local indices for key 0, so writing
+        // A None key writes (0, 0, 0) — canonical: the reader ignores the local indices for key 0, so writing
         // anything else would make two logically-identical worlds serialise to different bytes.
         if (k.IsNone)
         {
@@ -222,7 +238,9 @@ public sealed partial class GameWorld
         WriteU32(s, (uint)k.LocalMat);
     }
 
-    private static MeshRef ReadMeshRef(Stream s, AssetKey[] keyTable, MeshRefResolver? resolve)
+    // Reads the 3-u32 drawable identity and returns BOTH the stored AssetRef and its derived MeshRef render cache.
+    // Called for the AssetRef slot on a v4 file, and for the MeshRef slot on a v3 file (in-place upgrade).
+    private static (AssetRef Asset, MeshRef Mesh) ReadDrawableIdentity(Stream s, AssetKey[] keyTable, MeshRefResolver? resolve)
     {
         var keyIdx = ReadU32(s);
         var localMesh = ReadU32(s);
@@ -230,16 +248,24 @@ public sealed partial class GameWorld
 
         if (keyIdx >= (uint)keyTable.Length)
         {
-            throw new WorldSerializationException($"MeshRef key index {keyIdx} is beyond the {keyTable.Length}-entry key table.");
+            throw new WorldSerializationException($"Asset key index {keyIdx} is beyond the {keyTable.Length}-entry key table.");
         }
 
-        if (keyIdx == 0 || resolve is null)
+        var asset = new AssetRef
         {
-            return new MeshRef { Mesh = MeshHandle.Invalid, Material = MaterialHandle.Invalid };
-        }
+            Value = keyIdx == 0 ? MeshRefKey.None : new MeshRefKey(keyTable[keyIdx], (int)localMesh, (int)localMat),
+        };
 
-        var (mesh, material) = resolve(keyTable[keyIdx], (int)localMesh, (int)localMat);
-        return new MeshRef { Mesh = mesh, Material = material };
+        // MeshRef is the process-local render cache: Invalid when there is no resolver (a headless / authoritative
+        // world keeps only the AssetRef), else re-resolved through the host.
+        var mesh = keyIdx == 0 || resolve is null
+            ? new MeshRef { Mesh = MeshHandle.Invalid, Material = MaterialHandle.Invalid }
+            : ToMeshRef(resolve(keyTable[keyIdx], (int)localMesh, (int)localMat));
+
+        return (asset, mesh);
+
+        static MeshRef ToMeshRef((MeshHandle Mesh, MaterialHandle Material) h)
+            => new() { Mesh = h.Mesh, Material = h.Material };
     }
 
     /// <summary>
@@ -310,7 +336,7 @@ public sealed partial class GameWorld
         }
 
         var version = ReadU32(stream);
-        if (version != SerializationVersion)
+        if (version is not (3 or 4))
         {
             throw new WorldSerializationException(version switch
             {
@@ -319,15 +345,21 @@ public sealed partial class GameWorld
                 2 => "Snapshot is format v2, which predates stable asset identity (Contenu-1): its MeshRefs are raw " +
                      "process-local handles with no key table. There is no automatic upgrade — resave it with this " +
                      "build first, from wherever it was last loadable.",
-                _ => $"Unsupported snapshot version {version} (this build reads version {SerializationVersion}).",
+                _ => $"Unsupported snapshot version {version} (this build reads versions 3 and 4).",
             });
         }
 
+        // v4 (Contenu-3a) appends AssetRef → componentCount 13; a v3 file predates it → 12. The v3 body is read
+        // as-is except its MeshRef-slot bytes are materialised as the AssetRef identity (in-place upgrade).
+        var isV3 = version == 3;
+        Debug.Assert(V4ComponentCount == (uint)ComponentRegistry.All.Count,
+            "V4ComponentCount is out of step with ComponentRegistry.All — bump SerializationVersion.");
+        var expectedComponentCount = isV3 ? V3ComponentCount : V4ComponentCount;
         var componentCount = ReadU32(stream);
-        if (componentCount != (uint)ComponentRegistry.All.Count)
+        if (componentCount != expectedComponentCount)
         {
             throw new WorldSerializationException(
-                $"Snapshot has {componentCount} components, this build has {ComponentRegistry.All.Count} " +
+                $"Snapshot (v{version}) has {componentCount} components, expected {expectedComponentCount} " +
                 "(the component set changed without a version bump).");
         }
 
@@ -447,6 +479,10 @@ public sealed partial class GameWorld
 
             var entity = _world.Create(new GlobalId { Value = globalId });
 
+            // The drawable-identity slot: index 12 (AssetRef) on v4, index 5 (MeshRef's former slot) on a v3 file.
+            var identitySlot = isV3 ? MeshRefIndex : AssetRefIndex;
+            var hadIdentity = (mask & (1u << identitySlot)) != 0;
+
             for (var index = 0; index < componentCount; index++)
             {
                 if ((mask & (1u << index)) == 0)
@@ -458,9 +494,11 @@ public sealed partial class GameWorld
                 {
                     parentLinks.Add((globalId, ReadU64(stream))); // stored as the parent's GlobalId
                 }
-                else if (index == MeshRefIndex)
+                else if (index == identitySlot)
                 {
-                    entity.Add(ReadMeshRef(stream, keyTable, resolve)); // (keyIdx, localMesh, localMat), re-resolved
+                    var (asset, mesh) = ReadDrawableIdentity(stream, keyTable, resolve);
+                    entity.Add(asset);  // the stored identity (Contenu-3a)
+                    entity.Add(mesh);   // the derived render cache (Invalid without a resolver)
                 }
                 else if (index != InstanceSlotIndex) // InstanceSlot is never in the stream, but never dispatch it either
                 {
@@ -469,11 +507,10 @@ public sealed partial class GameWorld
             }
 
             // InstanceSlot is runtime state (excluded from the stream), re-added at the sentinel so the next rebuild
-            // reassigns it. Invariant (audit 🟡): InstanceSlot only ever coexists with MeshRef (every drawable/body
-            // carries both, no node carries either), so keying the re-add on MeshRef reconstructs the exact original
-            // archetype. A future entity carrying one without the other would round-trip to a different archetype —
-            // revisit this coupling if InstanceSlot's usage ever widens beyond drawables.
-            if ((mask & (1u << MeshRefIndex)) != 0)
+            // reassigns it. Invariant (audit 🟡): InstanceSlot only ever coexists with a drawable identity (every
+            // drawable/body carries AssetRef + MeshRef + InstanceSlot, no node carries any), so keying the re-add on
+            // the identity slot reconstructs the exact original archetype.
+            if (hadIdentity)
             {
                 entity.Add(new InstanceSlot { Value = -1 });
             }
@@ -512,33 +549,32 @@ public sealed partial class GameWorld
 
         // Every archetype, so every component type's Add<T> is exercised at load: a plain drawable, a non-caster
         // (NoShadowCast), a physics body (Velocity + RigidBody), and a parented hierarchy (LocalTransform + Parent).
+        // Contenu-3a: each drawable spec carries a non-None Identity so the v4 key-table path is exercised under the
+        // ILC — UTF-8 encode, the SortedSet<AssetKey> comparer, the AssetKey ctor. Two distinct keys so the comparer
+        // actually orders something.
         SpawnImported(new ImportedEntitySpec(
             new MeshHandle(1, 2), new MaterialHandle(3, 4), new Double3(10, 20, 30), Matrix4x4.Identity,
-            new Vector3(1, 2, 3), 1.5f, 1));
+            new Vector3(1, 2, 3), 1.5f, 1, new MeshRefKey(new AssetKey("aot/probe-b"), 1, 0)));
         SpawnImported(
             new ImportedEntitySpec(new MeshHandle(2, 2), new MaterialHandle(3, 4), new Double3(-40, 0, 0),
-                Matrix4x4.Identity, Vector3.Zero, 1f, 2),
+                Matrix4x4.Identity, Vector3.Zero, 1f, 2, new MeshRefKey(new AssetKey("aot/probe-a"), 2, 0)),
             castsShadow: false);
         SpawnBody(
             new ImportedEntitySpec(new MeshHandle(3, 2), new MaterialHandle(3, 4), new Double3(5, 5, 5),
-                Matrix4x4.Identity, Vector3.Zero, 1f, 3),
+                Matrix4x4.Identity, Vector3.Zero, 1f, 3, new MeshRefKey(new AssetKey("aot/probe-b"), 3, 0)),
             new Vector3(0.5f, 0f, -0.5f), inverseMass: 1f, restitution: 0.2f, radius: 1f);
         var root = Spawn(new Double3(100, 0, 0), Quaternion.Identity, 2f);
         Spawn(new Double3(0, 10, 0), Quaternion.Identity, 1f, root);
         FlushStructuralChanges();
 
-        // Contenu-1: exercise the v3 key-table path under the ILC too — UTF-8 encode/decode, the SortedSet<AssetKey>
-        // comparer, the AssetKey ctor, and the resolve delegate invoke are none of them reached by a null-delegate
-        // Save/Load. The identifier folds the local mesh index into MeshRefKey so the resolver can rebuild a handle
-        // the identifier maps back to the same key — keeping the re-save byte-identical.
-        static MeshRefKey Identify(MeshHandle mesh, MaterialHandle material) => new(new AssetKey("aot/probe"), mesh.Index, 0);
+        // The resolve delegate invoke + strict UTF-8 decode are only reached with a resolver on Load.
         static (MeshHandle, MaterialHandle) Resolve(AssetKey key, int localMesh, int localMat)
             => (new MeshHandle(localMesh, 2), new MaterialHandle(3, 4));
 
         byte[] first;
         using (var ms = new MemoryStream())
         {
-            Save(ms, Identify);
+            Save(ms);
             first = ms.ToArray();
         }
 
@@ -551,7 +587,7 @@ public sealed partial class GameWorld
         byte[] second;
         using (var ms = new MemoryStream())
         {
-            restored.Save(ms, Identify);
+            restored.Save(ms);
             second = ms.ToArray();
         }
 
@@ -565,7 +601,7 @@ public sealed partial class GameWorld
     }
 
     // --- Per-component dispatch (single source of truth = ComponentRegistry.All order) ----------------------------
-    // Three switches over the SAME 12 concrete types, in registry-index order. Concrete instantiations root Has<T>/
+    // Three switches over the SAME 13 concrete types, in registry-index order. Concrete instantiations root Has<T>/
     // Get<T>/Add<T> under the ILC (P2-M0). A test guards that this order matches ComponentRegistry.All (append-only,
     // else bump SerializationVersion): reordering the registry without updating the format would silently
     // reinterpret old snapshots.
@@ -584,6 +620,7 @@ public sealed partial class GameWorld
         9 => e.Has<RigidBody>(),
         10 => e.Has<NoShadowCast>(),
         11 => e.Has<InstanceSlot>(),
+        12 => e.Has<AssetRef>(),
         _ => throw new WorldSerializationException($"No component at registry index {index}."),
     };
 
@@ -596,13 +633,14 @@ public sealed partial class GameWorld
             case 2: WriteU64(s, e.Get<Parent>().Value.Get<GlobalId>().Value); break; // parent as GlobalId, not Entity
             case 3: WriteBlittable(s, e.Get<WorldTransform>()); break;
             case 4: WriteBlittable(s, e.Get<WorldPosition>()); break;
-            // index 5 (MeshRef) is written by WriteMeshRef (key table index + local indices), never here.
+            // index 5 (MeshRef) is a derived render cache in v4 — never serialized (excluded from the mask).
             case 6: WriteBlittable(s, e.Get<Bounds>()); break;
             case 7: WriteBlittable(s, e.Get<RenderOrder>()); break;
             case 8: WriteBlittable(s, e.Get<Velocity>()); break;
             case 9: WriteBlittable(s, e.Get<RigidBody>()); break;
             case 10: WriteBlittable(s, e.Get<NoShadowCast>()); break;
             // index 11 (InstanceSlot) is never written (excluded by the caller).
+            // index 12 (AssetRef) is written by WriteAssetRef (key table index + local indices), never here.
             default: throw new WorldSerializationException($"No serializer for registry index {index}.");
         }
     }
@@ -616,13 +654,15 @@ public sealed partial class GameWorld
             // index 2 (Parent) is handled by the caller (recorded for pass 2), never here.
             case 3: e.Add(ReadBlittable<WorldTransform>(s)); break;
             case 4: e.Add(ReadBlittable<WorldPosition>(s)); break;
-            // index 5 (MeshRef) is handled by the caller (ReadMeshRef, re-resolved through the key table), never here.
+            // index 5 (MeshRef): v4 never has it in the stream; a v3 file's index-5 bytes are read by the caller
+            // via ReadDrawableIdentity (the in-place upgrade). Never dispatched here.
             case 6: e.Add(ReadBlittable<Bounds>(s)); break;
             case 7: e.Add(ReadBlittable<RenderOrder>(s)); break;
             case 8: e.Add(ReadBlittable<Velocity>(s)); break;
             case 9: e.Add(ReadBlittable<RigidBody>(s)); break;
             case 10: e.Add(ReadBlittable<NoShadowCast>(s)); break;
             // index 11 (InstanceSlot) is never in the stream (excluded by the caller).
+            // index 12 (AssetRef) is handled by the caller (ReadDrawableIdentity — AssetRef + derived MeshRef), never here.
             default: throw new WorldSerializationException($"No deserializer for registry index {index}.");
         }
     }

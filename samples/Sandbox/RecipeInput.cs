@@ -20,11 +20,11 @@ internal static class RecipeInput
     /// <summary>Drives <see cref="SceneContext.Controller"/> from the window's per-frame <c>Updated</c> event — the
     /// one place <c>MouseDelta</c> is valid (it is zeroed right after <c>Updated</c>). 0-alloc: <see cref="CameraInput"/>
     /// is a <c>readonly struct</c> passed <c>in</c>.</summary>
-    public static void WireFreeFly(SceneContext ctx)
+    public static void WireFreeFly(SimSceneContext sim, PresentationSceneContext p)
     {
-        var window = ctx.Window;
-        var camera = ctx.Camera;
-        var controller = ctx.Controller;
+        var window = p.Window;
+        var camera = p.Camera;
+        var controller = p.Controller;
         var inputDebug = Environment.GetEnvironmentVariable("AGAPANTHE_INPUT_DEBUG") is { Length: > 0 };
 
         window.Updated += dt =>
@@ -68,15 +68,15 @@ internal static class RecipeInput
     /// <summary>Wires the <c>B</c> key to enqueue a probe-spawn command stamped for the next tick, carrying
     /// <c>camera.Position</c> — client context the declarative InputMap cannot supply. Drained inside Tick on the
     /// sim owner thread, then routed by the recipe's <c>ApplyCommand</c>.</summary>
-    public static void WireProbeKey(SceneContext ctx)
+    public static void WireProbeKey(SimSceneContext sim, PresentationSceneContext p)
     {
-        var sim = ctx.Simulation;
-        var camera = ctx.Camera;
-        ctx.Window.KeyPressed += key =>
+        var host = sim.Simulation;
+        var camera = p.Camera;
+        p.Window.KeyPressed += key =>
         {
             if (key == Key.B)
             {
-                sim.Commands.Enqueue(new SimCommand(sim.TickIndex, SpawnProbeCommandKind, default, camera.Position, 0f, 0u));
+                host.Commands.Enqueue(new SimCommand(host.TickIndex, SpawnProbeCommandKind, default, camera.Position, 0f, 0u));
             }
         };
     }

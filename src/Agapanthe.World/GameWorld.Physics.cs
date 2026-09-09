@@ -98,6 +98,7 @@ public sealed partial class GameWorld
             new WorldTransform { Value = spec.RotationScale },
             new WorldPosition { Value = spec.Position },
             new MeshRef { Mesh = spec.Mesh, Material = spec.Material },
+            new AssetRef { Value = spec.Identity }, // Contenu-3a — stored identity (MeshRef is the render cache)
             new Bounds { Center = spec.BoundsCenter, Radius = spec.BoundsRadius },
             new RenderOrder { Value = spec.Order },
             new Velocity { Linear = velocity },

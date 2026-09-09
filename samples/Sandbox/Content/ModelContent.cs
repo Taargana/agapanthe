@@ -375,7 +375,7 @@ internal static class ModelContent
                 {
                     world.SpawnImported(new ImportedEntitySpec(
                         s.Mesh, s.Material, s.Position + offset, s.RotationScale,
-                        s.BoundsCenter, s.BoundsRadius, orderBase + s.Order));
+                        s.BoundsCenter, s.BoundsRadius, orderBase + s.Order, s.Identity)); // Contenu-3a: keep asset identity
                 }
             }
         }
@@ -419,7 +419,7 @@ internal static class ModelContent
                 world.SpawnBody(
                     new ImportedEntitySpec(
                         s.Mesh, s.Material, s.Position + offset, s.RotationScale,
-                        s.BoundsCenter, s.BoundsRadius, orderBase + s.Order),
+                        s.BoundsCenter, s.BoundsRadius, orderBase + s.Order, s.Identity), // Contenu-3a: keep asset identity
                     velocity: Vector3.Zero, inverseMass: 1f, restitution: 0.3f, radius: bodyRadius);
             }
         }

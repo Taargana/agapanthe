@@ -422,3 +422,44 @@ resumes correctly.
 | Restore guard | `SimSceneContext` pending-snapshot + one host `ApplyPendingRestore` | leave `PlanetStage.RestoreIfRequested` for 3b |
 | `ImportedEntitySpec` identity | one trailing ctor param `= default` | separate parallel array / new `SpawnImported` overload (touches every call site) |
 | Contenu-3 shape | 3 sub-milestones, human gate between each | one milestone (audit spanning too many heterogeneous subsystems — the pattern MP-0a explicitly rejected) · 2 sub-milestones |
+
+---
+
+## 10. Execution outcome (2026-09-09, session 33)
+
+Built per `.absolute-work/board.md` (Contenu-3a) — W0 spike + 4 waves + mandatory tail + double audit.
+
+**W0 spike — D1 holds.** `AssetRef` wired as a real managed component #13; the AOT probe passed
+(`IsDynamicCodeSupported=False`, count 13, `AotRootingSmoke` iterated 13, `AotSerializationSmoke`
+byte-identical). No fallback to a blittable id needed. The v3 fixture (`world-v3.save`) was captured
+before the count bump.
+
+**Delivered as specced.** `AssetRef` (managed struct wrapping `MeshRefKey`), `ImportedEntitySpec.Identity`
+(ctor param `= default`), snapshot v4 (serializes `AssetRef`, drops `MeshRef`, deletes
+`MeshRefIdentifier` + `ModelKeyIndex.Identify`, in-place v3→v4 upgrade), `SceneContext` → `SimSceneContext`
++ `PresentationSceneContext`, `RequestRestore`/`ApplyPendingRestore`.
+
+**Gates.** 696 tests, 0 warning; `model` `9030f6a6…` / `planet-drop` HDR `bc8440ab…` unchanged (a `git
+stash` A/B proved the rendering no-op — the spec's `12638edd`/`03421357` were stale cross-env values,
+re-baselined); `HeadlessSim` re-pinned JIT == NativeAOT with real keys (default
+`6a13dd54c1db32d35a15332bff0395e7` / 1857 B, `--drive` `f6053226f8c13b55589b29be103a8e66` / 231 B);
+`AotComponentProbe` count 13 PASS; Sandbox + HeadlessSim JIT == NativeAOT; 0 leak / 0 validation.
+
+**Double audit.** `csharp-lowlevel` 3.9/5, `engine-architect` 4.0/5 — both PASS-with-concerns.
+
+**🔴 (both audits, fixed): `LandingChallengeSystem` seeded against an empty world on resume.** D7 moved the
+restore from inside `Build` to after it; the system's constructor seeded `_shotsIssued` from
+`QuerySurfaceContacts`. On an `AGAPANTHE_LOAD` resume the world was still empty → full fresh shot budget,
+un-latched Won/Lost. Fixed: lazy seed on the first `Execute` (and in `TryShoot` for a same-tick B press) —
+order-independent. Added `ApplyPendingRestore_PopulatesTheWorld_RequestAlone_DoesNot` to pin the ordering.
+
+**Deviation from the spec, deliberate.** Two additions the audits demanded that were not in the spec:
+(1) `HeadlessSim`'s specs carry a real `AssetKey` so the shipped headless binary is the executable proof of
+"a GPU-less process emits reconstructible identity"; (2) `EngineIsHeadlessTests.SimSceneContext_NamesNoGpuOrWindowType`
+— a reflective structural gate so "headless-safe" is a tested property, not a convention.
+
+**Deferred (board §Deferred + `BACKLOG.md`).** Managed `AssetRef[]` GC mark cost unmeasured (fallback:
+D1-alt blittable id); the rule "nothing in `Build` reads world content" to be written into `ISceneRecipe`;
+the 5 field-by-field spec copies to delete once `SceneLoader` is the single materialisation path (3b);
+`Agapanthe.App` → `App` + `App.Client` before `RunDedicatedServer`; non-model asset identity still outside
+the snapshot.

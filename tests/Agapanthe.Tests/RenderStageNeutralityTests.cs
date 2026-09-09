@@ -58,7 +58,8 @@ public sealed class RenderStageNeutralityTests
         {
             var spec = new ImportedEntitySpec(
                 new MeshHandle(0, 1), new MaterialHandle(0, 1),
-                new Double3(i * 0.8, 3 + (i * 2.1), 0), Matrix4x4.Identity, Vector3.Zero, 1f, (uint)i);
+                new Double3(i * 0.8, 3 + (i * 2.1), 0), Matrix4x4.Identity, Vector3.Zero, 1f, (uint)i,
+                new MeshRefKey(FixtureKey, 0, 0)); // Contenu-3a: carried as AssetRef
             world.SpawnBody(in spec, new Vector3(0.1f * i, 0f, 0f), inverseMass: 1f, restitution: 0.4f, radius: 1f);
         }
 
@@ -69,14 +70,13 @@ public sealed class RenderStageNeutralityTests
         world.Spawn(new Double3(0, 1, 0), Quaternion.Identity, 2f, mid);
 
         using var stream = new MemoryStream();
-        world.Save(stream, Identify); // Save flushes the structural queue first
+        world.Save(stream); // Save flushes the structural queue first
         return stream.ToArray();
     }
 
-    // v3 (Contenu-1): every body shares one (mesh, material) pair, so one key re-resolves them all — the Render
-    // stage needs live handles to build a sort key.
+    // Contenu-3a: every body carries FixtureKey as its AssetRef, so one key re-resolves them all — the Render
+    // stage needs live MeshRef handles to build a sort key.
     private static readonly AssetKey FixtureKey = new("test/body");
-    private static MeshRefKey Identify(MeshHandle mesh, MaterialHandle material) => new(FixtureKey, 0, 0);
     private static (MeshHandle, MaterialHandle) Resolve(AssetKey key, int localMesh, int localMat)
         => (new MeshHandle(0, 1), new MaterialHandle(0, 1));
 

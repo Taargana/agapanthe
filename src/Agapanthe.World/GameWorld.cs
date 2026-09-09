@@ -253,6 +253,7 @@ public sealed partial class GameWorld : IDisposable
             new WorldTransform { Value = spec.RotationScale },
             new WorldPosition { Value = spec.Position },
             new MeshRef { Mesh = spec.Mesh, Material = spec.Material },
+            new AssetRef { Value = spec.Identity }, // Contenu-3a — the stored identity; MeshRef is its render cache
             new Bounds { Center = spec.BoundsCenter, Radius = spec.BoundsRadius },
             new RenderOrder { Value = spec.Order },
             new InstanceSlot { Value = -1 }); // -1 = unassigned; the next structural rebuild sets it
@@ -523,12 +524,13 @@ public sealed partial class GameWorld : IDisposable
         ObjectDisposedException.ThrowIf(_disposed, this);
         AssertOwnerThread();
 
-        // Imported-shape entities (GlobalId, WorldTransform, MeshRef, Bounds, RenderOrder).
+        // Imported-shape entities (GlobalId, WorldTransform, MeshRef, AssetRef, Bounds, RenderOrder). A non-None
+        // identity so the managed AssetRef[] chunk array carries a real (non-null) string reference under the ILC.
         for (var i = 0; i < 8; i++)
         {
             SpawnImported(new ImportedEntitySpec(
                 new MeshHandle(i, 1), new MaterialHandle(0, 1), new Double3(i, 0, 0), Matrix4x4.Identity,
-                Vector3.Zero, 1f, (uint)i));
+                Vector3.Zero, 1f, (uint)i, new MeshRefKey(new AssetKey("aot/root"), i, 0)));
         }
 
         // Hierarchical-shape entities (LocalTransform, Parent) — the two components SpawnImported does not touch.
@@ -558,10 +560,17 @@ public sealed partial class GameWorld : IDisposable
         // query at the end still counts them.
         SpawnDeferred(new ImportedEntitySpec(
             new MeshHandle(0, 1), new MaterialHandle(0, 1), new Double3(500, 0, 0), Matrix4x4.Identity,
-            Vector3.Zero, 1f, 100));
+            Vector3.Zero, 1f, 100, new MeshRefKey(new AssetKey("aot/root"), 0, 0)));
         SpawnDeferred(new ImportedEntitySpec(
             new MeshHandle(1, 1), new MaterialHandle(0, 1), new Double3(501, 0, 0), Matrix4x4.Identity,
-            Vector3.Zero, 1f, 101));
+            Vector3.Zero, 1f, 101, new MeshRefKey(new AssetKey("aot/root"), 1, 0)));
+        // Spawn a THIRD keyed drawable and despawn it: forces Arch's swap-backfill copy over the managed AssetRef[]
+        // chunk array — the one managed-storage path a Spawn-node despawn (LocalTransform only) never exercises.
+        var doomed = SpawnDeferred(new ImportedEntitySpec(
+            new MeshHandle(2, 1), new MaterialHandle(0, 1), new Double3(502, 0, 0), Matrix4x4.Identity,
+            Vector3.Zero, 1f, 102, new MeshRefKey(new AssetKey("aot/root"), 2, 0)));
+        FlushStructuralChanges();
+        Despawn(doomed);
         FlushStructuralChanges();
 
         // Hierarchy + the M2 systems, so the probe proves the exact chunk-iteration / entity-walk paths W2 uses
@@ -1112,6 +1121,36 @@ public sealed partial class GameWorld : IDisposable
 
         var mr = entity.Get<MeshRef>();
         return (mr.Mesh, mr.Material);
+    }
+
+    /// <summary>Contenu-3a: the drawable's stored <see cref="Agapanthe.Core.MeshRefKey"/> asset identity, or null
+    /// if the entity is dead or carries no <c>AssetRef</c>. Lets a test assert the identity survives a structural
+    /// move and a snapshot round-trip.</summary>
+    internal MeshRefKey? AssetRefForTest(ulong globalId)
+        => _live.TryGetValue(globalId, out var entity) && entity.Has<AssetRef>() ? entity.Get<AssetRef>().Value : null;
+
+    /// <summary>Contenu-3a (audit 🟠): count of drawables that have a <b>resolved</b> <c>MeshRef</c> but a
+    /// <c>None</c> <c>AssetRef</c> — the silent-failure class of a by-hand <c>ImportedEntitySpec</c> copy that
+    /// dropped <c>.Identity</c> (such an entity renders now but serialises as <c>AssetKey.None</c>). The host runs
+    /// this after <c>Build</c> under <c>[Conditional("DEBUG")]</c> and warns. Zero in a correct build.</summary>
+    public int DrawablesMissingIdentity()
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        var count = 0;
+        foreach (ref var chunk in _world.Query(new QueryDescription().WithAll<MeshRef, AssetRef>()))
+        {
+            var meshes = chunk.GetSpan<MeshRef>();
+            var assets = chunk.GetSpan<AssetRef>();
+            for (var i = 0; i < chunk.Count; i++)
+            {
+                if (meshes[i].Mesh.IsValid && assets[i].Value.IsNone)
+                {
+                    count++;
+                }
+            }
+        }
+
+        return count;
     }
 
     public void Dispose()

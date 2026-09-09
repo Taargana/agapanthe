@@ -164,8 +164,11 @@ return 0;
 // with no GPU, and — pinned by a test against a fixed MD5 — byte-identically JIT and NativeAOT.
 static int RunDrive(GameWorld world, int ticks, string? savePath)
 {
+    // Contenu-3a: a real AssetKey identity — this headless binary is the shipped proof that a GPU-less process
+    // emits a snapshot with genuine asset identity (not AssetKey.None) that a client could reconstruct.
     var spec = new ImportedEntitySpec(
-        new MeshHandle(0, 1), new MaterialHandle(0, 1), Double3.Zero, Matrix4x4.Identity, Vector3.Zero, 1f, 0u);
+        new MeshHandle(0, 1), new MaterialHandle(0, 1), Double3.Zero, Matrix4x4.Identity, Vector3.Zero, 1f, 0u,
+        new MeshRefKey(new AssetKey("headless/drive-body"), 0, 0));
     var body = world.SpawnBody(in spec, Vector3.Zero, inverseMass: 1f, restitution: 0f, radius: 1f);
     world.FlushStructuralChanges();
 
@@ -245,7 +248,8 @@ static void BuildScene(GameWorld world, int bodies)
     {
         var spec = new ImportedEntitySpec(
             new MeshHandle(0, 1), new MaterialHandle(0, 1),
-            new Double3(i * 0.9, 4 + (i * 1.7), 0), Matrix4x4.Identity, Vector3.Zero, 1f, (uint)i);
+            new Double3(i * 0.9, 4 + (i * 1.7), 0), Matrix4x4.Identity, Vector3.Zero, 1f, (uint)i,
+            new MeshRefKey(new AssetKey("headless/body"), 0, 0)); // Contenu-3a: genuine identity in the headless snapshot
         world.SpawnBody(in spec, new Vector3(0.05f * i, 0f, 0f), inverseMass: 1f, restitution: 0.4f, radius: 1f);
     }
 

@@ -21,13 +21,11 @@ public sealed class WorldSerializationTests
     private static readonly AssetKey DrawKey = new("test/drawable");
 
     private static ImportedEntitySpec Drawable(Double3 position, uint order)
-        => new(DrawMesh, DrawMaterial, position, Matrix4x4.Identity, new Vector3(0.1f, 0.2f, 0.3f), 2.5f, order);
+        => new(DrawMesh, DrawMaterial, position, Matrix4x4.Identity, new Vector3(0.1f, 0.2f, 0.3f), 2.5f, order,
+            new MeshRefKey(DrawKey, 0, 0)); // Contenu-3a: the entity carries this as its AssetRef
 
-    // v3 (Contenu-1): a save that keeps its MeshRef handles resolvable needs an identifier + a resolver. Every
-    // drawable here shares one (mesh, material) pair, so one key round-trips them all.
-    private static MeshRefKey IdentifyDrawable(MeshHandle mesh, MaterialHandle material)
-        => new(DrawKey, 0, 0);
-
+    // Contenu-3a: the drawables all carry DrawKey as their AssetRef, so Save emits it with no delegate; the
+    // resolver rebuilds the MeshRef render cache on Load.
     private static (MeshHandle, MaterialHandle) ResolveDrawable(AssetKey key, int localMesh, int localMat)
         => (DrawMesh, DrawMaterial);
 
@@ -115,7 +113,7 @@ public sealed class WorldSerializationTests
         original.CollectRenderLists(originalRender, new SceneCandidateSet(), ViewAt(Double3.Zero));
 
         using var saved = new MemoryStream();
-        original.Save(saved, IdentifyDrawable);
+        original.Save(saved);
         using var restored = new GameWorld();
         restored.Load(new MemoryStream(saved.ToArray()), SnapshotAllocatorPolicy.AdoptFromHeader, ResolveDrawable);
         var restoredRender = new RenderList();

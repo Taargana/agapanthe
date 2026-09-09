@@ -45,7 +45,8 @@ internal sealed class ProbeDropSystem : ISystem
         var spread = _radius * 2.5f * MathF.Sqrt((_dropped % 8) + 0.5f);
         var pos = _centre + new Double3(cos * spread, 0f, sin * spread);
         var spec = new ImportedEntitySpec(
-            _spec.Mesh, _spec.Material, pos, _spec.RotationScale, _spec.BoundsCenter, _spec.BoundsRadius, _spec.Order);
+            _spec.Mesh, _spec.Material, pos, _spec.RotationScale, _spec.BoundsCenter, _spec.BoundsRadius, _spec.Order,
+            _spec.Identity); // Contenu-3a: keep asset identity
         _world.SpawnBodyDeferred(in spec, Vector3.Zero, inverseMass: 1f, restitution: 0.4f, radius: _radius);
         _dropped++;
     }

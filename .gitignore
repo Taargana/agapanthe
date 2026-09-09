@@ -19,3 +19,7 @@ TestResults/
 .agents/skills/
 .claude/skills/
 skills-lock.json
+
+# stray test snapshots
+*.save
+!tests/**/*.save

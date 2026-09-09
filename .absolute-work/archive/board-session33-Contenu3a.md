@@ -1,10 +1,6 @@
 # Absolute Work Board — Contenu-3a : sim-side asset identity + snapshot v4 + SceneContext split
 
-**Status**: `completed` 2026-09-09 — all 5 waves + tail + double audit (`csharp-lowlevel` 3.9/5,
-`engine-architect` 4.0/5, both PASS-with-concerns) + 1 🔴 fixed + 10/12 findings applied.
-`dotnet build` 0 warning · `dotnet test` **696 pass / 0 skip** · Sandbox + HeadlessSim + probe
-JIT == NativeAOT · captures unchanged · 0 leak · 0 validation. **Human visual verdict: PASS**
-(2026-09-09). Archived: `.absolute-work/archive/board-session33-Contenu3a.md`.
+**Status**: `executing` — Wave 4: AW-023 double audit done + findings applied, AW-024 converge
 **Spec**: `docs/plans/2026-09-09-content-3a-sim-asset-identity-design.md` (APPROVED 4.55/5, scored review 3.2 → 4.55)
 **Session**: 33
 **Created**: 2026-09-09

@@ -31,6 +31,18 @@ public sealed class HostOptions
     /// <summary><c>AGAPANTHE_SAVE</c> — snapshot the fully-built world to this path before the first tick.</summary>
     public string? SavePath { get; init; }
 
+    /// <summary><c>AGAPANTHE_LOAD</c> — a snapshot a recipe may request restoring (via
+    /// <see cref="SimSceneContext.RequestRestore"/>); the host applies it after <c>Build</c>. Contenu-3a lifted
+    /// this to a typed option so the restore guard-rail has it; other per-scene tuning env vars move to the
+    /// declarative scene format in Contenu-3c.
+    /// <para>
+    /// <b>Note:</b> a scene's <see cref="ISceneRecipe.Matches"/> does not see <see cref="HostOptions"/>, so a
+    /// <i>programmatic</i> <c>LoadPath</c> (as opposed to the env var) does not influence default-scene selection —
+    /// a recipe that claims the default scene "when a load is requested" still reads the environment directly.
+    /// Threading an enriched token is deferred to Contenu-3c.
+    /// </para></summary>
+    public string? LoadPath { get; init; }
+
     /// <summary>Root of the cooked-content tree (<c>AGAPANTHE_CONTENT</c>). Null →
     /// <c>&lt;AppContext.BaseDirectory&gt;/content</c>. Must hold a <c>content.agmanifest</c>.</summary>
     public string? ContentRoot { get; init; }
@@ -78,6 +90,7 @@ public sealed class HostOptions
             CapturePath = NullIfEmpty(read("AGAPANTHE_CAPTURE")),
             CaptureUiPath = NullIfEmpty(read("AGAPANTHE_CAPTURE_UI")),
             SavePath = NullIfEmpty(read("AGAPANTHE_SAVE")),
+            LoadPath = NullIfEmpty(read("AGAPANTHE_LOAD")),
             ContentRoot = NullIfEmpty(read("AGAPANTHE_CONTENT")),
             OverlayVisible = read("AGAPANTHE_OVERLAY") is not "0",
             CullStats = read("AGAPANTHE_CULL_STATS") is { Length: > 0 },
