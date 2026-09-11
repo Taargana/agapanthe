@@ -3,13 +3,14 @@ using Agapanthe.Core;
 
 namespace Agapanthe.Assets;
 
-/// <summary>What kind of cooked asset a manifest entry points at. Only <see cref="Model"/> is produced today;
-/// the others are reserved so a forward-compatible manifest still lists its models (Contenu-2b).</summary>
+/// <summary>What kind of cooked asset a manifest entry points at. <see cref="Model"/> and <see cref="Scene"/>
+/// are produced today; <see cref="Environment"/>/<see cref="Font"/> are reserved (Contenu-2b/3c).</summary>
 public enum AssetKind : byte
 {
     Model = 0,
     Environment = 1,
     Font = 2,
+    Scene = 3, // Contenu-3b — a cooked .agscene blob
 }
 
 /// <summary>One row of the content manifest: an <see cref="AssetKey"/>, what it is, where its cooked blob sits

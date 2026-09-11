@@ -50,6 +50,19 @@ public sealed record MeshAsset
     /// </summary>
     public Matrix4x4 WorldTransform { get; init; } = Matrix4x4.Identity;
 
+    /// <summary>
+    /// Contenu-3b: the LOCAL bounding-sphere centre, precomputed at cook time (<see cref="MeshBounds"/>).
+    /// Read by <c>Rendering.SceneBuilder</c> and the GPU-free scene materializer.
+    /// </summary>
+    public Vector3 BoundsCenter { get; init; }
+
+    /// <summary>
+    /// Contenu-3b: the LOCAL bounding-sphere radius, precomputed at cook time. <c>0</c> = not computed —
+    /// <c>SceneBuilder</c> then falls back to <see cref="MeshBounds.Compute(MeshAsset)"/> (an in-code
+    /// procedural mesh that never went through the cooker).
+    /// </summary>
+    public float BoundsRadius { get; init; }
+
     /// <summary>Mesh/primitive name for diagnostics; not required to be unique.</summary>
     public string Name { get; init; } = string.Empty;
 }

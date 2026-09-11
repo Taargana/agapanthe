@@ -1123,6 +1123,14 @@ public sealed partial class GameWorld : IDisposable
         return (mr.Mesh, mr.Material);
     }
 
+    /// <summary>Test hook (Contenu-3b): a live drawable's split world transform by GlobalId, or null if it is not
+    /// live or carries no <c>WorldTransform</c>. Lets a materializer test assert the composed placement without
+    /// exposing the ECS.</summary>
+    internal (Matrix4x4 RotationScale, Double3 Position)? WorldTransformForTest(ulong globalId)
+        => _live.TryGetValue(globalId, out var entity) && entity.Has<WorldTransform>() && entity.Has<WorldPosition>()
+            ? (entity.Get<WorldTransform>().Value, entity.Get<WorldPosition>().Value)
+            : null;
+
     /// <summary>Contenu-3a: the drawable's stored <see cref="Agapanthe.Core.MeshRefKey"/> asset identity, or null
     /// if the entity is dead or carries no <c>AssetRef</c>. Lets a test assert the identity survives a structural
     /// move and a snapshot round-trip.</summary>
@@ -1151,6 +1159,44 @@ public sealed partial class GameWorld : IDisposable
         }
 
         return count;
+    }
+
+    /// <summary>
+    /// Contenu-3b: fills each drawable's process-local <see cref="MeshRef"/> render cache from its stored
+    /// <see cref="AssetRef"/> identity, via the host's <paramref name="resolve"/> delegate (which holds the
+    /// render-side registry). Only touches drawables whose <c>AssetRef</c> is non-<see cref="MeshRefKey.None"/>
+    /// and whose <c>MeshRef</c> is still invalid — a headless materialisation leaves them invalid; the client
+    /// calls this after uploading the models. <paramref name="resolve"/> must throw for a key/index it cannot
+    /// resolve (Contenu-3a contract) — that surfaces here.
+    /// </summary>
+    public void ResolveMeshRefs(MeshRefResolver resolve)
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        AssertOwnerThread();
+        ArgumentNullException.ThrowIfNull(resolve);
+
+        // Set BEFORE the loop, not after a successful pass (audit finding): resolve throws for a key it cannot
+        // resolve (the Contenu-3a contract), which can leave a PARTIAL set of chunks already rewritten with new
+        // MeshRef handles. A rebuild is the safe response to that half-done state too — the alternative (only
+        // marking dirty when the whole pass succeeds) would leave the persistent slot buffer sorted on the OLD
+        // (material, mesh) pair for the drawables that DID resolve before the throw.
+        _structuralDirty = true;
+        foreach (ref var chunk in _world.Query(new QueryDescription().WithAll<AssetRef, MeshRef>()))
+        {
+            var assets = chunk.GetSpan<AssetRef>();
+            var meshes = chunk.GetSpan<MeshRef>();
+            for (var i = 0; i < chunk.Count; i++)
+            {
+                var k = assets[i].Value;
+                if (k.IsNone || meshes[i].Mesh.IsValid)
+                {
+                    continue;
+                }
+
+                var (mesh, material) = resolve(k.Key, k.LocalMesh, k.LocalMat);
+                meshes[i] = new MeshRef { Mesh = mesh, Material = material };
+            }
+        }
     }
 
     public void Dispose()

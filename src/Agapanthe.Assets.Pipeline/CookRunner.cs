@@ -26,7 +26,7 @@ public static class CookRunner
 {
     /// <summary>Bump when the <c>.agmodel</c> payload layout or the glTF decode changes — every blob then
     /// re-cooks on the next run regardless of source hashes.</summary>
-    public const string CookerVersion = "contenu2-1";
+    public const string CookerVersion = "contenu3b-1"; // .agmodel v2 (per-mesh bounds)
 
     private const string StateFileName = ".cookstate";
 
@@ -98,11 +98,119 @@ public static class CookRunner
             totalBlobBytes += blobBytes.LongLength;
         }
 
+        // Contenu-3b: after the models, cook every content/scenes/*.toml into a flat .agscene blob. The scene
+        // compiler reads back the just-written .agmodel blobs (for bounds / diagonals) — models are done above.
+        CookScenes(contentRoot, outputDir, state, freshState, entries, byKey, ref cooked, ref skipped, ref totalBlobBytes, anyModelCooked: cooked > 0);
+
         PruneOrphanBlobs(outputDir, entries);
         ContentManifestWriter.WriteFile(Path.Combine(outputDir, AssetCatalog.ManifestFileName), entries);
         WriteState(Path.Combine(outputDir, StateFileName), freshState);
 
         return new CookSummary(cooked, skipped, totalBlobBytes);
+    }
+
+    private static void CookScenes(
+        string contentRoot, string outputDir,
+        CookState state, List<string> freshState, List<ManifestEntry> entries, Dictionary<AssetKey, string> byKey,
+        ref int cooked, ref int skipped, ref long totalBlobBytes, bool anyModelCooked)
+    {
+        var scenesDir = Path.Combine(contentRoot, "scenes");
+        if (!Directory.Exists(scenesDir))
+        {
+            return;
+        }
+
+        var loadedModels = new Dictionary<AssetKey, Agapanthe.Assets.Model.ModelAsset>();
+        Agapanthe.Assets.Model.ModelAsset LoadModel(AssetKey key)
+        {
+            if (loadedModels.TryGetValue(key, out var cachedM))
+            {
+                return cachedM;
+            }
+
+            var blob = Path.Combine(outputDir, key.Value + ".agmodel");
+            if (!File.Exists(blob))
+            {
+                throw new AssetException($"a scene references model '{key}', but no cooked blob exists (add {key.Value} under content/).");
+            }
+
+            var m = Agapanthe.Assets.AgModelFormat.Read(File.ReadAllBytes(blob));
+            loadedModels[key] = m;
+            return m;
+        }
+
+        var loadedPrefabs = new Dictionary<string, Scene.AuthoredPrefab>(StringComparer.Ordinal);
+        Scene.AuthoredPrefab LoadPrefab(string name)
+        {
+            if (loadedPrefabs.TryGetValue(name, out var cachedP))
+            {
+                return cachedP;
+            }
+
+            var toml = Path.Combine(contentRoot, "prefabs", name + ".toml");
+            if (!File.Exists(toml))
+            {
+                throw new AssetException($"a scene references prefab '{name}', but content/prefabs/{name}.toml does not exist.");
+            }
+
+            var p = Scene.SceneTomlReader.ReadPrefab(toml);
+            loadedPrefabs[name] = p;
+            return p;
+        }
+
+        // Contenu-3b audit (engine-architect F4): a scene's incrementality hash must also fold in every prefab it
+        // could reference — editing content/prefabs/helmet.toml touches no scene .toml and re-cooks no model, so
+        // without this a stale .agscene would ship. Prefabs are cheap; hashing all of them per scene over-invalidates
+        // rather than under-invalidates (the same philosophy as `anyModelCooked` above).
+        var prefabsDir = Path.Combine(contentRoot, "prefabs");
+        var allPrefabsHash = Directory.Exists(prefabsDir)
+            ? HashHex(Encoding.UTF8.GetBytes(string.Join('\n', Directory
+                .EnumerateFiles(prefabsDir, "*.toml", SearchOption.AllDirectories)
+                .OrderBy(p => p, StringComparer.Ordinal)
+                .Select(p => HashHex(File.ReadAllBytes(p))))))
+            : string.Empty;
+
+        foreach (var tomlPath in Directory.EnumerateFiles(scenesDir, "*.toml", SearchOption.AllDirectories).OrderBy(p => p, StringComparer.Ordinal))
+        {
+            // Contenu-3b audit (engine-architect F6): every OTHER cooked asset keys via FromContentPath (the
+            // Contenu-2 fix for "directory jettisoned") — scenes must too, so a subdirectory under content/scenes/
+            // coexists instead of colliding on Path.GetFileNameWithoutExtension.
+            var pathKey = AssetKey.FromContentPath(contentRoot, tomlPath);
+            var key = new AssetKey(pathKey.Value![..^".toml".Length]);
+            if (!byKey.TryAdd(key, tomlPath))
+            {
+                throw new AssetException($"two sources map to key '{key}': '{byKey[key]}' and '{tomlPath}'.");
+            }
+
+            var tomlHash = HashHex(File.ReadAllBytes(tomlPath)) + ":" + allPrefabsHash;
+            var blobRelative = key.Value + ".agscene";
+            var blobFull = Path.Combine(outputDir, blobRelative);
+
+            // Conservative: re-compile whenever any model was (re)cooked this run, the toml or a prefab it might
+            // reference changed, or the cooker version changed. Scenes are cheap; a scene never ships stale.
+            var upToDate = !anyModelCooked
+                           && state.CookerVersion == CookerVersion
+                           && state.SourceHashes.TryGetValue(key, out var prev)
+                           && prev == tomlHash
+                           && File.Exists(blobFull);
+
+            if (upToDate)
+            {
+                skipped++;
+            }
+            else
+            {
+                var authored = Scene.SceneTomlReader.ReadScene(tomlPath);
+                var def = Scene.SceneCompiler.Compile(authored, LoadModel, LoadPrefab);
+                Scene.AgSceneWriter.WriteFile(blobFull, def);
+                cooked++;
+            }
+
+            var blobBytes = File.ReadAllBytes(blobFull);
+            entries.Add(new ManifestEntry(key, AssetKind.Scene, blobRelative, SHA256.HashData(blobBytes)));
+            freshState.Add($"{key.Value}\t{tomlHash}");
+            totalBlobBytes += blobBytes.LongLength;
+        }
     }
 
     // A source that was deleted or renamed leaves its .agmodel behind; IncludeCookedAssets would ship dead content
@@ -113,11 +221,14 @@ public static class CookRunner
             entries.Select(e => Path.GetFullPath(Path.Combine(outputDir, e.BlobPath))),
             StringComparer.OrdinalIgnoreCase);
 
-        foreach (var blob in Directory.EnumerateFiles(outputDir, "*.agmodel", SearchOption.AllDirectories))
+        foreach (var pattern in new[] { "*.agmodel", "*.agscene" })
         {
-            if (!expected.Contains(Path.GetFullPath(blob)))
+            foreach (var blob in Directory.EnumerateFiles(outputDir, pattern, SearchOption.AllDirectories))
             {
-                File.Delete(blob);
+                if (!expected.Contains(Path.GetFullPath(blob)))
+                {
+                    File.Delete(blob);
+                }
             }
         }
     }

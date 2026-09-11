@@ -46,9 +46,14 @@ public sealed class EngineIsHeadlessTests
     [InlineData("src/Agapanthe.Engine/Agapanthe.Engine.csproj", "Agapanthe.Core", "Agapanthe.World")]
     // The deeper invariant: World is what makes Engine headless in the first place.
     [InlineData("src/Agapanthe.World/Agapanthe.World.csproj", "Agapanthe.Core")]
+    // Contenu-3b: the GPU-free scene runtime. {Core, World, Assets} exactly — no Engine (it returns
+    // PhysicsSettings, not a PhysicsSystem), no Rendering, no Graphics.
+    [InlineData(
+        "src/Agapanthe.Scene/Agapanthe.Scene.csproj", "Agapanthe.Assets", "Agapanthe.Core", "Agapanthe.World")]
     // The milestone's headline artifact. Its own csproj comment promises this file is guarded — so guard it.
     [InlineData(
-        "samples/HeadlessSim/HeadlessSim.csproj", "Agapanthe.Core", "Agapanthe.Engine", "Agapanthe.World")]
+        "samples/HeadlessSim/HeadlessSim.csproj",
+        "Agapanthe.Core", "Agapanthe.Engine", "Agapanthe.Scene", "Agapanthe.World")]
     // Agapanthe.App milestone: the composition-root layer may reference the whole engine — EXCEPT Agapanthe.Platform.
     // App→Platform would drag Rendering/Graphics/Silk.NET.Vulkan transitively into Platform, a Vulkan-free leaf;
     // the concrete window is adapted in the application (samples/Sandbox/EngineWindowAdapter), not named here. The
@@ -57,7 +62,7 @@ public sealed class EngineIsHeadlessTests
     [InlineData(
         "src/Agapanthe.App/Agapanthe.App.csproj",
         "Agapanthe.Assets", "Agapanthe.Core", "Agapanthe.Engine", "Agapanthe.Engine.Render",
-        "Agapanthe.Graphics", "Agapanthe.Rendering", "Agapanthe.Ui", "Agapanthe.World")]
+        "Agapanthe.Graphics", "Agapanthe.Rendering", "Agapanthe.Scene", "Agapanthe.Ui", "Agapanthe.World")]
     public void ProjectFile_ReferencesExactlyTheAllowedProjects(string relativePath, params string[] allowed)
     {
         var csproj = Path.Combine(RepositoryRoot(), relativePath.Replace('/', Path.DirectorySeparatorChar));

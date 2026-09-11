@@ -1,6 +1,9 @@
 using System.Numerics;
+using Agapanthe.Assets;
+using Agapanthe.Assets.Scene;
 using Agapanthe.Core;
 using Agapanthe.Engine;
+using Agapanthe.Scene;
 using Agapanthe.World;
 
 // HeadlessSim (MP-0a) — the simulation, running with no window, no Vulkan device and no Silk.NET.
@@ -17,6 +20,9 @@ using Agapanthe.World;
 //   --drive                MP-0d gate: steer one zero-gravity body with a SCRIPTED per-tick InputSnapshot
 //                          sequence through an InputMap + ApplyCommand — input → command → mutation, no GPU,
 //                          JIT == AOT. Ignores --bodies/--load.
+//   --scene <key>          Contenu-3b: load a cooked .agscene (the SAME file the Sandbox loads) and run it —
+//                          proves client and server share the world-population code. Bare name → "scenes/<name>".
+//                          Ignores --bodies/--load/--drive.
 // Exit code 0 on success, 1 on a usage or I/O error.
 
 const int DefaultTicks = 600;
@@ -36,6 +42,7 @@ var ticks = DefaultTicks;
 var bodies = DefaultBodies;
 string? savePath = null;
 string? loadPath = null;
+string? scenePath = null;
 var drive = false;
 
 for (var i = 0; i < args.Length; i++)
@@ -76,6 +83,15 @@ for (var i = 0; i < args.Length; i++)
             }
 
             break;
+        case "--scene" when i + 1 < args.Length:
+            scenePath = args[++i];
+            if (string.IsNullOrWhiteSpace(scenePath))
+            {
+                Console.Error.WriteLine("HeadlessSim: --scene needs a key.");
+                return 1;
+            }
+
+            break;
         case "--drive":
             drive = true;
             break;
@@ -101,6 +117,12 @@ if (drive && (loadPath is not null || bodies != DefaultBodies))
     return 1;
 }
 
+if (scenePath is not null && (drive || loadPath is not null || bodies != DefaultBodies))
+{
+    Console.Error.WriteLine("HeadlessSim: --scene loads cooked content and conflicts with --drive / --load / --bodies.");
+    return 1;
+}
+
 try
 {
     using var world = new GameWorld();
@@ -108,6 +130,11 @@ try
     if (drive)
     {
         return RunDrive(world, ticks, savePath);
+    }
+
+    if (scenePath is not null)
+    {
+        return RunScene(world, scenePath, ticks, savePath);
     }
 
     if (loadPath is not null)
@@ -236,6 +263,71 @@ static int RunDrive(GameWorld world, int ticks, string? savePath)
     }
 
     Console.WriteLine("HeadlessSim: PASS — --drive input path ran to completion with no GPU.");
+    return 0;
+}
+
+// Contenu-3b (--scene): load a cooked .agscene through AssetCatalog + SceneLoader — byte-for-byte the same file
+// the Sandbox loads for that key. The proof that "client and server share the world-population code": no GPU, no
+// Rendering, the exact SceneMaterializer the client runs. A [physics] block becomes a PhysicsSystem here.
+static int RunScene(GameWorld world, string sceneKey, int ticks, string? savePath)
+{
+    var contentRoot = Path.Combine(AppContext.BaseDirectory, "content");
+    var key = new AssetKey(sceneKey.Contains('/') ? sceneKey : $"scenes/{sceneKey}");
+
+    AssetCatalog catalog;
+    try
+    {
+        catalog = AssetCatalog.Open(contentRoot);
+    }
+    catch (AssetException ex)
+    {
+        Console.Error.WriteLine($"HeadlessSim: {ex.Message}");
+        return 1;
+    }
+
+    var host = SimulationHost.CreateDefault(world);
+    var fixedDt = host.Settings.FixedDeltaSeconds;
+
+    MaterializeResult result;
+    try
+    {
+        var def = catalog.LoadScene(key);
+        result = SceneLoader.LoadHeadless(def, catalog, world, fixedDt);
+    }
+    catch (Exception ex) when (ex is AssetException or AgSceneException or AgModelException)
+    {
+        Console.Error.WriteLine($"HeadlessSim: {ex.Message}");
+        return 1;
+    }
+
+    if (result.Physics is { } settings)
+    {
+        host.Add(Stage.Simulation, new PhysicsSystem(world, in settings));
+    }
+
+    Console.WriteLine(
+        $"HeadlessSim: loaded scene '{key}' ({world.LiveEntityCount} entities"
+        + $"{(result.Physics is null ? string.Empty : ", physics on")}).");
+
+    for (var i = 0; i < ticks; i++)
+    {
+        host.BeginFrame();
+        host.Tick(fixedDt);
+        host.EndFrame();
+    }
+
+    Console.WriteLine(
+        $"HeadlessSim: ran {host.TickIndex} ticks, {world.LiveEntityCount} entities alive, "
+        + $"last frame {host.LastFrameMs:F3} ms / {host.LastFrameAllocatedBytes} B.");
+
+    if (savePath is not null)
+    {
+        using var output = File.Create(savePath);
+        world.Save(output);
+        Console.WriteLine($"HeadlessSim: saved '{savePath}'.");
+    }
+
+    Console.WriteLine("HeadlessSim: PASS — cooked scene ran to completion with no GPU.");
     return 0;
 }
 

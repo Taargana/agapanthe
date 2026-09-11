@@ -14,8 +14,9 @@ public sealed class AssetCookTests
     // Pinned 2026-09-08 on .NET SDK 10.0.103 (JIT). This is the ONLY guard that a silent DeflateStream / payload
     // change is visible. Re-pin policy: if this fails, first confirm CookFidelity_* still pass (the decoded model
     // is unchanged → the render is unchanged), then re-pin here and note the new SDK version.
+    // Re-pinned 2026-09-09 (Contenu-3b, .agmodel v2 — +16 bytes/mesh precomputed local sphere).
     private const string DamagedHelmetBlobSha256 =
-        "2c6483c260c1d4f88b0ea8aa9f6106d19955bee41f069022568ef1d963b0aa97";
+        "a0287c4fced7dde20ad83ed0be1702130590c7f8144b4e612cc14dc3f1d74759";
 
     private static string Fixture(string name) => Path.Combine(AppContext.BaseDirectory, "Fixtures", name);
 

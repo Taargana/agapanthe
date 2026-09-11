@@ -268,7 +268,11 @@ public static class SceneBuilder
             rotationScale.M42 = 0f;
             rotationScale.M43 = 0f;
 
-            var (center, radius) = ComputeMeshLocalSphere(meshAsset);
+            // Contenu-3b: a cooked .agmodel (v2) carries the precomputed local sphere; an in-code procedural
+            // mesh does not (BoundsRadius == 0) → fall back to computing it here.
+            var (center, radius) = meshAsset.BoundsRadius > 0f
+                ? (meshAsset.BoundsCenter, meshAsset.BoundsRadius)
+                : ComputeMeshLocalSphere(meshAsset);
             entries[i] = new MeshEntry(resolved, position, rotationScale, center, radius);
         }
 
@@ -276,42 +280,13 @@ public static class SceneBuilder
     }
 
     /// <summary>
-    /// The mesh's LOCAL bounding sphere (spec §3.4, M4): centre = the local-space vertex AABB's centre, radius =
-    /// the farthest vertex from that centre. Local — the positions are NOT transformed by the mesh's world matrix,
-    /// because the entity's placement travels separately (position + rotation/scale) and the world sphere is
-    /// derived from this one per frame. The farthest-vertex radius is tight (it hugs the geometry, not the AABB
-    /// corner), so culling keeps false positives to a minimum.
-    /// <para>
-    /// A mesh with no positions yields a zero sphere at the local origin; unioned into the scene extent it is
-    /// harmless (a point at the entity's own position), and the empty-scene guards downstream still hold.
-    /// </para>
+    /// The mesh's LOCAL bounding sphere (spec §3.4, M4). Contenu-3b: this is a forwarder to the single
+    /// implementation <see cref="Agapanthe.Assets.Model.MeshBounds.Compute(MeshAsset)"/> — the cook side
+    /// precomputes it into the DTO, and <see cref="BuildEntries"/> reads that; this path is only the fallback
+    /// for an un-cooked (in-code procedural) mesh. Kept public for <c>SceneBoundsTests</c>.
     /// </summary>
     public static (Vector3 Center, float Radius) ComputeMeshLocalSphere(MeshAsset mesh)
-    {
-        ArgumentNullException.ThrowIfNull(mesh);
-
-        if (mesh.Positions.Length == 0)
-        {
-            return (Vector3.Zero, 0f);
-        }
-
-        var min = new Vector3(float.PositiveInfinity);
-        var max = new Vector3(float.NegativeInfinity);
-        foreach (var p in mesh.Positions)
-        {
-            min = Vector3.Min(min, p);
-            max = Vector3.Max(max, p);
-        }
-
-        var center = (min + max) * 0.5f;
-        var radiusSquared = 0f;
-        foreach (var p in mesh.Positions)
-        {
-            radiusSquared = MathF.Max(radiusSquared, Vector3.DistanceSquared(center, p));
-        }
-
-        return (center, MathF.Sqrt(radiusSquared));
-    }
+        => Agapanthe.Assets.Model.MeshBounds.Compute(mesh);
 
     private static void DisposeAll(Material[] materials)
     {

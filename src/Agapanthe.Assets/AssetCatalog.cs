@@ -86,4 +86,33 @@ public sealed class AssetCatalog
 
         return AgModelFormat.Read(bytes);
     }
+
+    /// <summary>Loads and decodes the scene cooked under <paramref name="key"/> (Contenu-3b).</summary>
+    /// <exception cref="AssetException"><paramref name="key"/> is not in the manifest, or names a non-scene asset.</exception>
+    /// <exception cref="Scene.AgSceneException">The blob is missing or malformed.</exception>
+    public Scene.SceneDefinition LoadScene(AssetKey key)
+    {
+        if (!_entries.TryGetValue(key, out var entry))
+        {
+            throw new AssetException($"No asset '{key}' in the content manifest.");
+        }
+
+        if (entry.Kind != AssetKind.Scene)
+        {
+            throw new AssetException($"Asset '{key}' is a {entry.Kind}, not a scene.");
+        }
+
+        var blobPath = Path.Combine(_contentRoot, entry.BlobPath);
+        byte[] bytes;
+        try
+        {
+            bytes = File.ReadAllBytes(blobPath);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            throw new Scene.AgSceneException($"Cannot read the cooked blob for '{key}' at '{blobPath}'.", ex);
+        }
+
+        return Scene.AgSceneFormat.Read(bytes);
+    }
 }

@@ -1,0 +1,15 @@
+# Contenu-3b — the scene HeadlessSim loads with `--scene headless-default`: 8 falling physics bodies.
+# References a real cooked model (BuildScene's hand-rolled default keeps its own hierarchy + fake key).
+# No lights/camera/environment — headless ignores them anyway.
+
+name = "headless-default"
+
+[[cluster]]
+model = "models/DamagedHelmet.glb"
+count = 8
+inverse_mass = 1.0
+restitution = 0.4
+
+[physics]
+gravity = [0.0, -9.81, 0.0]
+ground_y = 0.0

@@ -187,6 +187,10 @@ public static class GltfLoader
                 tangents = TangentGenerator.Generate(positions, normals, uvs, indices);
             }
 
+            // Contenu-3b: precompute the local bounding sphere at cook time (.agmodel v2) — one impl,
+            // shared with Rendering.SceneBuilder's fallback.
+            var (boundsCenter, boundsRadius) = MeshBounds.Compute(positions);
+
             meshes.Add(new MeshAsset
             {
                 Positions = positions,
@@ -196,6 +200,8 @@ public static class GltfLoader
                 Indices = indices,
                 MaterialIndex = materialIndex,
                 WorldTransform = world,
+                BoundsCenter = boundsCenter,
+                BoundsRadius = boundsRadius,
                 Name = primitives.Length == 1 ? gltfMesh.Name ?? string.Empty : $"{gltfMesh.Name}[{p}]",
             });
         }

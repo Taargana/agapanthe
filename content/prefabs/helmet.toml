@@ -1,0 +1,5 @@
+# Contenu-3b — a reusable helmet entity. Prefabs are a cook-time include: SceneCompiler inlines this
+# into any scene that instances it. Flat (no hierarchy) in 3b.
+
+[[entity]]
+model = "models/DamagedHelmet.glb"

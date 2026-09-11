@@ -1,0 +1,26 @@
+# Contenu-3b — the default `model` scene: one glTF model, a studio HDR, a declarative 3-point-ish rig,
+# a frame-to-bounds free-fly camera. Cooked into scenes/model.agscene.
+
+name = "model"
+world_origin = [0.0, 0.0, 0.0]
+ambient = [0.08, 0.08, 0.09]
+
+[[entity]]
+model = "models/DamagedHelmet.glb"
+position = [0.0, 0.0, 0.0]
+
+[[light]]
+kind = "directional"
+direction = [0.4, -0.7, -0.6]
+color = [1.0, 0.96, 0.9]
+intensity = 12.0
+
+[camera]
+mode = "frame-bounds"
+view_dir = [0.0, 0.35, 1.0]
+distance_mul = 1.5
+fov_y = 60.0
+free_fly = true
+
+[environment]
+hdri = "models/studio_small_1k.hdr"

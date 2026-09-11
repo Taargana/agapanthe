@@ -7,7 +7,11 @@
 > Règle de tri : chaque item dit **ce qui casse sans lui** et **à quelle échelle il devient obligatoire**. Un item sans
 > déclencheur clair est une idée, pas du backlog.
 
-Dernière mise à jour : 2026-09-08 (session 32 — **Contenu-2 LIVRÉ** : cook offline + content manifest —
+Dernière mise à jour : 2026-09-11 (session 34 — **Contenu-3b LIVRÉ → domaine Contenu CLOS (3/3)** :
+`.agscene`/`.agprefab` TOML→blob cuit (Tomlyn cook-side) + `SceneLoader` GPU-free (`Agapanthe.Scene` =
+`{Core, World, Assets}`) — client et serveur partagent le peuplement, `HeadlessSim --scene <clé>` charge le
+même fichier que le Sandbox ; famille `model` devient data ; double audit ×2 4,1/5 PASS-with-concerns aucun
+🔴, 12 findings 🟠 appliqués ; verdict visuel PASS) · 2026-09-08 (session 32 — **Contenu-2 LIVRÉ** : cook offline + content manifest —
 `tools/AssetCooker` (glTF → blob `.agmodel` autonome déterministe) + `content.agmanifest` binaire + `AssetCatalog`
 runtime ; le runtime ne parse plus glTF (migré dans `src/Agapanthe.Assets.Pipeline`, cook-side, non-AOT) ;
 `AssetsPipelineIsolationTests` ; l'arg CLU Sandbox devient une clé ; capture `model` re-épinglée `9030f6a6…` ;
@@ -495,18 +499,32 @@ pas fixe = source de vérité unique (prérequis netcode) — voir §Physique.
       (`RequestRestore`/`ApplyPendingRestore`). **Un `Save` headless émet de vraies `AssetKey`.** Spec
       `docs/plans/2026-09-09-content-3a-sim-asset-identity-design.md` 4,55/5 ; double audit 3,9/4,0
       PASS-with-concerns, 1 🔴 (`LandingChallengeSystem` seed) trouvé-et-corrigé.
-    - **3b** — `.agscene`/`.agprefab` : authoring **TOML** sous `content/scenes|prefabs|procedural/` →
-      `tools/AssetCooker` → blobs binaires déterministes dans `content.agmanifest` (`AssetKind.Scene`/`Prefab` ;
-      sphères UV / quad de sol / ciel equirect cuits) ; `SceneLoader` runtime GPU-free via `AssetCatalog` ;
-      prouvé sur `model` ; `HeadlessSim` charge le même fichier.
-    - **3c** — 3 registres de fabriques via `IGame` (systèmes, générateurs procéduraux, command-handlers) ;
-      `ProbeDrop`/`LandingChallenge`/`BenchSpin`/`Churn` paramétrés par la scène ; nom d'entité → `GlobalId` ;
-      `drive` = table de bindings ; migration `drive` + `planet*` ; ~30 env vars → champs de scène.
-    - Dette 3a → 3b/3c : règle « rien dans `Build` ne lit le contenu du monde » à inscrire dans `ISceneRecipe` ;
-      supprimer les 5+ copies champ-à-champ de spec quand `SceneLoader` est le chemin unique ; `Agapanthe.App` →
-      `App` + `App.Client` avant `RunDedicatedServer` (Vulkan dans la closure) ; mesurer le coût GC du
-      `AssetRef[]` managé (fallback D1-alt : id blittable + side-table) ; identité d'asset non-modèle
-      (textures/env/fonts) toujours hors snapshot.
+    - **3b ✅ (S34) — domaine Contenu CLOS (3/3)** — `.agscene`/`.agprefab` : authoring **TOML** (Tomlyn,
+      cook-side uniquement) sous `content/scenes|prefabs/` → `tools/AssetCooker` → blobs binaires
+      déterministes `AGSC` dans `content.agmanifest` (`AssetKind.Scene`) ; nouveau **`Agapanthe.Scene`**
+      (`{Core, World, Assets}`, GPU-free) avec `SceneMaterializer`/`SceneLoader.LoadHeadless` — le code de
+      peuplement **unique** client+serveur ; `GameWorld.ResolveMeshRefs` résout `MeshRef` côté client ;
+      `HeadlessSim --scene <clé>` charge le même fichier que le Sandbox. Prouvé sur `model`/`grid`/`drop`/
+      `metalrough` (`ModelSceneRecipe` supprimée → `SceneRecipe(string)` générique) ; `.agmodel` bump v2
+      (bounds par mesh précalculés au cook). Spec `docs/plans/2026-09-09-content-3b-declarative-scenes-design.md`
+      4,4/5 ; double audit 4,1/4,1 PASS-with-concerns, aucun 🔴, 12 findings 🟠 appliqués. **Sphères UV / quad
+      de sol / ciel equirect cuits (les générateurs procéduraux) reportés à 3c** — hors scope 3b dès la spec.
+    - **3c** (non urgent — confort/uniformisation, pas une dette bloquante) — générateurs procéduraux
+      (sol/herbe/ciel/sphère) en `.agenv` réel + `AssetKind.Environment` ; 3 registres de fabriques via
+      `IGame` (systèmes, générateurs procéduraux, command-handlers) ; `ProbeDrop`/`LandingChallenge`/
+      `BenchSpin`/`Churn` paramétrés par la scène ; nom d'entité → `GlobalId` ; `drive` = table de bindings ;
+      migration `drive` + `planet*` vers `SceneRecipe` (puis suppression de `ModelContent.ResolveModelKey` +
+      l'arg CLI modèle du Sandbox, dernière trace de la déviation D10 de 3b) ; instanciation runtime de prefab ;
+      ~30 env vars → champs de scène.
+    - Dette 3a/3b → 3c : règle « rien dans `Build` ne lit le contenu du monde » à inscrire dans `ISceneRecipe` ;
+      `Agapanthe.App` → `App` + `App.Client` avant `RunDedicatedServer` (Vulkan dans la closure ; concrètement,
+      c'est là que le câblage `MaterializeResult.Physics/RestorePath → PhysicsSystem/RequestRestore`, dupliqué
+      par hôte depuis 3b, se résorbe — soit un `Agapanthe.Engine.Scene` glue léger, soit `Engine` prend
+      `Assets`+`Scene`) ; mesurer le coût GC du `AssetRef[]` managé (fallback D1-alt : id blittable +
+      side-table) ; identité d'asset non-modèle (textures/env/fonts) toujours hors snapshot ;
+      **`ResourceRegistry.Unload` a 0 appelant** depuis la suppression de `ModelSceneRecipe` (3b) — a besoin
+      d'un chemin d'exercice GPU réel pour re-garder le leak de descripteurs qu'`AGAPANTHE_UNLOAD_TEST`
+      fermait, idéalement au reload de scène de 3c.
   - Puis définitions **data-driven** (items/recettes = données, pas du code — prérequis du Stardew-like).
 - **La 2ᵉ slice, dissemblable** : une mini-slice top-down/orthographique. **Le moteur, c'est ce qui est commun aux deux.**
   Test de généralité le moins cher qui existe ; exposera violemment tout ce qui est hardcodé pour l'échelle planétaire.

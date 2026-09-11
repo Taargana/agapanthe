@@ -11,8 +11,12 @@
 
        Note what it does NOT reference: Rendering, Graphics, Platform. That is enforced, not merely intended:
        EngineIsHeadlessTests.ProjectFile_ReferencesExactlyTheAllowedProjects asserts this file's ProjectReference
-       set is exactly {Core, World, Engine}. If a future change makes any of them necessary here, the headless
-       split has been lost. -->
+       set is exactly {Core, World, Engine, Scene}. If a future change makes Rendering/Graphics/Platform necessary
+       here, the headless split has been lost.
+
+       Contenu-3b: Agapanthe.Scene ({Core, World, Assets}, GPU-free) lets the `scene` mode load the SAME cooked
+       .agscene the Sandbox does. It pulls Agapanthe.Assets + StbImageSharp into the AOT closure (accepted —
+       Contenu-2 precedent; Contenu-2b removes the runtime HDR decode). Still no Vulkan, no window. -->
   <PropertyGroup>
     <OutputType>Exe</OutputType>
     <TargetFramework>net10.0</TargetFramework>
@@ -28,6 +32,12 @@
     <ProjectReference Include="..\..\src\Agapanthe.Core\Agapanthe.Core.csproj" />
     <ProjectReference Include="..\..\src\Agapanthe.World\Agapanthe.World.csproj" />
     <ProjectReference Include="..\..\src\Agapanthe.Engine\Agapanthe.Engine.csproj" />
+    <ProjectReference Include="..\..\src\Agapanthe.Scene\Agapanthe.Scene.csproj" />
   </ItemGroup>
+
+  <!-- Offline asset cook (Contenu-3b) — shared with samples/Sandbox. Cooks content/**/*.glb → .agmodel and
+       content/scenes/*.toml → .agscene, ships content.agmanifest next to the binary. CookFonts / PrecompileShaders
+       stay Sandbox-only (a headless server has neither text overlay nor shaders). -->
+  <Import Project="$(MSBuildThisFileDirectory)..\..\build\Agapanthe.Cook.targets" />
 
 </Project>

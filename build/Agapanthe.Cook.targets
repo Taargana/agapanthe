@@ -1,0 +1,62 @@
+<Project>
+
+  <!-- ================= Offline asset cook (Contenu-2 / Contenu-3b) — shared =================
+       Extracted from samples/Sandbox/Sandbox.csproj so samples/HeadlessSim can import it too (a
+       dedicated server loads the same cooked .agscene/.agmodel content). tools/AssetCooker cooks every
+       content/**/*.glb into a deterministic .agmodel blob AND every content/scenes/*.toml into an
+       .agscene blob, and writes content.agmanifest; AssetCatalog reads them. The RUNTIME never parses
+       glTF or TOML. AssetCooker is deliberately NOT a ProjectReference — that would drag
+       Agapanthe.Assets.Pipeline + StbImageSharp + Tomlyn + the glTF parser into the AOT closure.
+
+       $(MSBuildThisFileDirectory) here is <repo>/build/, so "..\content" = <repo>/content. -->
+  <PropertyGroup>
+    <ContentSourceDir>$([MSBuild]::NormalizeDirectory('$(MSBuildThisFileDirectory)..\content'))</ContentSourceDir>
+    <AssetCookerProject>$([MSBuild]::NormalizePath('$(MSBuildThisFileDirectory)..\tools\AssetCooker\AssetCooker.csproj'))</AssetCookerProject>
+    <AssetCacheStageDir>$([MSBuild]::NormalizeDirectory('$(MSBuildProjectDirectory)\obj\assetcache'))</AssetCacheStageDir>
+    <AssetCacheStamp>$(AssetCacheStageDir).cooked.stamp</AssetCacheStamp>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- Every source model + scene is an input. So are the cooker's + pipeline's own sources: CookRunner is
+         content-hash incremental internally, but a change to a blob layout / the glTF decode / the scene
+         compiler must still force a re-cook. -->
+    <AssetSourceFile Include="$(ContentSourceDir)**\*" />
+    <AssetSourceFile Include="$(MSBuildThisFileDirectory)..\tools\AssetCooker\**\*.cs"
+                     Exclude="$(MSBuildThisFileDirectory)..\tools\AssetCooker\obj\**;$(MSBuildThisFileDirectory)..\tools\AssetCooker\bin\**" />
+    <AssetSourceFile Include="$(MSBuildThisFileDirectory)..\src\Agapanthe.Assets.Pipeline\**\*.cs"
+                     Exclude="$(MSBuildThisFileDirectory)..\src\Agapanthe.Assets.Pipeline\obj\**;$(MSBuildThisFileDirectory)..\src\Agapanthe.Assets.Pipeline\bin\**" />
+  </ItemGroup>
+
+  <!-- Same two hard-won details as PrecompileShaders/CookFonts: RemoveProperties keeps the tool a plain managed
+       net10.0 assembly under an outer `dotnet publish -r`, and trailing backslashes are trimmed so a quoted "...\"
+       cannot escape the quote and merge the arguments. -->
+  <Target Name="CookAssets"
+          Inputs="@(AssetSourceFile)"
+          Outputs="$(AssetCacheStamp)">
+    <MSBuild Projects="$(AssetCookerProject)"
+             Targets="Build"
+             Properties="Configuration=$(Configuration)"
+             RemoveProperties="RuntimeIdentifier;SelfContained;PublishAot;PublishTrimmed;PublishSingleFile">
+      <Output TaskParameter="TargetOutputs" ItemName="_AssetCookerAssembly" />
+    </MSBuild>
+    <MakeDir Directories="$(AssetCacheStageDir)" />
+    <Exec Command="dotnet exec &quot;@(_AssetCookerAssembly)&quot; &quot;$(ContentSourceDir.TrimEnd('\'))&quot; &quot;$(AssetCacheStageDir.TrimEnd('\'))&quot;" />
+    <Touch Files="$(AssetCacheStamp)" AlwaysCreate="true" />
+  </Target>
+
+  <!-- Always runs (after CookAssets, before Content target-paths are assigned) so the cooked content ships even
+       when the cook above was up to date and skipped. Wildcard pre-expanded into concrete items first. -->
+  <Target Name="IncludeCookedAssets"
+          DependsOnTargets="CookAssets"
+          BeforeTargets="AssignTargetPaths">
+    <ItemGroup>
+      <!-- .cookstate + the stamp are dev-machine build state — AssetCatalog never reads them, they don't ship. -->
+      <_CookedAsset Include="$(AssetCacheStageDir)**\*"
+                    Exclude="$(AssetCacheStageDir).cookstate;$(AssetCacheStageDir).cooked.stamp" />
+      <Content Include="@(_CookedAsset)" Link="content\%(RecursiveDir)%(Filename)%(Extension)">
+        <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      </Content>
+    </ItemGroup>
+  </Target>
+
+</Project>

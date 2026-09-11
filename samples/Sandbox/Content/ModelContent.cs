@@ -359,80 +359,9 @@ internal static class ModelContent
         }
     }
 
-    /// <summary>Spawns rows×cols copies of the model, centred on the base position, spaced on the X/Z plane.</summary>
-    public static void SpawnGrid(GameWorld world, ImportedEntitySpec[] specs, int rows, int cols, double spacing)
-    {
-        var halfR = (rows - 1) * 0.5;
-        var halfC = (cols - 1) * 0.5;
-        for (var r = 0; r < rows; r++)
-        {
-            for (var c = 0; c < cols; c++)
-            {
-                var offset = new Double3((c - halfC) * spacing, 0, (r - halfR) * spacing);
-                var cell = (r * cols) + c;
-                var orderBase = (uint)(cell * specs.Length);
-                foreach (var s in specs)
-                {
-                    world.SpawnImported(new ImportedEntitySpec(
-                        s.Mesh, s.Material, s.Position + offset, s.RotationScale,
-                        s.BoundsCenter, s.BoundsRadius, orderBase + s.Order, s.Identity)); // Contenu-3a: keep asset identity
-                }
-            }
-        }
-    }
-
-    /// <summary>Spawns N physics BODIES as a cube cluster above the ground (P3-M3). Returns the ground Y: one
-    /// radius below the model's natural centre. Deterministic by index — the reproducible-capture gate.</summary>
-    public static double SpawnDropScene(GameWorld world, ImportedEntitySpec[] specs, int n, Double3 worldOrigin)
-    {
-        var radius = 1f;
-        foreach (var s in specs)
-        {
-            radius = MathF.Max(radius, s.BoundsRadius * MathHelpers.MaxStretch(s.RotationScale));
-        }
-
-        var side = Math.Max(1, (int)Math.Ceiling(Math.Cbrt(n)));
-        var hspacing = radius * 2.1;
-        var vspacing = radius * 2.2;
-        var half = (side - 1) * 0.5;
-        var perLayer = side * side;
-        var groundY = worldOrigin.Y - radius;
-
-        for (var i = 0; i < n; i++)
-        {
-            var layer = i / perLayer;
-            var inLayer = i % perLayer;
-            var cx = inLayer % side;
-            var cz = inLayer / side;
-            var h = Hash(i);
-            var jx = (((h & 0xFFFF) / 65535.0) - 0.5) * radius * 0.4;
-            var jz = ((((h >> 16) & 0xFFFF) / 65535.0) - 0.5) * radius * 0.4;
-            var offset = new Double3(
-                ((cx - half) * hspacing) + jx,
-                (radius * 4.0) + (layer * vspacing),
-                ((cz - half) * hspacing) + jz);
-
-            var orderBase = (uint)(i * specs.Length);
-            foreach (var s in specs)
-            {
-                var bodyRadius = s.BoundsRadius * MathHelpers.MaxStretch(s.RotationScale);
-                world.SpawnBody(
-                    new ImportedEntitySpec(
-                        s.Mesh, s.Material, s.Position + offset, s.RotationScale,
-                        s.BoundsCenter, s.BoundsRadius, orderBase + s.Order, s.Identity), // Contenu-3a: keep asset identity
-                    velocity: Vector3.Zero, inverseMass: 1f, restitution: 0.3f, radius: bodyRadius);
-            }
-        }
-
-        return groundY;
-
-        static uint Hash(int i)
-        {
-            var x = (uint)i * 2654435761u;
-            x ^= x >> 15;
-            x *= 2246822519u;
-            x ^= x >> 13;
-            return x;
-        }
-    }
+    // SpawnGrid / SpawnDropScene (P2-M4 / P3-M3) removed (Contenu-3b, audit engine-architect F9): the `model`
+    // family's grid/cluster placement is now cooked data (SceneCompiler.EmitGrid/EmitCluster in
+    // Agapanthe.Assets.Pipeline, same stride/Hash(i) jitter), and ModelSceneRecipe — their only caller — was
+    // deleted in the same milestone. Dead code with an unverified "copied verbatim" claim is worse than no code;
+    // SceneCompilerTests exercises the cooked replacements directly.
 }

@@ -28,6 +28,7 @@ namespace Agapanthe.Assets;
 /// meshCount u32
 ///   per mesh: vertexCount u32 | indexCount u32 | materialIndex i32 | streamMask u8
 ///             worldTransform f32*16
+///             boundsCenter f32*3 | boundsRadius f32          (v2 — precomputed local sphere)
 ///             Positions f32*3*vertexCount  [ + Normals f32*3, Tangents f32*4, Uvs f32*2 when the mask bit is set ]
 ///             Indices u32*indexCount
 /// materialCount u32
@@ -49,7 +50,7 @@ public static class AgModelFormat
 
     /// <summary>Container version. Bump when the payload layout changes; <see cref="Read"/> refuses anything else
     /// outright, exactly like the VS-1 snapshot header.</summary>
-    public const uint Version = 1;
+    public const uint Version = 2;
 
     private const int ContainerHeaderBytes = 4 + 4 + 4; // magic | version | uncompressedPayloadLen
 
@@ -78,7 +79,10 @@ public static class AgModelFormat
         var version = BinaryPrimitives.ReadUInt32LittleEndian(bytes.Slice(4, 4));
         if (version != Version)
         {
-            throw new AgModelException($"Unsupported .agmodel version {version} (this build reads version {Version}).");
+            throw new AgModelException(version == 1
+                ? "The .agmodel is format v1, which predates precomputed per-mesh bounds (Contenu-3b). "
+                  + "There is no in-place upgrade — re-run the asset cook."
+                : $"Unsupported .agmodel version {version} (this build reads version {Version}).");
         }
 
         var uncompressedLen = BinaryPrimitives.ReadUInt32LittleEndian(bytes.Slice(8, 4));
@@ -131,7 +135,9 @@ public static class AgModelFormat
 
         var name = cursor.ReadString();
 
-        var meshCount = cursor.ReadCount();
+        // Shortest mesh record before its variable-length streams: vertexCount(4)+indexCount(4)+materialIndex(4)
+        // +streamMask(1)+world(64)+boundsCenter(12)+boundsRadius(4).
+        var meshCount = cursor.ReadCount(minRecordBytes: 93);
         var meshes = new MeshAsset[meshCount];
         for (var m = 0; m < meshCount; m++)
         {
@@ -141,6 +147,8 @@ public static class AgModelFormat
             var streamMask = cursor.ReadByte();
 
             var world = cursor.ReadMatrix4x4();
+            var boundsCenter = cursor.ReadVector3();  // v2 (Contenu-3b): precomputed local sphere
+            var boundsRadius = cursor.ReadF32();
             var positions = cursor.ReadVector3Array(vertexCount);
             var normals = (streamMask & StreamNormals) != 0 ? cursor.ReadVector3Array(vertexCount) : [];
             var tangents = (streamMask & StreamTangents) != 0 ? cursor.ReadVector4Array(vertexCount) : [];
@@ -156,10 +164,13 @@ public static class AgModelFormat
                 Indices = indices,
                 MaterialIndex = materialIndex,
                 WorldTransform = world,
+                BoundsCenter = boundsCenter,
+                BoundsRadius = boundsRadius,
             };
         }
 
-        var materialCount = cursor.ReadCount();
+        // Shortest material record: Vector4(16)+float×4(16)+Vector3(12)+float(4)+byte(1)+float(4)+int×5(20)+byte×4(4).
+        var materialCount = cursor.ReadCount(minRecordBytes: 77);
         var materials = new MaterialAsset[materialCount];
         for (var i = 0; i < materialCount; i++)
         {
@@ -197,7 +208,8 @@ public static class AgModelFormat
             }
         }
 
-        var imageCount = cursor.ReadCount();
+        // Shortest image record before its pixel payload: width(4)+height(4)+isSrgb(1).
+        var imageCount = cursor.ReadCount(minRecordBytes: 9);
         foreach (var mat in materials)
         {
             foreach (var slot in (ReadOnlySpan<int>)
@@ -242,6 +254,15 @@ public static class AgModelFormat
             EnsureFinite(mesh.Normals, "normal");
             EnsureFinite(mesh.Uvs, "uv");
             EnsureFinite(mesh.Tangents, "tangent");
+
+            // v2 (Contenu-3b) bounds: a NaN here passes the `BoundsRadius > 0f` cooked/procedural branch in
+            // SceneBuilder silently (NaN comparisons are false either way) and poisons the frustum test downstream —
+            // surface it at the same boundary as the vertex streams above.
+            if (!float.IsFinite(mesh.BoundsCenter.X) || !float.IsFinite(mesh.BoundsCenter.Y)
+                || !float.IsFinite(mesh.BoundsCenter.Z) || !float.IsFinite(mesh.BoundsRadius))
+            {
+                throw new AgModelException($"Mesh '{mesh.Name}' has a non-finite bounds center/radius.");
+            }
         }
 
         return new ModelAsset
@@ -307,6 +328,8 @@ public static class AgModelFormat
             WriteI32(ms, mesh.MaterialIndex);
             ms.WriteByte(mask);
             WriteMatrix4x4(ms, mesh.WorldTransform);
+            WriteVector3(ms, mesh.BoundsCenter);  // v2 (Contenu-3b)
+            WriteF32(ms, mesh.BoundsRadius);
             ms.Write(MemoryMarshal.AsBytes<Vector3>(mesh.Positions));
             if ((mask & StreamNormals) != 0)
             {
@@ -493,15 +516,21 @@ public static class AgModelFormat
 
         public uint ReadU32() => BinaryPrimitives.ReadUInt32LittleEndian(Take(4));
 
-        /// <summary>A count of items that follow: it can never exceed the bytes left (every item is ≥ 1 byte), so
-        /// this bounds a forged count before it drives a <c>new T[count]</c> allocation.</summary>
-        public int ReadCount()
+        /// <summary>A count of items that follow, bounded before it drives a <c>new T[count]</c> allocation.
+        /// <paramref name="minRecordBytes"/> is the smallest a following record can possibly be — bounding by total
+        /// remaining bytes alone is not enough for a REFERENCE-typed array (<c>MeshAsset[]</c>/<c>MaterialAsset[]</c>/
+        /// <c>ImageAsset[]</c>): each element is a pointer, so a forged count near the 1-byte-per-item floor can size
+        /// an allocation many times larger than the compressed blob could ever decompress to (Contenu-3b audit).
+        /// <c>0</c> keeps the old 1-byte floor, for the few counts (vertex/index) that size a blittable span later.</summary>
+        public int ReadCount(int minRecordBytes = 0)
         {
             var count = ReadU32();
-            if (count > (uint)(_payload.Length - _offset))
+            var remaining = (uint)(_payload.Length - _offset);
+            if (count > remaining || (minRecordBytes > 0 && count > remaining / (uint)minRecordBytes))
             {
                 throw new AgModelException(
-                    $".agmodel record count {count} exceeds the {_payload.Length - _offset} bytes that remain.");
+                    $".agmodel record count {count} exceeds what {remaining} remaining bytes could possibly hold "
+                    + $"({minRecordBytes} bytes/record minimum).");
             }
 
             return (int)count;

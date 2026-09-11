@@ -471,3 +471,41 @@ runs and saves.
 | Client handle resolution | `ResolveMeshRefs` after upload | client spawns from `registry.Load` specs (two divergent spawn paths) |
 | Tokens / CLI | concrete scene files, `grid:NxN`/`drop:N` + model arg removed | keep dynamic tokens (contradicts flat-blob expansion; parametric logic at runtime) |
 | Contenu-3 shape | 3 sub-milestones (3a done, 3b this, 3c generators+factories+migrate) | fold generators into 3b |
+
+## 9. Outcome (session 34, closed 2026-09-11)
+
+**Delivered as designed**, decisions D1–D10 all held except a partial deviation on D10 (see below).
+740 tests (up from 696 at the start of the milestone), 0 warning, 0 leak, 0 validation message, Sandbox +
+HeadlessSim + `AotComponentProbe` JIT == NativeAOT. Captures re-pinned + human visual verdict **PASS** on
+all 4 `model`-family scenes (`model` `9a010fc3…`, `grid` `c314e6a1…`, `drop` `2fbf87fa…`, `metalrough`
+`c4cf4605…`); `planet-drop` byte-identical (`bc8440ab…`, untouched). `HeadlessSim --scene headless-default`
+`8a5c0463…` JIT == NativeAOT; the hand-built default scene's MD5 (`6a13dd54…`) unchanged.
+
+**D10 deviation**: `ModelContent.ResolveModelKey` and the Sandbox's CLI model argument were kept —
+`DriveSceneRecipe` still resolves a model by that path and migrates to `SceneRecipe` only in 3c. Documented
+on the board from Wave 5 onward, not discovered at audit time.
+
+**Double audit**: `csharp-lowlevel` 4.1/5 and `engine-architect` 4.1/5, both PASS-with-concerns, **neither
+found a 🔴**. 12 🟠 findings were applied in this session (see `.absolute-work/board.md` §"Double audit" for
+the full list with file references) — the two formats' `ReadCount` hardened against a forged count sizing a
+reference-typed array beyond what the compressed blob could produce; `GameWorld.ResolveMeshRefs` sets its
+dirty flag before the loop rather than after a fully-successful pass; `SceneMaterializer` validates
+`LocalMat` (not just `LocalMesh`); the material-less-mesh convention now matches `ResourceRegistry`'s
+(`Materials.Count`, not `0`); NaN bounds and zero-length light directions are rejected at their write
+boundary; the TOML reader rejects unknown keys and reads `Double3` fields through a `double`-precision path
+(was silently narrowing through `float`); a prefab member's local offset is now rotated by the instance
+transform; cook incrementality folds in prefab hashes; scene keys derive via `AssetKey.FromContentPath`
+(the exact "directory jettisoned" regression Contenu-1 had already fixed for models). `ModelContent.
+SpawnGrid`/`SpawnDropScene` (0 remaining callers after Wave 5) were deleted rather than left dead. All
+fixes were re-verified against the pinned captures and HeadlessSim snapshots — byte-identical throughout.
+
+Findings not applied (both auditors agreed they don't block the close) are recorded as Deferred Work on the
+board and folded into `docs/BACKLOG.md` §4quater Contenu-3c: the `MaterializeResult` → `PhysicsSystem`/
+`RequestRestore` wiring duplicated per host (the concrete shape of the pending `App`/`App.Client` split),
+`ResourceRegistry.Unload` now has zero callers, `SceneLoader.LoadHeadless`'s name vs. its client caller,
+`AGAPANTHE_VIEW` read directly in `SceneCameraApplier`, and a handful of naming/nit items.
+
+**Contenu domain is now closed (3/3)**: Contenu-1 (asset identity) → Contenu-2 (offline cook) →
+Contenu-3a (sim-side identity) → Contenu-3b (declarative scenes, this spec). Contenu-3c (procedural
+generators, game-side factory registries, `drive`/`planet*` migration) is deferred, non-urgent backlog —
+not a fourth required sub-milestone of this domain.

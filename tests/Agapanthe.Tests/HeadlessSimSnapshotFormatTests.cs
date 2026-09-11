@@ -1,7 +1,10 @@
 using System.Numerics;
 using System.Security.Cryptography;
+using Agapanthe.Assets;
+using Agapanthe.Assets.Pipeline;
 using Agapanthe.Core;
 using Agapanthe.Engine;
+using Agapanthe.Scene;
 using Agapanthe.World;
 
 namespace Agapanthe.Tests;
@@ -161,5 +164,75 @@ public sealed class HeadlessSimSnapshotFormatTests
         Assert.Equal(ExpectedDriveByteLength, bytes.Length);
         var actualMd5 = Convert.ToHexStringLower(MD5.HashData(bytes));
         Assert.Equal(ExpectedDriveMd5, actualMd5);
+    }
+
+    // ── Contenu-3b — `--scene headless-default`: cook the real content/scenes/headless-default.toml, load it the
+    // way HeadlessSim/Program.cs RunScene does, run 600 ticks, pin the snapshot. Verified JIT == NativeAOT
+    // (win-x64 publish of samples/HeadlessSim: `--scene headless-default --ticks 600 --save`) on 2026-09-09.
+    // Re-derive: dotnet run --project samples/HeadlessSim -c Release -- --scene headless-default --ticks 600 --save <path>
+    private const string ExpectedCookedSceneMd5 = "8a5c0463599cd1e9cd5a585b9da7f3ca";
+    private const int ExpectedCookedSceneByteLength = 1384;
+
+    [Fact]
+    public void HeadlessSimCookedScene_HeadlessDefault_SnapshotHash_MatchesPinnedValue()
+    {
+        var repoRoot = RepositoryRoot();
+        var baseDir = Path.Combine(Path.GetTempPath(), "agsceneheadless-" + Guid.NewGuid().ToString("N"));
+        var contentRoot = Path.Combine(baseDir, "content");
+        var outDir = Path.Combine(baseDir, "out");
+        try
+        {
+            Directory.CreateDirectory(Path.Combine(contentRoot, "models"));
+            Directory.CreateDirectory(Path.Combine(contentRoot, "scenes"));
+            File.Copy(
+                Path.Combine(AppContext.BaseDirectory, "Fixtures", "DamagedHelmet.glb"),
+                Path.Combine(contentRoot, "models", "DamagedHelmet.glb"));
+            File.Copy(
+                Path.Combine(repoRoot, "content", "scenes", "headless-default.toml"),
+                Path.Combine(contentRoot, "scenes", "headless-default.toml"));
+
+            CookRunner.Cook(contentRoot, outDir);
+            var catalog = AssetCatalog.Open(outDir);
+
+            using var world = new GameWorld();
+            var host = SimulationHost.CreateDefault(world);
+            var fixedDt = host.Settings.FixedDeltaSeconds;
+
+            var def = catalog.LoadScene(new AssetKey("scenes/headless-default"));
+            var result = SceneLoader.LoadHeadless(def, catalog, world, fixedDt);
+            Assert.NotNull(result.Physics);
+            var settings = result.Physics!.Value;
+            host.Add(Stage.Simulation, new PhysicsSystem(world, in settings));
+
+            for (var i = 0; i < Ticks; i++)
+            {
+                host.BeginFrame();
+                host.Tick(fixedDt);
+                host.EndFrame();
+            }
+
+            using var ms = new MemoryStream();
+            world.Save(ms);
+            var bytes = ms.ToArray();
+
+            Assert.Equal(ExpectedCookedSceneByteLength, bytes.Length);
+            Assert.Equal(ExpectedCookedSceneMd5, Convert.ToHexStringLower(MD5.HashData(bytes)));
+        }
+        finally
+        {
+            Directory.Delete(baseDir, recursive: true);
+        }
+    }
+
+    private static string RepositoryRoot()
+    {
+        var dir = new DirectoryInfo(AppContext.BaseDirectory);
+        while (dir is not null && !File.Exists(Path.Combine(dir.FullName, "Agapanthe.slnx")))
+        {
+            dir = dir.Parent;
+        }
+
+        Assert.NotNull(dir);
+        return dir!.FullName;
     }
 }

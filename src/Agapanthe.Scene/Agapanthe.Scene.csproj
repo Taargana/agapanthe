@@ -1,0 +1,22 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <!-- Phase 2 rule 1: trim/AOT analyzers at build time (permanent gate). -->
+    <IsAotCompatible>true</IsAotCompatible>
+  </PropertyGroup>
+
+  <!-- Contenu-3b: the GPU-free scene runtime. Reads a cooked .agscene (Agapanthe.Assets), spawns entities into a
+       GameWorld (Agapanthe.World). Closure = {Core, World, Assets} — pinned by EngineIsHeadlessTests. It must NEVER
+       reference Agapanthe.Engine (PhysicsSystem etc.): the materializer returns PhysicsSettings? and the caller —
+       HeadlessSim, or AppHost on the client — constructs the system. No Rendering, no Graphics, no Silk.NET. -->
+  <ItemGroup>
+    <ProjectReference Include="..\Agapanthe.Core\Agapanthe.Core.csproj" />
+    <ProjectReference Include="..\Agapanthe.World\Agapanthe.World.csproj" />
+    <ProjectReference Include="..\Agapanthe.Assets\Agapanthe.Assets.csproj" />
+  </ItemGroup>
+
+</Project>

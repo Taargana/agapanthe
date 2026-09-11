@@ -17,14 +17,18 @@ internal sealed class SandboxGame : IGame
 
     public string DefaultScene => "model";
 
-    // ModelSceneRecipe last: it matches null/empty and the grid:/drop: families, so a named scene must get first
-    // refusal at SelectRecipe.
+    // Contenu-3b: the `model` family (single / grid / cluster) is now cooked data — one `SceneRecipe` per
+    // `content/scenes/*.toml`. `drive` + `planet*` stay hand-coded recipes (migrated in 3c). Named scenes get
+    // first refusal at SelectRecipe; the `model` SceneRecipe is the DefaultScene fallback (name equality).
     public IReadOnlyList<ISceneRecipe> Scenes { get; } =
     [
         new PlanetSceneRecipe(),
         new PlanetDropSceneRecipe(),
         new PlanetChallengeSceneRecipe(),
         new DriveSceneRecipe(),
-        new ModelSceneRecipe(),
+        new SceneRecipe("model"),
+        new SceneRecipe("grid"),
+        new SceneRecipe("drop"),
+        new SceneRecipe("metalrough"),
     ];
 }

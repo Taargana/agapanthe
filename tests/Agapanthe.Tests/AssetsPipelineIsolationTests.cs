@@ -84,6 +84,40 @@ public sealed class AssetsPipelineIsolationTests
         var referenced = assets.GetReferencedAssemblies().Select(a => a.Name).ToArray();
         Assert.DoesNotContain("Agapanthe.Assets.Pipeline", referenced);
         Assert.DoesNotContain("AssetCooker", referenced);
+        Assert.DoesNotContain("Tomlyn", referenced);
+    }
+
+    [Fact]
+    public void OnlyTheCookSideDeclaresATomlynPackageReference()
+    {
+        // Contenu-3b — TOML authoring is cook-time only. Tomlyn must stay a PackageReference on
+        // Agapanthe.Assets.Pipeline alone; the runtime reads the compiled .agscene blob, never TOML.
+        var offenders = new List<string>();
+        foreach (var csproj in Directory.EnumerateFiles(RepositoryRoot(), "*.csproj", SearchOption.AllDirectories))
+        {
+            if (csproj.Contains($"{Path.DirectorySeparatorChar}obj{Path.DirectorySeparatorChar}")
+                || csproj.Contains($"{Path.DirectorySeparatorChar}bin{Path.DirectorySeparatorChar}"))
+            {
+                continue;
+            }
+
+            var name = Path.GetFileNameWithoutExtension(csproj);
+            if (name == "Agapanthe.Assets.Pipeline")
+            {
+                continue;
+            }
+
+            var packages = XDocument.Load(csproj)
+                .Descendants("PackageReference")
+                .Select(r => (string?)r.Attribute("Include") ?? string.Empty);
+
+            if (packages.Any(p => p.Equals("Tomlyn", StringComparison.OrdinalIgnoreCase)))
+            {
+                offenders.Add(name);
+            }
+        }
+
+        Assert.True(offenders.Count == 0, $"Tomlyn must stay cook-side only; found on: {string.Join(", ", offenders)}");
     }
 
     private static string RepositoryRoot()

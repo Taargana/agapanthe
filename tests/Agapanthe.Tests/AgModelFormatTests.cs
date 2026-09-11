@@ -21,6 +21,8 @@ public sealed class AgModelFormatTests
             Indices = [0, 1, 2],
             MaterialIndex = 0,
             WorldTransform = Matrix4x4.CreateTranslation(3, 4, 5),
+            BoundsCenter = new Vector3(0.5f, 0.5f, 0f), // v2 (Contenu-3b)
+            BoundsRadius = 0.7071068f,
             Name = "full-mesh",
         };
         var bare = new MeshAsset
@@ -95,6 +97,8 @@ public sealed class AgModelFormatTests
         Assert.Equal(original.Meshes[0].Uvs, full.Uvs);
         Assert.Equal(original.Meshes[0].Indices, full.Indices);
         Assert.Equal(original.Meshes[0].WorldTransform, full.WorldTransform);
+        Assert.Equal(original.Meshes[0].BoundsCenter, full.BoundsCenter);   // v2
+        Assert.Equal(original.Meshes[0].BoundsRadius, full.BoundsRadius);
         Assert.Equal(0, full.MaterialIndex);
         Assert.Equal(string.Empty, full.Name); // dropped
 
@@ -137,6 +141,16 @@ public sealed class AgModelFormatTests
         var bytes = Write(SampleModel());
         bytes[0] ^= 0xFF;
         Assert.Throws<AgModelException>(() => AgModelFormat.Read(bytes));
+    }
+
+    [Fact]
+    public void Read_RejectsV1WithARecookMessage()
+    {
+        // Contenu-3b: v1 predates precomputed per-mesh bounds — no in-place upgrade.
+        var bytes = Write(SampleModel());
+        BinaryPrimitives.WriteUInt32LittleEndian(bytes.AsSpan(4, 4), 1);
+        var ex = Assert.Throws<AgModelException>(() => AgModelFormat.Read(bytes));
+        Assert.Contains("re-run the asset cook", ex.Message, StringComparison.OrdinalIgnoreCase);
     }
 
     [Fact]

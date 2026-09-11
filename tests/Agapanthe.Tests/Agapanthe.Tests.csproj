@@ -26,6 +26,7 @@
     <ProjectReference Include="..\..\src\Agapanthe.Assets\Agapanthe.Assets.csproj" />
     <ProjectReference Include="..\..\src\Agapanthe.Assets.Pipeline\Agapanthe.Assets.Pipeline.csproj" />
     <ProjectReference Include="..\..\src\Agapanthe.Rendering\Agapanthe.Rendering.csproj" />
+    <ProjectReference Include="..\..\src\Agapanthe.Scene\Agapanthe.Scene.csproj" />
     <ProjectReference Include="..\..\src\Agapanthe.World\Agapanthe.World.csproj" />
     <ProjectReference Include="..\..\src\Agapanthe.Engine\Agapanthe.Engine.csproj" />
     <ProjectReference Include="..\..\src\Agapanthe.Engine.Render\Agapanthe.Engine.Render.csproj" />
