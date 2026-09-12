@@ -19,6 +19,6 @@ public static class SceneLoader
     /// <c>result.RestorePath</c> → <c>sim.RequestRestore(rp, SnapshotAllocatorPolicy.AdoptFromHeader)</c>.
     /// </summary>
     public static MaterializeResult LoadHeadless(
-        SceneDefinition def, AssetCatalog catalog, GameWorld world, float fixedDeltaSeconds)
-        => SceneMaterializer.Materialize(def, catalog, world, fixedDeltaSeconds);
+        SceneDefinition def, AssetCatalog catalog, GameWorld world, float fixedDeltaSeconds, bool spawnEntities = true)
+        => SceneMaterializer.Materialize(def, catalog, world, fixedDeltaSeconds, spawnEntities);
 }

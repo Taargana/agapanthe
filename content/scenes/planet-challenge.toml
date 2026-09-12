@@ -1,0 +1,70 @@
+# Contenu-3c-2 — the VS-3 landing-challenge scene (AGAPANTHE_SCENE=planet-challenge). Planet/sun/lighting/
+# environment/physics identical to planet.toml/planet-drop.toml (see planet.toml's header comment for how
+# those numbers were derived). Beacon/target/camera numbers baked via a throwaway script reproducing
+# Sandbox.PlanetContent.SetupPlanetChallenge + Sandbox.SandboxCameras.FramePlanetChallengeCamera's exact
+# formulas at their env-var defaults (AGAPANTHE_TARGET_DIST=500, AGAPANTHE_TARGET_DIR=0,
+# AGAPANTHE_TARGET_MARKER_HEIGHT=40, AGAPANTHE_CHALLENGE_CAM_ALT=120, AGAPANTHE_CHALLENGE_N=3,
+# AGAPANTHE_CHALLENGE_SHOTS=6). Land 3 probes in <= 6 shots; B drops (aimed radial below the camera), F5
+# quicksaves to challenge.save.
+name = "planet-challenge"
+ambient = [0.0, 0.0, 0.0]
+
+[[entity]]
+model = "procedural/planet-surface"
+position = [0.0, 0.0, 0.0]
+casts_shadow = false
+
+[[entity]]
+model = "procedural/sun-surface"
+position = [41036947456.0, 18653157376.0, -59690106880.0]
+casts_shadow = false
+
+[[entity]]
+model = "procedural/beacon"
+position = [500.00627639612827, 3185539.9607591997, 0.0]
+casts_shadow = false
+
+[[light]]
+kind = "directional"
+direction = [-0.5486301183700562, -0.2493773102760315, 0.7980074286460876]
+intensity = 0.0
+
+[[light]]
+kind = "point"
+position = [41036947456.0, 18653157376.0, -59690106880.0]
+color = [1.0, 0.97, 0.92]
+intensity = 1.9582080685811528e22
+
+[environment]
+black = true
+
+[camera]
+mode = "fixed"
+position = [0.0, 3185620.0, 0.0]
+yaw = 1.5707964
+pitch = -0.15872982
+fov_y = 70.0
+near = 1.0
+far = 104718504496.84
+move_speed = 60.0
+shadow_distance = 1.0
+free_fly = true
+
+[physics]
+gravity = [0.0, 0.0, 0.0]
+ground_y = 0.0
+mu = 101474102500000.0
+attractor_center = [0.0, 0.0, 0.0]
+surface_radius = 3185500.0
+
+[[system]]
+kind = "landing_challenge"
+probe_model = "procedural/probe"
+probe_radius = 3.0
+zone_center = [499.999997946931, 3185499.9607596924, 0.0]
+zone_radius = 15.0
+surface_band = 9.0
+drop_height = 120.0
+target_count = 3
+shot_budget = 6
+quicksave_path = "challenge.save"

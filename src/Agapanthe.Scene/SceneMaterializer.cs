@@ -17,16 +17,22 @@ public static class SceneMaterializer
 {
     /// <summary>Production entry point: models come from the cooked catalog.</summary>
     public static MaterializeResult Materialize(
-        SceneDefinition def, AssetCatalog catalog, GameWorld world, float fixedDeltaSeconds)
+        SceneDefinition def, AssetCatalog catalog, GameWorld world, float fixedDeltaSeconds, bool spawnEntities = true)
     {
         ArgumentNullException.ThrowIfNull(catalog);
-        return Materialize(def, catalog.LoadModel, world, fixedDeltaSeconds);
+        return Materialize(def, catalog.LoadModel, world, fixedDeltaSeconds, spawnEntities);
     }
 
     /// <summary>Testable entry point: <paramref name="loadModel"/> decodes a model for a key (and throws — e.g.
     /// <see cref="AssetException"/> — for one it cannot).</summary>
+    /// <param name="spawnEntities">Contenu-3c-2 — <c>false</c> when a restore is pending: every model the scene
+    /// references is still decoded (a client must upload them before <c>GameWorld.Load</c> can resolve a
+    /// restored entity's <c>AssetRef</c> against them), but no entity is spawned from the cooked definition,
+    /// keeping the world empty for <c>GameWorld.Load</c> — which hard-throws on a non-empty world. Mirrors the
+    /// pre-3c hand-coded recipes' <c>spawnEntities: !loadMode</c> parameter, now generalized to every
+    /// <see cref="SceneDefinition"/>-driven scene instead of being reimplemented per recipe.</param>
     public static MaterializeResult Materialize(
-        SceneDefinition def, Func<AssetKey, ModelAsset> loadModel, GameWorld world, float fixedDeltaSeconds)
+        SceneDefinition def, Func<AssetKey, ModelAsset> loadModel, GameWorld world, float fixedDeltaSeconds, bool spawnEntities = true)
     {
         ArgumentNullException.ThrowIfNull(def);
         ArgumentNullException.ThrowIfNull(loadModel);
@@ -88,6 +94,11 @@ public static class SceneMaterializer
                 mesh.BoundsRadius,
                 order++,
                 new MeshRefKey(entity.Model, entity.LocalMesh, entity.LocalMat));
+
+            if (!spawnEntities)
+            {
+                continue;
+            }
 
             if (entity.Body is { } body)
             {

@@ -114,27 +114,9 @@ internal static class SandboxCameras
         renderer.ShadowDistance = MathF.Max(MathF.Max(diagonal * 4f, 1f), renderer.Cascades.MaxDistance);
     }
 
-    // FramePlanetCamera / FramePlanetDropCamera removed (Contenu-3c): `planet`/`planet-drop` migrated to cooked
-    // scenes — the fully-deterministic eye/yaw/pitch/fov/near/far/moveSpeed/shadowDistance these computed from
-    // AGAPANTHE_* env vars are now baked into content/scenes/{planet,planet-drop}.toml's [camera] block
+    // FramePlanetCamera / FramePlanetDropCamera / FramePlanetChallengeCamera removed (Contenu-3c):
+    // `planet`/`planet-drop`/`planet-challenge` all migrated to cooked scenes — the fully-deterministic
+    // eye/yaw/pitch/fov/near/far/moveSpeed/shadowDistance these computed from AGAPANTHE_* env vars are now
+    // baked into content/scenes/{planet,planet-drop,planet-challenge}.toml's [camera] block
     // (SceneCamera.Fixed), applied at runtime by SceneCameraApplier with zero new logic.
-
-    public static void FramePlanetChallengeCamera(
-        Camera camera, FreeCameraController controller, Renderer renderer,
-        Double3 planetCentre, Double3 sunOrigin, double planetRadius, Double3 beacon)
-    {
-        var startAlt = SandboxEnv.EnvDouble("AGAPANTHE_CHALLENGE_CAM_ALT", 120.0);
-        var eye = planetCentre + new Double3(0.0, planetRadius + startAlt, 0.0);
-        camera.Position = eye;
-
-        var forward = Vector3.Normalize((beacon - eye).ToVector3(Double3.Zero));
-        camera.Pitch = MathF.Asin(Math.Clamp(forward.Y, -1f, 1f));
-        camera.Yaw = MathF.Atan2(forward.X, -forward.Z);
-        camera.FovY = (float)(SandboxEnv.EnvDouble("AGAPANTHE_PLANET_FOV", 70.0) * MathF.PI / 180.0);
-
-        camera.Near = 1f;
-        camera.Far = (float)(Double3.Distance(planetCentre, sunOrigin) * 1.4);
-        renderer.ShadowDistance = 1f;
-        controller.MoveSpeed = (float)SandboxEnv.EnvDouble("AGAPANTHE_CHALLENGE_MOVE_SPEED", 60.0);
-    }
 }

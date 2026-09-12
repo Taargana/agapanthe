@@ -1,6 +1,12 @@
 # Agapanthe — Plan complet & état d'avancement
 
-**Mis à jour** : 2026-09-12 (session 35 — **Contenu-3c-1 CLOS** : 1ᵉʳ des 3 sous-phases gatées de Contenu-3c —
+**Mis à jour** : 2026-09-12 (session 36 — **Contenu-3c-2 CLOS** : `LandingChallenge` system kind + fabrique +
+migration `planet-challenge`, plus un correctif générique de reprise (`SceneMaterializer.Materialize(bool
+spawnEntities)`) qui ferme un 🔴 trouvé par le double audit — `AGAPANTHE_LOAD` était write-only pour toute
+scène `SceneRecipe` déclarant un `[physics]`/entités, y compris `planet-drop` depuis 3c-1, jamais détecté
+faute de protocole de reprise vérifié pour cette scène-là ; vérifié bout-en-bout en live sur JIT et NativeAOT ;
+6 findings 🟠 supplémentaires appliqués ; 797 tests, capture `planet-challenge` pinned + verdict visuel PASS,
+0 leak/0 validation) · 2026-09-12 (session 35 — **Contenu-3c-1 CLOS** : 1ᵉʳ des 3 sous-phases gatées de Contenu-3c —
 `.agscene` v2 (attracteur newtonien, caméra `Fixed` +2 champs, 2 modes environnement, `[[system]]`), **2
 registres** (`ISceneSystemFactory` client via `IGame` + générateurs procéduraux cook-time-only), 3 caméras
 planète bespoke collapsent en trig cuite, `UvSphereGenerator` (cook-time, byte-identique à
@@ -777,9 +783,43 @@ Spec : [2026-07-25-vs2-spawn-runtime-newtonian-gravity-design.md](plans/2026-07-
 > `default` explicite · script `bake_planet.cs` non committé (traçabilité des nombres cuits). **Verdict
 > visuel humain : PASS** (2026-09-12).
 >
-> ### ▶️ Reprise — **Contenu-3c-2** (`LandingChallenge` + migration `planet-challenge`), ou 2ᵉ slice dissemblable, ou UI-3
-> 3c-1 clos. 3c-2/3c-3 restent à décomposer en board (le plan complet des 3 phases existe déjà,
-> `docs/plans/2026-09-11-content-3c-scene-systems-design.md` + le plan-mode file couvrent le design des 3).
+> ### ✅ **Contenu-3c-2 CLOS (S36)** — `LandingChallenge` + migration `planet-challenge` + correctif générique de reprise
+> Spec : `docs/plans/2026-09-11-content-3c-scene-systems-design.md` §9 (ajouté cette session — 3c-1 avait
+> délibérément différé ces champs, YAGNI ; §9 les concrétise pour le vrai consommateur).
+>
+> **Livré** : `.agscene` v2→v3 — `SceneSystemKind.LandingChallenge` + `SceneSystem` gagne
+> `ZoneCenter`/`ZoneRadius`/`SurfaceBand`/`DropHeight`/`TargetCount`/`ShotBudget`/`QuicksavePath`
+> (`AttractorCenter`/`SurfaceRadius` **délibérément pas dupliqués** — déjà sur `ScenePhysics` depuis 3c-1, la
+> fabrique les lit sur `MaterializeResult.Physics`) · `LandingChallengeSystemFactory` (client) construit la
+> classe `LandingChallengeSystem` **inchangée** (le seed paresseux au 1ᵉʳ tick, fix 🔴 Contenu-3a, survit
+> intact) · `PlanetChallengeSceneRecipe`/`PlanetStage`/`PlanetContent.cs` (entièrement mort) /
+> `SandboxCameras.FramePlanetChallengeCamera` supprimés · `planet-challenge` devient `SceneRecipe(...)` +
+> `content/procedural/beacon.toml` + `content/scenes/planet-challenge.toml`.
+>
+> **Gates** : **797 tests**, capture `planet-challenge` pinned + verdict visuel PASS (`ea6ba910…`), les 6
+> autres scènes re-vérifiées inchangées après 2 re-cooks complets forcés, `--scene planet-challenge` → exit 1
+> confirmé (D9), Sandbox + HeadlessSim JIT == NativeAOT, 0 leak / 0 validation.
+>
+> **Double audit** : PASS-with-concerns ×2, **1 🔴 trouvé indépendamment par les deux** — la reprise
+> `AGAPANTHE_LOAD`/F5-quicksave de `planet-challenge` était cassée par la migration (et le même mécanisme
+> cassait déjà `planet-drop` depuis 3c-1, jamais détecté faute de protocole de reprise humain sur cette
+> scène-là). `SceneRecipe`/`SceneMaterializer` peuplaient toujours la scène sans condition, contrairement à
+> l'ancien `PlanetStage.Build` (`spawnEntities: !loadMode`) ; `GameWorld.Load` refuse un monde peuplé. **Décision
+> présentée à l'humain** (le correctif touche toute scène `SceneRecipe`, pas que celle-ci) — **option (a)
+> choisie : corriger maintenant**. `SceneMaterializer.Materialize` gagne `bool spawnEntities = true` ;
+> `SceneRecipe.Build` calcule `spawnEntities = sim.Options.LoadPath is not { Length: > 0 }` et restaure
+> depuis ce chemin runtime en priorité sur tout `[restore]` cuit. **Vérifié bout-en-bout en live** (save 3
+> entités → relance `AGAPANTHE_LOAD` → 0 spawnées puis 3 restaurées, 0 leak), reproduit sur `planet-drop` et
+> sur le binaire NativeAOT ; les 7 captures pinnées restent inchangées (le correctif ne s'active que si
+> `AGAPANTHE_LOAD` est posé). 6 findings 🟠 supplémentaires appliqués (garde d'attracteur de fabrique
+> vérifiait `Physics is null` au lieu de `Mu > 0`, `AttractorSurfaceRadius > 0` pas validé au cook, aucune
+> validation numérique sur les nouveaux champs, `QuicksavePath` non validé, `CookerVersion` pas bumpé,
+> commentaire périmé). **Dette laissée** : champ commun `ProbeModel`/`ProbeRadius` `required` gênera un futur
+> système non-spawneur · `world_origin` pas appliqué à `AttractorCenter`/`Centre`/`ZoneCenter` (inerte
+> aujourd'hui). **Verdict visuel humain : PASS** (2026-09-12).
+>
+> ### ▶️ Reprise — **Contenu-3c-3** (`ground_quad` + migration `drive` + nettoyage final), ou 2ᵉ slice dissemblable, ou UI-3
+> 3c-1/3c-2 clos. 3c-3 reste à décomposer en board (le design existe déjà dans le spec/plan-mode file).
 > Non urgent — confort/uniformisation, pas une dette bloquante. Alternatives : **2ᵉ slice dissemblable**
 > (top-down) · **UI-3** (timestamps GPU + seam `FrameProfiler`).
 >

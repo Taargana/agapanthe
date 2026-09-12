@@ -1,5 +1,4 @@
 using System.Globalization;
-using System.Numerics;
 using Agapanthe.Core;
 
 namespace Sandbox;
@@ -29,34 +28,7 @@ internal static class SandboxEnv
         return Double3.Zero;
     }
 
-    /// <summary>Reads a scalar env var as a double (invariant culture), falling back to <paramref name="fallback"/>.</summary>
-    public static double EnvDouble(string name, double fallback)
-        => Environment.GetEnvironmentVariable(name) is { } s
-           && double.TryParse(s, NumberStyles.Float, CultureInfo.InvariantCulture, out var v)
-            ? v : fallback;
-
-    /// <summary>Reads an "x,y,z" env var as a Vector3, falling back to <paramref name="fallback"/>. A zero vector
-    /// (which would Normalize to NaN downstream and blank the screen) is rejected back to the fallback.</summary>
-    public static Vector3 EnvVector3(string name, Vector3 fallback)
-    {
-        if (Environment.GetEnvironmentVariable(name) is { } s)
-        {
-            var p = s.Split(',');
-            if (p.Length == 3
-                && float.TryParse(p[0], CultureInfo.InvariantCulture, out var x)
-                && float.TryParse(p[1], CultureInfo.InvariantCulture, out var y)
-                && float.TryParse(p[2], CultureInfo.InvariantCulture, out var z))
-            {
-                var v = new Vector3(x, y, z);
-                if (v.LengthSquared() >= 1e-12f)
-                {
-                    return v;
-                }
-
-                Log.Warn($"Sandbox: {name}='{s}' is a zero vector; using the default direction.");
-            }
-        }
-
-        return fallback;
-    }
+    // EnvDouble/EnvVector3 removed (Contenu-3c-2 audit finding): their last callers (PlanetContent's
+    // scene-knob env vars) were deleted along with the hand-coded planet-challenge recipe — every planet-family
+    // scene now reads baked TOML constants instead. ParseDouble3 survives (DriveSceneRecipe, 3c-3 scope).
 }

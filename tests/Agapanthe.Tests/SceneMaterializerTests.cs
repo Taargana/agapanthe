@@ -145,6 +145,35 @@ public sealed class SceneMaterializerTests
     }
 
     [Fact]
+    public void Materialize_SpawnEntitiesFalse_LeavesWorldEmpty_ButStillLoadsModelsAndPhysics()
+    {
+        // Contenu-3c-2 (fixes a 🔴 both audits found): a restore-pending caller must be able to keep the world
+        // empty for GameWorld.Load (which hard-throws on a non-empty world) while still getting every model the
+        // restored entities will need already decoded, and the scene's PhysicsSystem still attached.
+        using var world = new GameWorld();
+        var physics = new ScenePhysics { Gravity = new Vector3(0, -9.81f, 0), GroundY = -5f };
+        var def = Scene([Entity("models/x.glb"), Entity("models/y.glb")], physics: physics);
+
+        var result = SceneMaterializer.Materialize(def, Loader("models/x.glb", "models/y.glb"), world, 1f / 60f, spawnEntities: false);
+
+        Assert.Equal(0, world.LiveEntityCount);
+        Assert.Equal(2, result.Models.Count);
+        Assert.True(result.Models.ContainsKey(new AssetKey("models/x.glb")));
+        Assert.True(result.Models.ContainsKey(new AssetKey("models/y.glb")));
+        Assert.NotNull(result.Physics);
+        Assert.Equal(new Vector3(0, -9.81f, 0), result.Physics!.Value.Gravity);
+    }
+
+    [Fact]
+    public void Materialize_SpawnEntitiesTrue_IsTheDefault()
+    {
+        using var world = new GameWorld();
+        var result = SceneMaterializer.Materialize(Scene([Entity("models/x.glb")]), Loader("models/x.glb"), world, 1f / 60f);
+
+        Assert.Equal(1, world.LiveEntityCount);
+    }
+
+    [Fact]
     public void Materialize_IdentityPlacement_ComposesTransform_LikeTheRenderPath()
     {
         // The render path (ResourceRegistry.Load → SceneBuilder.BuildEntries) splits mesh.WorldTransform into a

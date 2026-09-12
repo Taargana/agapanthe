@@ -1,3 +1,5 @@
+using System.IO;
+using System.Linq;
 using System.Numerics;
 using Agapanthe.Assets;
 using Agapanthe.Assets.Model;
@@ -63,7 +65,7 @@ internal static class SceneCompiler
                 }
                 : null,
             Restore = scene.Restore is { } r ? new SceneRestore { SnapshotPath = r.Snapshot } : null,
-            Systems = scene.Systems.Select(s => ToSystem(s, loadModel)).ToArray(),
+            Systems = scene.Systems.Select(s => ToSystem(s, loadModel, scene.Physics)).ToArray(),
         };
     }
 
@@ -271,7 +273,7 @@ internal static class SceneCompiler
     // Contenu-3c: resolves a [[system]]'s probe model the same way Place resolves a bare entity — mesh 0 (every
     // probe today is a dedicated single-mesh generated sphere), material via the appended-default-material
     // convention (Contenu-3b audit F5) — and validates both exist at cook time rather than at runtime materialize.
-    private static SceneSystem ToSystem(AuthoredSystem s, Func<AssetKey, ModelAsset> loadModel)
+    private static SceneSystem ToSystem(AuthoredSystem s, Func<AssetKey, ModelAsset> loadModel, AuthoredPhysics? physics)
     {
         var key = new AssetKey(s.ProbeModel);
         var model = loadModel(key);
@@ -292,7 +294,82 @@ internal static class SceneCompiler
                 Kind = SceneSystemKind.ProbeDrop, ProbeModel = key, ProbeLocalMesh = 0, ProbeLocalMat = localMat,
                 ProbeRadius = s.ProbeRadius, Every = s.Every, Centre = s.Centre,
             },
-            _ => throw new AssetException($"unknown scene system kind '{s.Kind}' (probe_drop)."),
+            // A LandingChallenge system reads its attractor off the scene's own [physics] block at runtime
+            // (MaterializeResult.Physics) rather than duplicating it here — but a scene declaring the system
+            // with no attractor is an authoring mistake, caught at cook time instead of a runtime null-check.
+            "landing_challenge" => physics is { AttractorMu: > 0.0, AttractorSurfaceRadius: > 0.0 }
+                ? ValidateLandingChallengeFields(s) is { } err
+                    ? throw new AssetException($"scene system kind=landing_challenge: {err}")
+                    : new SceneSystem
+                    {
+                        Kind = SceneSystemKind.LandingChallenge, ProbeModel = key, ProbeLocalMesh = 0, ProbeLocalMat = localMat,
+                        ProbeRadius = s.ProbeRadius, ZoneCenter = s.ZoneCenter, ZoneRadius = s.ZoneRadius,
+                        SurfaceBand = s.SurfaceBand, DropHeight = s.DropHeight, TargetCount = s.TargetCount,
+                        ShotBudget = s.ShotBudget, QuicksavePath = s.QuicksavePath,
+                    }
+                : throw new AssetException(
+                    "scene system kind=landing_challenge requires a [physics] block with an attractor (mu > 0 AND "
+                    + "surface_radius > 0) — the system reads both from the scene's own materialized physics, not a duplicated field."),
+            _ => throw new AssetException($"unknown scene system kind '{s.Kind}' (probe_drop, landing_challenge)."),
         };
+    }
+
+    // Audit finding (csharp-lowlevel, 🟡): the deleted PlanetContent.SetupPlanetChallenge clamped TargetCount/
+    // ShotBudget to >= 1 (Math.Max(..., 1.0)) — that clamp was not carried over, and a negative count previously
+    // reached AgSceneFormat.BuildPayload's `checked((uint)...)` as a raw OverflowException instead of a named
+    // authoring error. NaN in any double field would rewrite as itself and make every LandingChallengeSystem
+    // comparison silently false (the challenge becomes unwinnable, no probe ever counts) — caught here instead.
+    private static string? ValidateLandingChallengeFields(AuthoredSystem s)
+    {
+        if (s.TargetCount < 1)
+        {
+            return $"'target_count' must be >= 1, got {s.TargetCount}.";
+        }
+
+        if (s.ShotBudget < 1)
+        {
+            return $"'shot_budget' must be >= 1, got {s.ShotBudget}.";
+        }
+
+        if (s.ShotBudget < s.TargetCount)
+        {
+            return $"'shot_budget' ({s.ShotBudget}) must be >= 'target_count' ({s.TargetCount}) — the challenge would be unwinnable.";
+        }
+
+        if (!double.IsFinite(s.ZoneRadius) || s.ZoneRadius <= 0.0)
+        {
+            return $"'zone_radius' must be a positive finite number, got {s.ZoneRadius}.";
+        }
+
+        if (!double.IsFinite(s.SurfaceBand) || s.SurfaceBand <= 0.0)
+        {
+            return $"'surface_band' must be a positive finite number, got {s.SurfaceBand}.";
+        }
+
+        if (!double.IsFinite(s.DropHeight) || s.DropHeight <= 0.0)
+        {
+            return $"'drop_height' must be a positive finite number, got {s.DropHeight}.";
+        }
+
+        if (!float.IsFinite(s.ProbeRadius) || s.ProbeRadius <= 0f)
+        {
+            return $"'probe_radius' must be a positive finite number, got {s.ProbeRadius}.";
+        }
+
+        if (!double.IsFinite(s.ZoneCenter.X) || !double.IsFinite(s.ZoneCenter.Y) || !double.IsFinite(s.ZoneCenter.Z))
+        {
+            return $"'zone_center' must be finite, got {s.ZoneCenter}.";
+        }
+
+        // Audit finding (csharp-lowlevel, 🟡): quicksave_path is a File.Create target taken verbatim from a
+        // cooked blob — reject an absolute path or a traversal segment at cook time (Contenu-2's audit applied
+        // the same posture to blobPath: a path embedded in shipped content must not escape the content root).
+        if (s.QuicksavePath is { Length: > 0 } qp
+            && (Path.IsPathRooted(qp) || qp.Split('/', '\\').Any(seg => seg == "..")))
+        {
+            return $"'quicksave_path' must be a relative path with no '..' segment, got '{qp}'.";
+        }
+
+        return null;
     }
 }

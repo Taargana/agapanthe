@@ -207,6 +207,48 @@ public sealed class AgSceneFormatTests
     }
 
     [Fact]
+    public void Read_RejectsV2WithARecookMessage()
+    {
+        var bytes = Write(Sample());
+        BinaryPrimitives.WriteUInt32LittleEndian(bytes.AsSpan(4, 4), 2);
+        var ex = Assert.Throws<AgSceneException>(() => AgSceneFormat.Read(bytes));
+        Assert.Contains("re-run the asset cook", ex.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void RoundTrip_LandingChallengeSystem()
+    {
+        var d = Sample() with
+        {
+            Systems =
+            [
+                new SceneSystem
+                {
+                    Kind = SceneSystemKind.LandingChallenge, ProbeModel = new AssetKey("procedural/probe"),
+                    ProbeLocalMesh = 0, ProbeLocalMat = 0, ProbeRadius = 3f,
+                    ZoneCenter = new Double3(10, 6_371_000, 0), ZoneRadius = 15.0, SurfaceBand = 9.0,
+                    DropHeight = 120.0, TargetCount = 3, ShotBudget = 6, QuicksavePath = "challenge.save",
+                },
+            ],
+        };
+        var bytes = Write(d);
+        var restored = AgSceneFormat.Read(bytes);
+
+        Assert.Equal(bytes, Write(restored));
+        var sys = Assert.Single(restored.Systems);
+        Assert.Equal(SceneSystemKind.LandingChallenge, sys.Kind);
+        Assert.Equal(new AssetKey("procedural/probe"), sys.ProbeModel);
+        Assert.Equal(3f, sys.ProbeRadius);
+        Assert.Equal(new Double3(10, 6_371_000, 0), sys.ZoneCenter);
+        Assert.Equal(15.0, sys.ZoneRadius);
+        Assert.Equal(9.0, sys.SurfaceBand);
+        Assert.Equal(120.0, sys.DropHeight);
+        Assert.Equal(3, sys.TargetCount);
+        Assert.Equal(6, sys.ShotBudget);
+        Assert.Equal("challenge.save", sys.QuicksavePath);
+    }
+
+    [Fact]
     public void Read_RejectsTruncated()
     {
         var bytes = Write(Sample());

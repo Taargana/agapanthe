@@ -1,0 +1,12 @@
+# Contenu-3c-2 — the VS-3 landing-zone beacon sphere, moved cook-time from
+# Sandbox.PlanetContent.SetupPlanetChallenge's hand-built ModelAsset (radius = AGAPANTHE_ZONE_RADIUS default).
+generator = "uv_sphere"
+radius = 15.0
+segments = 32
+rings = 16
+base_color = [0.02, 0.02, 0.02, 1.0]
+metallic = 0.0
+roughness = 1.0
+emissive = [0.15, 1.0, 0.35]
+emissive_strength = 30.0
+name = "Beacon"

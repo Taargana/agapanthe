@@ -7,23 +7,25 @@ using Agapanthe.Core;
 namespace Agapanthe.Assets.Scene;
 
 /// <summary>
-/// The <c>.agscene</c> cooked-scene blob (Contenu-3b, bumped to v2 by Contenu-3c) — same container shape as
-/// <c>.agmodel</c>: <c>magic "AGSC" | version u32 LE | uncompressedPayloadLen u32 LE</c>, then a raw
+/// The <c>.agscene</c> cooked-scene blob (Contenu-3b, bumped to v2 then v3 by Contenu-3c) — same container shape
+/// as <c>.agmodel</c>: <c>magic "AGSC" | version u32 LE | uncompressedPayloadLen u32 LE</c>, then a raw
 /// <see cref="DeflateStream"/> of the payload. Reader <b>public</b>; writer <b>internal</b> (producing blobs is
 /// the cooker's job — IVT to <c>Agapanthe.Assets.Pipeline</c>). Every count is bounded against the bytes that
 /// remain (by a per-block <c>minRecordBytes</c> divisor) before it drives an allocation; a corrupt blob throws
 /// <see cref="AgSceneException"/>, never a half-built <see cref="SceneDefinition"/>.
 /// <para>
-/// v2 (Contenu-3c) adds: a Newtonian attractor to <c>[physics]</c>, two fields to the <c>[fixed]</c> camera
-/// variant, two no-payload <c>[environment]</c> modes, and a <c>[[system]]</c> section. This codebase's precedent
-/// for growing a cooked format is a version bump + drop the old reader entirely (see <c>.agmodel</c> v1→v2) — v1
-/// throws <see cref="AgSceneException"/> naming a re-cook, not an in-place upgrade.
+/// v2 (Contenu-3c/3c-1) adds: a Newtonian attractor to <c>[physics]</c>, two fields to the <c>[fixed]</c> camera
+/// variant, two no-payload <c>[environment]</c> modes, and a <c>[[system]]</c> section with
+/// <see cref="SceneSystemKind.ProbeDrop"/>. v3 (Contenu-3c/3c-2) adds <see cref="SceneSystemKind.LandingChallenge"/>'s
+/// fields to that same section. This codebase's precedent for growing a cooked format is a version bump + drop
+/// the old reader entirely (see <c>.agmodel</c> v1→v2) — v1/v2 throw <see cref="AgSceneException"/> naming a
+/// re-cook, not an in-place upgrade.
 /// </para>
 /// </summary>
 public static class AgSceneFormat
 {
     private static ReadOnlySpan<byte> Magic => "AGSC"u8;
-    public const uint Version = 2;
+    public const uint Version = 3;
     private const int ContainerHeaderBytes = 4 + 4 + 4;
     private const long MaxPayloadBytes = 1L << 26; // 64 MiB — a 100×100 grid is ~400 KB before deflate
 
@@ -43,10 +45,14 @@ public static class AgSceneFormat
         var version = BinaryPrimitives.ReadUInt32LittleEndian(bytes.Slice(4, 4));
         if (version != Version)
         {
-            throw new AgSceneException(version == 1
-                ? "The .agscene is format v1, which predates Contenu-3c (attractor physics, baked Fixed camera "
-                  + "fields, ProceduralSky/Black environments, scene systems). There is no in-place upgrade — re-run the asset cook."
-                : $"Unsupported .agscene version {version} (this build reads version {Version}).");
+            throw new AgSceneException(version switch
+            {
+                1 => "The .agscene is format v1, which predates Contenu-3c (attractor physics, baked Fixed camera "
+                     + "fields, ProceduralSky/Black environments, scene systems). There is no in-place upgrade — re-run the asset cook.",
+                2 => "The .agscene is format v2, which predates the LandingChallenge scene system (Contenu-3c-2). "
+                     + "There is no in-place upgrade — re-run the asset cook.",
+                _ => $"Unsupported .agscene version {version} (this build reads version {Version}).",
+            });
         }
 
         var uncompressedLen = BinaryPrimitives.ReadUInt32LittleEndian(bytes.Slice(8, 4));
@@ -234,9 +240,10 @@ public static class AgSceneFormat
             ? new SceneRestore { SnapshotPath = r.ReadString() }
             : null;
 
-        // v2 (Contenu-3c): scene systems, appended after [restore]. Shortest record: kind(1) + probeModelKeyIdx(4)
-        // + probeLocalMesh(4) + probeLocalMat(4) + probeRadius(4) + every(4) + centre(24) — the only kind today
-        // (ProbeDrop) IS the shortest/only shape.
+        // v2/v3 (Contenu-3c): scene systems, appended after [restore]. 45 = ProbeDrop's record size, the FLOOR
+        // across variants, not "the only kind" — kind(1) + probeModelKeyIdx(4) + probeLocalMesh(4) + probeLocalMat(4)
+        // + probeRadius(4) + every(4) + centre(24) = 45; LandingChallenge's record (v3) is 75+, strictly larger.
+        // Any future kind shorter than 45 bytes must lower this constant, or the count-forging guard below weakens.
         var systemCount = r.ReadCount(minRecordBytes: 45);
         var systems = new SceneSystem[systemCount];
         for (var s = 0; s < systemCount; s++)
@@ -252,6 +259,13 @@ public static class AgSceneFormat
                 {
                     Kind = kind, ProbeModel = probeModel, ProbeLocalMesh = probeLocalMesh, ProbeLocalMat = probeLocalMat,
                     ProbeRadius = probeRadius, Every = (int)r.ReadU32(), Centre = r.ReadDouble3(),
+                },
+                SceneSystemKind.LandingChallenge => new SceneSystem // v3 (Contenu-3c-2)
+                {
+                    Kind = kind, ProbeModel = probeModel, ProbeLocalMesh = probeLocalMesh, ProbeLocalMat = probeLocalMat,
+                    ProbeRadius = probeRadius, ZoneCenter = r.ReadDouble3(), ZoneRadius = r.ReadF64(),
+                    SurfaceBand = r.ReadF64(), DropHeight = r.ReadF64(), TargetCount = (int)r.ReadU32(),
+                    ShotBudget = (int)r.ReadU32(), QuicksavePath = r.ReadString(),
                 },
                 _ => throw new AgSceneException($".agscene system {s} has unknown kind {(byte)kind}."),
             };
@@ -410,6 +424,15 @@ public static class AgSceneFormat
                 case SceneSystemKind.ProbeDrop:
                     WriteU32(ms, checked((uint)sys.Every));
                     WriteDouble3(ms, sys.Centre);
+                    break;
+                case SceneSystemKind.LandingChallenge: // v3 (Contenu-3c-2)
+                    WriteDouble3(ms, sys.ZoneCenter);
+                    WriteF64(ms, sys.ZoneRadius);
+                    WriteF64(ms, sys.SurfaceBand);
+                    WriteF64(ms, sys.DropHeight);
+                    WriteU32(ms, checked((uint)sys.TargetCount));
+                    WriteU32(ms, checked((uint)sys.ShotBudget));
+                    WriteString(ms, sys.QuicksavePath);
                     break;
                 default:
                     throw new AgSceneException($"unknown scene system kind {sys.Kind}.");

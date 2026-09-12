@@ -233,4 +233,157 @@ public sealed class SceneCompilerTests
         Assert.Throws<AssetException>(() => SceneCompiler.Compile(
             scene, Loader("models/x.glb"), _ => throw new Xunit.Sdk.XunitException("no prefab")));
     }
+
+    [Fact]
+    public void ToSystem_LandingChallenge_ResolvesMeshAndMaterial()
+    {
+        var scene = new AuthoredScene
+        {
+            Name = "x",
+            Physics = new AuthoredPhysics { AttractorMu = 1e14, AttractorCenter = default, AttractorSurfaceRadius = 100.0 },
+        };
+        scene.Items.Add(new AuthoredItem { Kind = AuthoredItemKind.Entity, Model = "models/x.glb" });
+        scene.Systems.Add(new AuthoredSystem
+        {
+            Kind = "landing_challenge", ProbeModel = "procedural/probe", ProbeRadius = 3f,
+            ZoneCenter = new Double3(10, 100, 0), ZoneRadius = 15.0, SurfaceBand = 9.0, DropHeight = 120.0,
+            TargetCount = 3, ShotBudget = 6, QuicksavePath = "challenge.save",
+        });
+
+        var def = SceneCompiler.Compile(
+            scene, Loader("models/x.glb", "procedural/probe"), _ => throw new Xunit.Sdk.XunitException("no prefab"));
+
+        var sys = Assert.Single(def.Systems);
+        Assert.Equal(SceneSystemKind.LandingChallenge, sys.Kind);
+        Assert.Equal(new AssetKey("procedural/probe"), sys.ProbeModel);
+        Assert.Equal(0, sys.ProbeLocalMesh);
+        Assert.Equal(3f, sys.ProbeRadius);
+        Assert.Equal(new Double3(10, 100, 0), sys.ZoneCenter);
+        Assert.Equal(15.0, sys.ZoneRadius);
+        Assert.Equal(9.0, sys.SurfaceBand);
+        Assert.Equal(120.0, sys.DropHeight);
+        Assert.Equal(3, sys.TargetCount);
+        Assert.Equal(6, sys.ShotBudget);
+        Assert.Equal("challenge.save", sys.QuicksavePath);
+    }
+
+    [Fact]
+    public void ToSystem_LandingChallenge_NoPhysicsAttractor_Throws()
+    {
+        var scene = new AuthoredScene { Name = "x" };
+        scene.Items.Add(new AuthoredItem { Kind = AuthoredItemKind.Entity, Model = "models/x.glb" });
+        scene.Systems.Add(new AuthoredSystem
+        {
+            Kind = "landing_challenge", ProbeModel = "procedural/probe", ProbeRadius = 3f,
+            ZoneCenter = new Double3(10, 100, 0), ZoneRadius = 15.0, SurfaceBand = 9.0, DropHeight = 120.0,
+            TargetCount = 3, ShotBudget = 6,
+        });
+
+        Assert.Throws<AssetException>(() => SceneCompiler.Compile(
+            scene, Loader("models/x.glb", "procedural/probe"), _ => throw new Xunit.Sdk.XunitException("no prefab")));
+    }
+
+    [Fact]
+    public void ToSystem_LandingChallenge_UniformGravityPhysics_Throws()
+    {
+        // Mu == 0 (the uniform-gravity path) is not an attractor — a LandingChallenge system needs a real one.
+        var scene = new AuthoredScene { Name = "x", Physics = new AuthoredPhysics() };
+        scene.Items.Add(new AuthoredItem { Kind = AuthoredItemKind.Entity, Model = "models/x.glb" });
+        scene.Systems.Add(new AuthoredSystem
+        {
+            Kind = "landing_challenge", ProbeModel = "procedural/probe", ProbeRadius = 3f,
+            ZoneCenter = new Double3(10, 100, 0), ZoneRadius = 15.0, SurfaceBand = 9.0, DropHeight = 120.0,
+            TargetCount = 3, ShotBudget = 6,
+        });
+
+        Assert.Throws<AssetException>(() => SceneCompiler.Compile(
+            scene, Loader("models/x.glb", "procedural/probe"), _ => throw new Xunit.Sdk.XunitException("no prefab")));
+    }
+
+    [Fact]
+    public void ToSystem_LandingChallenge_ZeroSurfaceRadiusPhysics_Throws()
+    {
+        // Audit finding (engine-architect): the cook-time guard originally checked only AttractorMu > 0 — a
+        // scene with mu > 0 but surface_radius == 0 (or negative) satisfied it while leaving the challenge's
+        // contact query measuring against a zero-radius sphere at the planet centre.
+        var scene = new AuthoredScene
+        {
+            Name = "x",
+            Physics = new AuthoredPhysics { AttractorMu = 1e14, AttractorSurfaceRadius = 0.0 },
+        };
+        scene.Items.Add(new AuthoredItem { Kind = AuthoredItemKind.Entity, Model = "models/x.glb" });
+        scene.Systems.Add(new AuthoredSystem
+        {
+            Kind = "landing_challenge", ProbeModel = "procedural/probe", ProbeRadius = 3f,
+            ZoneCenter = new Double3(10, 100, 0), ZoneRadius = 15.0, SurfaceBand = 9.0, DropHeight = 120.0,
+            TargetCount = 3, ShotBudget = 6,
+        });
+
+        Assert.Throws<AssetException>(() => SceneCompiler.Compile(
+            scene, Loader("models/x.glb", "procedural/probe"), _ => throw new Xunit.Sdk.XunitException("no prefab")));
+    }
+
+    [Theory]
+    [InlineData(0, 6)]   // target_count < 1
+    [InlineData(-1, 6)]  // target_count negative — used to reach AgSceneFormat's checked((uint)) as a raw OverflowException
+    [InlineData(3, 0)]   // shot_budget < 1
+    [InlineData(3, 2)]   // shot_budget < target_count — structurally unwinnable
+    public void ToSystem_LandingChallenge_InvalidCounts_Throws(int targetCount, int shotBudget)
+    {
+        var scene = new AuthoredScene
+        {
+            Name = "x",
+            Physics = new AuthoredPhysics { AttractorMu = 1e14, AttractorSurfaceRadius = 100.0 },
+        };
+        scene.Items.Add(new AuthoredItem { Kind = AuthoredItemKind.Entity, Model = "models/x.glb" });
+        scene.Systems.Add(new AuthoredSystem
+        {
+            Kind = "landing_challenge", ProbeModel = "procedural/probe", ProbeRadius = 3f,
+            ZoneCenter = new Double3(10, 100, 0), ZoneRadius = 15.0, SurfaceBand = 9.0, DropHeight = 120.0,
+            TargetCount = targetCount, ShotBudget = shotBudget,
+        });
+
+        Assert.Throws<AssetException>(() => SceneCompiler.Compile(
+            scene, Loader("models/x.glb", "procedural/probe"), _ => throw new Xunit.Sdk.XunitException("no prefab")));
+    }
+
+    [Fact]
+    public void ToSystem_LandingChallenge_NaNZoneRadius_Throws()
+    {
+        var scene = new AuthoredScene
+        {
+            Name = "x",
+            Physics = new AuthoredPhysics { AttractorMu = 1e14, AttractorSurfaceRadius = 100.0 },
+        };
+        scene.Items.Add(new AuthoredItem { Kind = AuthoredItemKind.Entity, Model = "models/x.glb" });
+        scene.Systems.Add(new AuthoredSystem
+        {
+            Kind = "landing_challenge", ProbeModel = "procedural/probe", ProbeRadius = 3f,
+            ZoneCenter = new Double3(10, 100, 0), ZoneRadius = double.NaN, SurfaceBand = 9.0, DropHeight = 120.0,
+            TargetCount = 3, ShotBudget = 6,
+        });
+
+        Assert.Throws<AssetException>(() => SceneCompiler.Compile(
+            scene, Loader("models/x.glb", "procedural/probe"), _ => throw new Xunit.Sdk.XunitException("no prefab")));
+    }
+
+    [Fact]
+    public void ToSystem_LandingChallenge_QuicksavePathTraversal_Throws()
+    {
+        var scene = new AuthoredScene
+        {
+            Name = "x",
+            Physics = new AuthoredPhysics { AttractorMu = 1e14, AttractorSurfaceRadius = 100.0 },
+        };
+        scene.Items.Add(new AuthoredItem { Kind = AuthoredItemKind.Entity, Model = "models/x.glb" });
+        scene.Systems.Add(new AuthoredSystem
+        {
+            Kind = "landing_challenge", ProbeModel = "procedural/probe", ProbeRadius = 3f,
+            ZoneCenter = new Double3(10, 100, 0), ZoneRadius = 15.0, SurfaceBand = 9.0, DropHeight = 120.0,
+            TargetCount = 3, ShotBudget = 6, QuicksavePath = "../../etc/passwd",
+        });
+
+        Assert.Throws<AssetException>(() => SceneCompiler.Compile(
+            scene, Loader("models/x.glb", "procedural/probe"), _ => throw new Xunit.Sdk.XunitException("no prefab")));
+    }
 }

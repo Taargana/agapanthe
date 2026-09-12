@@ -26,7 +26,7 @@ public static class CookRunner
 {
     /// <summary>Bump when the <c>.agmodel</c> payload layout or the glTF decode changes — every blob then
     /// re-cooks on the next run regardless of source hashes.</summary>
-    public const string CookerVersion = "contenu3c-1"; // .agscene v2 (attractor/systems/camera fields) + procedural generators
+    public const string CookerVersion = "contenu3c-2"; // .agscene v3 (LandingChallenge system fields)
 
     private const string StateFileName = ".cookstate";
 

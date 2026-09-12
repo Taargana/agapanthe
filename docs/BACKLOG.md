@@ -527,9 +527,21 @@ pas fixe = source de vérité unique (prérequis netcode) — voir §Physique.
         `docs/plans/2026-09-11-content-3c-scene-systems-design.md` 4,30/5 ; double audit PASS-with-concerns,
         **1 🔴 trouvé-et-corrigé** (`SceneMaterializer` oubliait `.WithAttractor(...)` → `planet-drop` à
         gravité nulle, invisible dans la capture pinned, trouvé par audit seul).
-      - **3c-2** (à décomposer) — `SceneSystemKind.LandingChallenge` + sa fabrique, `SceneSystem.
-        QuicksavePath` (résout la collision `AGAPANTHE_SAVE` host-level vs. F5 quicksave par élimination du
-        second), migration `planet-challenge`.
+      - **3c-2 ✅ (S36)** — `SceneSystemKind.LandingChallenge` + `LandingChallengeSystemFactory`, `SceneSystem.
+        QuicksavePath` (résout la collision `AGAPANTHE_SAVE` host-level vs. F5 quicksave), migration
+        `planet-challenge` (`PlanetChallengeSceneRecipe`/`PlanetStage`/`PlanetContent.cs`/
+        `SandboxCameras.FramePlanetChallengeCamera` supprimés, 0-appelant grep-vérifié). **Plus un correctif
+        générique non prévu à la spec** : `SceneMaterializer.Materialize(bool spawnEntities)` — le double audit
+        a trouvé indépendamment que `AGAPANTHE_LOAD`/F5-quicksave était write-only pour **toute** scène
+        `SceneRecipe` (`planet-drop` cassé depuis 3c-1, jamais détecté faute de protocole de reprise humain
+        pour cette scène), l'ancien code hand-codé gardant le monde vide en mode reprise via
+        `spawnEntities: !loadMode`, mécanisme que l'infra déclarative n'avait pas. Corrigé et vérifié bout-en-
+        bout en live (JIT + NativeAOT) sur `planet-challenge` et `planet-drop`. Spec 3c-2 = §9 ajoutée au doc
+        3c-1 (pas un nouveau fichier — la décomposition concrète de ce que 3c-1 avait délibérément différé) ;
+        double audit PASS-with-concerns, 1 🔴 trouvé-et-corrigé (ci-dessus) + 6 🟠 (garde d'attracteur
+        vérifiait le mauvais invariant, `AttractorSurfaceRadius` non validé au cook, aucune validation
+        numérique sur les nouveaux champs, `QuicksavePath` non validé, `CookerVersion` pas bumpé, commentaire
+        périmé) ; 797 tests.
       - **3c-3** (à décomposer) — générateur `ground_quad`, migration `drive` (**perte confirmée** : son arg
         CLI modèle arbitraire disparaît — `drive.toml` fixe sur `models/DamagedHelmet.glb`, cohérence avec
         toute autre famille de scène post-3b), suppression de `ModelContent.ResolveModelKey` + l'arg CLI

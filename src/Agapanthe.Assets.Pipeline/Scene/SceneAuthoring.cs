@@ -84,8 +84,8 @@ internal sealed class AuthoredRestore
     public required string Snapshot { get; init; }
 }
 
-/// <summary>Contenu-3c: one `[[system]]` block. <see cref="Kind"/> is the TOML string (`"probe_drop"`);
-/// <see cref="SceneCompiler.ToSystem"/> validates it against the known set.</summary>
+/// <summary>Contenu-3c: one `[[system]]` block. <see cref="Kind"/> is the TOML string (`"probe_drop"` |
+/// `"landing_challenge"`); <see cref="SceneCompiler.ToSystem"/> validates it against the known set.</summary>
 internal sealed class AuthoredSystem
 {
     public required string Kind { get; init; }
@@ -95,6 +95,15 @@ internal sealed class AuthoredSystem
     // ProbeDrop
     public int Every { get; init; } = 1;
     public Double3 Centre { get; init; }
+
+    // LandingChallenge (3c-2)
+    public Double3 ZoneCenter { get; init; }
+    public double ZoneRadius { get; init; }
+    public double SurfaceBand { get; init; }
+    public double DropHeight { get; init; }
+    public int TargetCount { get; init; } = 1;
+    public int ShotBudget { get; init; } = 1;
+    public string QuicksavePath { get; init; } = "";
 }
 
 internal sealed class AuthoredScene

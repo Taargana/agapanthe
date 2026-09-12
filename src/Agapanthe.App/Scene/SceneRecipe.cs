@@ -24,8 +24,17 @@ public sealed class SceneRecipe : ISceneRecipe
     public void Build(SimSceneContext sim, PresentationSceneContext? presentation)
     {
         var def = sim.Catalog.LoadScene(new AssetKey($"scenes/{Name}"));
+
+        // Contenu-3c-2 (fixes a 🔴 both audits found: F5/AGAPANTHE_LOAD resume was silently write-only for any
+        // SceneRecipe-driven scene): AGAPANTHE_LOAD takes priority over the scene's own baked [restore] block
+        // (no shipped scene authors one yet — a fixed cook-time snapshot path could never match a runtime
+        // AGAPANTHE_LOAD override anyway) and, when set, suppresses entity spawn so the world stays empty for
+        // GameWorld.Load — mirrors the pre-3c hand-coded recipes' `spawnEntities: !loadMode`, generalized here
+        // instead of reimplemented per recipe.
+        var loadPath = sim.Options.LoadPath;
+        var spawnEntities = loadPath is not { Length: > 0 };
         var result = Agapanthe.Scene.SceneLoader.LoadHeadless(
-            def, sim.Catalog, sim.World, sim.Simulation.Settings.FixedDeltaSeconds);
+            def, sim.Catalog, sim.World, sim.Simulation.Settings.FixedDeltaSeconds, spawnEntities);
 
         if (result.Physics is { } ps)
         {
@@ -33,19 +42,13 @@ public sealed class SceneRecipe : ISceneRecipe
             Log.Info($"Sandbox: [scene '{Name}'] physics — gravity {ps.Gravity}, ground y={ps.GroundY:F2}.");
         }
 
-        if (result.RestorePath is { } rp)
+        if (loadPath is { Length: > 0 })
+        {
+            sim.RequestRestore(loadPath, SnapshotAllocatorPolicy.AdoptFromHeader);
+        }
+        else if (result.RestorePath is { } rp)
         {
             sim.RequestRestore(rp, SnapshotAllocatorPolicy.AdoptFromHeader);
-        }
-        else if (sim.Options.LoadPath is { Length: > 0 })
-        {
-            // Audit finding (engine-architect): every cooked SceneRecipe scene ignores AGAPANTHE_LOAD unless the
-            // scene itself authors a [restore] block (none does yet) — true since Contenu-3b for model/grid/drop/
-            // metalrough, not a 3c-1-specific regression, but it was worth a warning the same way DriveSceneRecipe
-            // already has one rather than a silent no-op.
-            Log.Warn(
-                $"Sandbox: AGAPANTHE_LOAD is set but scene '{Name}' has no [restore] block — it is ignored. "
-                + "Author one in the scene's .toml to resume a snapshot.");
         }
 
         Log.Info($"Sandbox: [scene '{Name}'] {sim.World.LiveEntityCount} entities from cooked data.");

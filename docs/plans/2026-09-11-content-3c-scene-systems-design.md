@@ -589,3 +589,154 @@ this migration to be bit-faithful to; the actual verification gate was always
 3c-2 (`LandingChallenge` + `planet-challenge`) and 3c-3 (`ground_quad` +
 `drive` + cleanup) remain to be decomposed into their own task boards per the
 phase gate — not started.
+
+## 9. 3c-2 design (concrete, decomposed 2026-09-12)
+
+3c-1 deliberately did not pre-declare `LandingChallenge`'s fields on `SceneSystem`
+(YAGNI, confirmed correct by both audits). 3c-2 is that real consumer arriving —
+this section is the concrete design, superseding this doc's earlier speculative
+sketch of the same fields.
+
+### `.agscene` v3
+
+`SceneSystemKind` gains `LandingChallenge = 1`. `SceneSystem` gains, additive to
+the existing `ProbeModel`/`ProbeLocalMesh`/`ProbeLocalMat`/`ProbeRadius` (reused
+verbatim — `LandingChallenge` spawns the same kind of probe as `ProbeDrop`, just
+command-driven and aimed instead of periodic and fixed-centre):
+
+```csharp
+public sealed record SceneSystem
+{
+    // existing: Kind, ProbeModel, ProbeLocalMesh, ProbeLocalMat, ProbeRadius
+    // ProbeDrop
+    public int Every { get; init; }
+    public Double3 Centre { get; init; }
+    // LandingChallenge
+    public Double3 ZoneCenter { get; init; }
+    public double ZoneRadius { get; init; }
+    public double SurfaceBand { get; init; }
+    public double DropHeight { get; init; }
+    public int TargetCount { get; init; }
+    public int ShotBudget { get; init; }
+    public string QuicksavePath { get; init; } = "";
+}
+```
+
+**Deliberately NOT duplicated**: `AttractorCenter`/`SurfaceRadius` — `Landing
+ChallengeSystemFactory` reads them from `MaterializeResult.Physics.Value`
+(already carried by the scene's `[physics]` block, added in 3c-1); a
+`LandingChallenge` system without an attractor is a scene-authoring error,
+enforced by the factory throwing if `result.Physics is null`. The beacon is a
+plain drawable `[[entity]]` (an emissive sphere at a cook-time-computed
+position) — no new field, `SceneMaterializer` already spawns it like any other
+entity.
+
+Binary layout appended to `[[system]]`'s existing record (`kind:u8=1`) after the
+shared probe fields: `zoneCenter:f64×3 | zoneRadius:f64 | surfaceBand:f64 |
+dropHeight:f64 | targetCount:i32 | shotBudget:i32 | quicksavePathLen:u16 +
+UTF-8`. `AgSceneFormat.Version = 3`, v1/v2 rejected with a re-cook message
+(same precedent as v1→v2).
+
+### `LandingChallengeSystemFactory` (`samples/Sandbox/Systems/`)
+
+Mirrors `ProbeDropSystemFactory`'s shape: `Kind => LandingChallenge`, `Stage =>
+Stage.PostSimulation`. `Create` resolves the probe template the same way
+(`BuildRuntimeTemplate` → `ResolveMeshRef`), reads `attractorCenter`/
+`surfaceRadius` off `result.Physics!.Value` (throws if null), constructs the
+existing `LandingChallengeSystem` unchanged (it already takes exactly these
+parameters — zero changes needed to that class), wires `ApplyCommand` →
+`challenge.TryShoot(cmd.Vector)` on `RecipeInput.SpawnProbeCommandKind` (shared
+constant, shared with `ProbeDropSystemFactory` — never a conflict, a scene
+never declares both kinds), calls `RecipeInput.WireProbeKey` (unchanged, still
+used by both factories), and wires the `F5` quicksave handler using
+`spec.QuicksavePath` (falls back to `"challenge.save"` if empty) — this is
+where `SceneSystem.QuicksavePath` closes D7 (the `AGAPANTHE_SAVE` host-level
+vs. F5-quicksave name collision), moving the quicksave path from an env-var
+read inline in the old recipe to authored scene data.
+
+### Camera + content
+
+`planet-challenge`'s camera is exactly as deterministic as `planet`/`planet-
+drop`'s were in 3c-1 (`FramePlanetChallengeCamera` computes eye/yaw/pitch/fov/
+near/far/moveSpeed/shadowDistance from scene constants + the beacon's baked
+position) — collapses into `SceneCamera.Fixed` the same way, zero new runtime
+camera logic. `content/scenes/planet-challenge.toml` = `planet.toml`'s shape
+(same procedural planet/sun spheres, same physics attractor, same black env)
+plus a beacon entity, a probe procedural asset (shared `content/procedural/
+probe.toml` from 3c-1), and the `[[system]]` block. Numbers baked via the same
+throwaway-script approach as 3c-1 (§3c-1 Wave 7), reproducing `PlanetContent.
+SetupPlanetChallenge`/`FramePlanetChallengeCamera`'s exact formulas at their
+env-var defaults.
+
+### Cleanup (end of 3c-2, not deferred to 3c-3)
+
+Once `planet-challenge` migrates, `PlanetStage`, `PlanetContent.
+SetupPlanetScene`/`SetupPlanetChallenge`/`BuildSphereModel`/
+`BuildBlackEnvironment`/`BuildProbeSphere`, and `SandboxCameras.
+FramePlanetChallengeCamera` all reach **zero remaining callers** (verified by
+grep before deletion) — deleted in this phase, not 3c-3, since "delete once
+dead" doesn't need to wait for the unrelated `drive` migration. `drive`'s own
+dead code (`ModelContent.ResolveModelKey`, its CLI arg, `SandboxCameras.
+FrameCamera`/`SetupLights`/`NarrowBounds`) stays out of scope here — those
+still have `drive` as a live caller until 3c-3.
+
+## 10. Outcome (3c-2, closed 2026-09-12)
+
+Delivered as scoped in §9, plus one unplanned cross-cutting fix (see below). Board:
+`.absolute-work/board.md` (archived to `.absolute-work/archive/board-contenu3c2.md`). 5
+waves, 16 tasks (BW-001 through BW-016).
+
+**Gates**: 797 tests (788 close-of-3c-1 baseline + 9 this phase), 0 warning, 0 leak, 0
+validation. `planet-challenge` capture pinned + human visual verdict PASS
+(`ea6ba9101b972940bf4ed00fb6d5e25c`) — planet+sun+beacon visible, camera aimed
+correctly. All 6 other `SceneRecipe` scenes (`model`/`grid`/`drop`/`metalrough`/
+`planet`/`planet-drop`) re-verified byte-identical after 2 forced full re-cooks
+(the `.agscene` v3 bump, then again after the resume fix). `drive` unaffected.
+`HeadlessSim --scene planet-challenge` → exit 1 confirmed (D9, message correctly
+names `LandingChallenge`), on both JIT and a NativeAOT publish. Sandbox + HeadlessSim
+JIT == NativeAOT on every capture/snapshot.
+
+**Double audit** (`csharp-lowlevel` + `engine-architect`, parallel, full diff):
+PASS-with-concerns both, **1 🔴 found independently by both, fixed** — see below. 6
+additional 🟠 findings applied (weak attractor guard mirroring the wrong invariant,
+missing `AttractorSurfaceRadius > 0` cook-time check, no numeric validation on the new
+`landing_challenge` fields — negative counts reached a raw `OverflowException`, NaN
+made the challenge silently unwinnable —, an unvalidated quicksave path taken
+verbatim from a cooked blob, an un-bumped `CookerVersion` that disarmed the
+incremental-recook safety net, and a stale comment asserting a now-false invariant).
+2 🟡 findings noted and deferred to 3c-3 (the shared `ProbeModel`/`ProbeRadius` head
+of `SceneSystem` being `required` will force a future non-spawning kind to author a
+dummy probe; `world_origin` applies to entities but not to
+`AttractorCenter`/`Centre`/`ZoneCenter`, inert today since every scene uses a zero
+origin).
+
+**The 🔴, and why it became a design change rather than a local patch**: `AGAPANTHE_
+LOAD`/F5-quicksave resume for `planet-challenge` was silently broken by this
+migration. The deleted hand-coded `PlanetStage.Build` passed `spawnEntities: !
+loadMode` to keep the world empty in load mode (`GameWorld.Load` hard-throws on a
+non-empty world); `SceneRecipe`/`SceneMaterializer` had no equivalent — they always
+spawn every `[[entity]]` unconditionally. This was not a `planet-challenge`-local
+bug: the identical mechanism failure has affected `planet-drop` since 3c-1, unnoticed
+because `planet-drop` never had a human-verified resume feature the way
+`planet-challenge`'s F5 did. Both audits flagged this as blocking; given the fix
+necessarily touches `SceneMaterializer`/`SceneLoader`/`SceneRecipe` — used by every
+`SceneRecipe`-driven scene, not just this one — it was presented to the user as a
+genuine design decision (options: fix now, accept as scoped debt like D6, or partially
+revert) rather than resolved unilaterally. **The user chose to fix it now** (an
+additional sub-wave, BW-015b): `SceneMaterializer.Materialize` gained `bool
+spawnEntities = true`; `SceneRecipe.Build` computes it from `sim.Options.LoadPath`
+and, when a load is requested, restores from that runtime path directly (taking
+priority over any scene-authored `[restore]` block — no scene uses one, and a
+fixed cook-time path could never match a runtime `AGAPANTHE_LOAD` override anyway).
+Live-verified end-to-end on both `planet-challenge` and `planet-drop`, on JIT and
+NativeAOT: save 3/2 entities, relaunch with `AGAPANTHE_LOAD`, world stays empty
+through cook-time spawn, then restores correctly from the snapshot. All 7 pinned
+captures re-confirmed unaffected (the fix only activates when `AGAPANTHE_LOAD` is
+set, which no pinned capture does).
+
+**Deviations from this spec's §9, all confirmed correct in review**: none beyond the
+unplanned §10 fix above — the LandingChallenge field layout, factory shape, and
+content authoring all shipped exactly as designed in §9.
+
+3c-3 (`ground_quad` generator + `drive` migration + final Sandbox cleanup) remains to
+be decomposed into its own task board per the phase gate — not started.

@@ -310,6 +310,103 @@ public sealed class SceneTomlReaderTests
     }
 
     [Fact]
+    public void ReadScene_ParsesLandingChallengeSystem()
+    {
+        var path = TempToml("""
+            name = "x"
+            [[entity]]
+            model = "a"
+
+            [[system]]
+            kind = "landing_challenge"
+            probe_model = "procedural/probe"
+            probe_radius = 3.0
+            zone_center = [10.0, 6371000.0, 0.0]
+            zone_radius = 15.0
+            surface_band = 9.0
+            drop_height = 120.0
+            target_count = 3
+            shot_budget = 6
+            quicksave_path = "challenge.save"
+            """);
+        try
+        {
+            var s = SceneTomlReader.ReadScene(path);
+            var sys = Assert.Single(s.Systems);
+            Assert.Equal("landing_challenge", sys.Kind);
+            Assert.Equal("procedural/probe", sys.ProbeModel);
+            Assert.Equal(3.0f, sys.ProbeRadius);
+            Assert.Equal(new Double3(10, 6_371_000, 0), sys.ZoneCenter);
+            Assert.Equal(15.0, sys.ZoneRadius);
+            Assert.Equal(9.0, sys.SurfaceBand);
+            Assert.Equal(120.0, sys.DropHeight);
+            Assert.Equal(3, sys.TargetCount);
+            Assert.Equal(6, sys.ShotBudget);
+            Assert.Equal("challenge.save", sys.QuicksavePath);
+        }
+        finally
+        {
+            File.Delete(path);
+        }
+    }
+
+    [Fact]
+    public void ReadScene_LandingChallengeSystemMissingZoneCenter_Throws()
+    {
+        var path = TempToml("""
+            name = "x"
+            [[entity]]
+            model = "a"
+            [[system]]
+            kind = "landing_challenge"
+            probe_model = "procedural/probe"
+            probe_radius = 3.0
+            zone_radius = 15.0
+            surface_band = 9.0
+            drop_height = 120.0
+            target_count = 3
+            shot_budget = 6
+            """);
+        try
+        {
+            Assert.Throws<AssetException>(() => SceneTomlReader.ReadScene(path));
+        }
+        finally
+        {
+            File.Delete(path);
+        }
+    }
+
+    [Fact]
+    public void ReadScene_LandingChallengeSystemUnknownKey_Throws()
+    {
+        var path = TempToml("""
+            name = "x"
+            [[entity]]
+            model = "a"
+            [[system]]
+            kind = "landing_challenge"
+            probe_model = "procedural/probe"
+            probe_radius = 3.0
+            zone_center = [10.0, 6371000.0, 0.0]
+            zone_radius = 15.0
+            surface_band = 9.0
+            drop_height = 120.0
+            target_count = 3
+            shot_budget = 6
+            every = 30
+            """);
+        try
+        {
+            Assert.Throws<AssetException>(() => SceneTomlReader.ReadScene(path));
+        }
+        finally
+        {
+            File.Delete(path);
+        }
+    }
+
+    [Fact]
     public void ReadScene_ParsesAttractorPhysics()
     {
         var path = TempToml("""

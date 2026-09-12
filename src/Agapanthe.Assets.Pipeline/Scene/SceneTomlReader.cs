@@ -33,6 +33,13 @@ internal static class SceneTomlReader
     // style [[grid]]/[[cluster]] already use).
     private static readonly string[] ProbeDropSystemKeys = ["kind", "probe_model", "probe_radius", "every", "centre"];
 
+    // Contenu-3c-2: landing_challenge's TOML surface.
+    private static readonly string[] LandingChallengeSystemKeys =
+    [
+        "kind", "probe_model", "probe_radius", "zone_center", "zone_radius", "surface_band", "drop_height",
+        "target_count", "shot_budget", "quicksave_path",
+    ];
+
     public static AuthoredScene ReadScene(string path)
     {
         var table = Parse(path);
@@ -190,7 +197,8 @@ internal static class SceneTomlReader
             yield return kind switch
             {
                 "probe_drop" => ReadProbeDropSystem(t, path),
-                _ => throw new AssetException($"'{path}': unknown [[system]] kind '{kind}' (probe_drop)."),
+                "landing_challenge" => ReadLandingChallengeSystem(t, path),
+                _ => throw new AssetException($"'{path}': unknown [[system]] kind '{kind}' (probe_drop, landing_challenge)."),
             };
         }
     }
@@ -207,6 +215,32 @@ internal static class SceneTomlReader
                           ?? throw new AssetException($"'{path}': [[system]] kind=probe_drop is missing 'probe_radius'.")),
             Every = (int)(NumOpt(t, "every", path) ?? 1),
             Centre = Double3Opt(t, "centre", path) ?? default,
+        };
+    }
+
+    private static AuthoredSystem ReadLandingChallengeSystem(TomlTable t, string path)
+    {
+        RejectUnknownKeys(t, path, "system (landing_challenge)", LandingChallengeSystemKeys);
+        return new AuthoredSystem
+        {
+            Kind = "landing_challenge",
+            ProbeModel = Str(t, "probe_model", path)
+                         ?? throw new AssetException($"'{path}': [[system]] kind=landing_challenge is missing 'probe_model'."),
+            ProbeRadius = (float)(NumOpt(t, "probe_radius", path)
+                          ?? throw new AssetException($"'{path}': [[system]] kind=landing_challenge is missing 'probe_radius'.")),
+            ZoneCenter = Double3Opt(t, "zone_center", path)
+                         ?? throw new AssetException($"'{path}': [[system]] kind=landing_challenge is missing 'zone_center'."),
+            ZoneRadius = NumOpt(t, "zone_radius", path)
+                         ?? throw new AssetException($"'{path}': [[system]] kind=landing_challenge is missing 'zone_radius'."),
+            SurfaceBand = NumOpt(t, "surface_band", path)
+                          ?? throw new AssetException($"'{path}': [[system]] kind=landing_challenge is missing 'surface_band'."),
+            DropHeight = NumOpt(t, "drop_height", path)
+                         ?? throw new AssetException($"'{path}': [[system]] kind=landing_challenge is missing 'drop_height'."),
+            TargetCount = (int)(NumOpt(t, "target_count", path)
+                          ?? throw new AssetException($"'{path}': [[system]] kind=landing_challenge is missing 'target_count'.")),
+            ShotBudget = (int)(NumOpt(t, "shot_budget", path)
+                         ?? throw new AssetException($"'{path}': [[system]] kind=landing_challenge is missing 'shot_budget'.")),
+            QuicksavePath = Str(t, "quicksave_path", path) ?? "",
         };
     }
 
