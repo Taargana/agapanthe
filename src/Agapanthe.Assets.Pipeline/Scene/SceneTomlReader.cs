@@ -19,6 +19,7 @@ internal static class SceneTomlReader
     [
         "model", "prefab", "position", "rotation", "scale", "casts_shadow",
         "rows", "cols", "spacing_mul", "count", "inverse_mass", "restitution", "radius",
+        "body", "velocity",
     ];
     private static readonly string[] LightKeys = ["kind", "color", "intensity", "direction", "position", "range"];
     private static readonly string[] CameraKeys =
@@ -39,6 +40,9 @@ internal static class SceneTomlReader
         "kind", "probe_model", "probe_radius", "zone_center", "zone_radius", "surface_band", "drop_height",
         "target_count", "shot_budget", "quicksave_path",
     ];
+
+    // Contenu-3c-3: drive_control's TOML surface — no probe fields at all.
+    private static readonly string[] DriveControlSystemKeys = ["kind", "controlled_entity_index", "move_speed"];
 
     public static AuthoredScene ReadScene(string path)
     {
@@ -126,6 +130,16 @@ internal static class SceneTomlReader
                 throw new AssetException($"'{path}': each [[{key}]] needs exactly one of 'model' or 'prefab'.");
             }
 
+            // Audit finding (3c-3, engine-architect, 🟡): 'body'/'velocity' are only meaningful on a bare
+            // [[entity]] (Compile's Grid/Cluster branches never read AuthoredItem.HasBody/Velocity — Grid always
+            // passes body: null, Cluster builds its OWN SceneBody from InverseMass/Restitution/Radius). Letting
+            // them parse silently on [[grid]]/[[cluster]] would violate RejectUnknownKeys' own guarantee that no
+            // authoring key is accepted and then ignored.
+            if (kind != AuthoredItemKind.Entity && (t.ContainsKey("body") || t.ContainsKey("velocity")))
+            {
+                throw new AssetException($"'{path}': 'body'/'velocity' are only valid on [[entity]], not [[{key}]].");
+            }
+
             yield return new AuthoredItem
             {
                 Kind = kind,
@@ -142,6 +156,8 @@ internal static class SceneTomlReader
                 InverseMass = (float)(NumOpt(t, "inverse_mass", path) ?? 1.0),
                 Restitution = (float)(NumOpt(t, "restitution", path) ?? 0.3),
                 Radius = NumOpt(t, "radius", path) is { } rr ? (float)rr : null,
+                HasBody = BoolOpt(t, "body", path) ?? false,
+                Velocity = Vec3Opt(t, "velocity", path) ?? Vector3.Zero,
             };
         }
     }
@@ -198,7 +214,8 @@ internal static class SceneTomlReader
             {
                 "probe_drop" => ReadProbeDropSystem(t, path),
                 "landing_challenge" => ReadLandingChallengeSystem(t, path),
-                _ => throw new AssetException($"'{path}': unknown [[system]] kind '{kind}' (probe_drop, landing_challenge)."),
+                "drive_control" => ReadDriveControlSystem(t, path),
+                _ => throw new AssetException($"'{path}': unknown [[system]] kind '{kind}' (probe_drop, landing_challenge, drive_control)."),
             };
         }
     }
@@ -241,6 +258,19 @@ internal static class SceneTomlReader
             ShotBudget = (int)(NumOpt(t, "shot_budget", path)
                          ?? throw new AssetException($"'{path}': [[system]] kind=landing_challenge is missing 'shot_budget'.")),
             QuicksavePath = Str(t, "quicksave_path", path) ?? "",
+        };
+    }
+
+    private static AuthoredSystem ReadDriveControlSystem(TomlTable t, string path)
+    {
+        RejectUnknownKeys(t, path, "system (drive_control)", DriveControlSystemKeys);
+        return new AuthoredSystem
+        {
+            Kind = "drive_control",
+            ControlledEntityIndex = (int)(NumOpt(t, "controlled_entity_index", path)
+                                    ?? throw new AssetException($"'{path}': [[system]] kind=drive_control is missing 'controlled_entity_index'.")),
+            MoveSpeed = (float)(NumOpt(t, "move_speed", path)
+                        ?? throw new AssetException($"'{path}': [[system]] kind=drive_control is missing 'move_speed'.")),
         };
     }
 

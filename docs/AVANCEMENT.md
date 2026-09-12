@@ -1,6 +1,14 @@
 # Agapanthe — Plan complet & état d'avancement
 
-**Mis à jour** : 2026-09-12 (session 36 — **Contenu-3c-2 CLOS** : `LandingChallenge` system kind + fabrique +
+**Mis à jour** : 2026-09-12 (session 37 — **Contenu-3c-3 CLOS → Contenu-3c CLOS (3/3) → domaine Contenu
+ENTIÈREMENT CLOS** : `ground_quad` + migration `drive` (dernière scène hand-codée) + nettoyage final — après
+cette session, toutes les scènes du Sandbox sont des données cuites `SceneRecipe`, zéro recipe hand-codée
+restante ; `.agscene` v3→v4 (`SceneSystemKind.DriveControl`, 1ᵉʳ système sans spawn, champs probe relaxés en
+optionnels) ; nouveau `MaterializeResult.SpawnedEntities` ; nouvelle capacité d'authoring `[[entity]] body =
+true` (n'existait pas avant) ; double audit PASS-with-concerns ×2, **2 🔴/🟠 trouvés indépendamment par les
+deux et corrigés** (reprise `drive_control` cassée au lieu de no-op ; corps physiques dupliqués sur modèle
+multi-mesh) + fermeture de la dette `world_origin` accumulée sur les 3 phases ; 831 tests, capture `drive`
+pinned + verdict visuel PASS, 0 leak/0 validation) · 2026-09-12 (session 36 — **Contenu-3c-2 CLOS** : `LandingChallenge` system kind + fabrique +
 migration `planet-challenge`, plus un correctif générique de reprise (`SceneMaterializer.Materialize(bool
 spawnEntities)`) qui ferme un 🔴 trouvé par le double audit — `AGAPANTHE_LOAD` était write-only pour toute
 scène `SceneRecipe` déclarant un `[physics]`/entités, y compris `planet-drop` depuis 3c-1, jamais détecté
@@ -818,10 +826,47 @@ Spec : [2026-07-25-vs2-spawn-runtime-newtonian-gravity-design.md](plans/2026-07-
 > système non-spawneur · `world_origin` pas appliqué à `AttractorCenter`/`Centre`/`ZoneCenter` (inerte
 > aujourd'hui). **Verdict visuel humain : PASS** (2026-09-12).
 >
-> ### ▶️ Reprise — **Contenu-3c-3** (`ground_quad` + migration `drive` + nettoyage final), ou 2ᵉ slice dissemblable, ou UI-3
-> 3c-1/3c-2 clos. 3c-3 reste à décomposer en board (le design existe déjà dans le spec/plan-mode file).
-> Non urgent — confort/uniformisation, pas une dette bloquante. Alternatives : **2ᵉ slice dissemblable**
-> (top-down) · **UI-3** (timestamps GPU + seam `FrameProfiler`).
+> ### ✅ **Contenu-3c-3 CLOS (S37)** — `ground_quad` + migration `drive` + nettoyage final — **Contenu-3c CLOS (3/3), domaine Contenu entièrement clos**
+> Spec : `docs/plans/2026-09-11-content-3c-scene-systems-design.md` §11 (ajoutée cette session).
+>
+> **Livré** : après cette phase, **toutes les scènes du Sandbox tournent sur `SceneRecipe` cuit — zéro recipe
+> hand-codée restante**. `.agscene` v3→v4 : `SceneSystemKind.DriveControl` — 1ᵉʳ système qui ne spawne rien,
+> forçant `SceneSystem.ProbeModel`/`ProbeLocalMesh`/`ProbeLocalMat`/`ProbeRadius` (`required` depuis 3c-1) à
+> devenir optionnels (ferme la dette 🟡 F2 de 3c-2). Nouveau `MaterializeResult.SpawnedEntities` (parallèle à
+> `Entities`, capture l'`EntityRef` que `SpawnBody` jetait avant). **Nouvelle capacité d'authoring découverte en
+> cours de route** : `[[entity]]` n'avait aucun support de corps physique — ajout de `body`/`velocity`
+> réutilisant les champs déjà présents pour `[[cluster]]`. Nouveau `GroundQuadGenerator` (cook-time, moved
+> verbatim). Nouveau `DriveControlSystemFactory` câble l'`InputMap`/`SampleInput`/`ApplyCommand` de l'ancien
+> `DriveSceneRecipe`. Garde single-slot de `SceneRecipe` élargie à `InputMap`/`SampleInput` (ferme la dette 🟡
+> F4 de 3c-2). Supprimés (0-appelant vérifié) : `DriveSceneRecipe.cs`, `ModelContent.cs`, `SandboxCameras.cs`
+> (tous deux entièrement morts), `BenchSpinSystem.cs`/`ChurnSystem.cs`, `RecipeInput.WireFreeFly`. `drive`
+> devient `SceneRecipe("drive")` + `content/procedural/ground.toml` + `content/scenes/drive.toml`
+> (`models/DamagedHelmet.glb` fixé — D6, perte déjà acceptée).
+>
+> **Gates** : **831 tests**, capture `drive` pinned + verdict visuel PASS (`9030f6a6…`), les 7 autres scènes
+> re-vérifiées inchangées après 2 re-cooks complets forcés, `--scene drive` → exit 1 confirmé (D9, nomme
+> `DriveControl`), Sandbox + HeadlessSim JIT == NativeAOT, 0 leak / 0 validation.
+>
+> **Double audit** : PASS-with-concerns ×2 — vague de clôture, donc revue aussi de la dette 🟡 accumulée sur
+> tout Contenu-3c. **2 🟠 trouvés indépendamment par les deux et corrigés** : `drive_control` + une reprise en
+> attente plantait au démarrage (contredisant le spec, qui promettait un no-op) — `DriveControl` ne peut
+> fondamentalement pas résoudre « le corps à l'index N du cook » après une reprise (contrairement au seed
+> paresseux de `LandingChallengeSystem`, qui ne dérive qu'un compte) → rejeté explicitement au cook-time et au
+> runtime plutôt que de tenter un no-op cassé · `[[entity]] body = true` sur un modèle multi-mesh ou un prefab
+> multi-membres spawnait silencieusement N corps co-localisés qui se pénètrent mutuellement → rejeté au
+> cook-time sauf exactement une entité produite. 5 findings 🟡 supplémentaires appliqués (`body`/`velocity`
+> fuyaient sur `[[grid]]`/`[[cluster]]`, modèle-probe `None` non-`DriveControl` différait vers un échec tardif,
+> état mutable sur fabrique singleton, `FirstOrDefault` silencieux sur fabrique dupliquée) et — **seule dette
+> 🟡 accumulée sur les 3 phases jugée digne de fermeture avant clôture du domaine, recommandation des deux
+> audits** — `world_origin` pas appliqué à `AttractorCenter`/`Centre`/`ZoneCenter`, désormais rejeté au
+> cook-time. `CookerVersion` bumpé à `contenu3c-3`. **Dette laissée** (hors scope, backlog) : environnement
+> procédural réel (Contenu-2b) · nom d'entité→`GlobalId` (D8) · validation `ProbeRadius`/`Every` · scripts de
+> dérivation non committés. **Verdict visuel humain : PASS** (2026-09-12).
+>
+> ### ▶️ Reprise — **2ᵉ slice dissemblable**, ou **UI-3**
+> Le domaine **Contenu est ENTIÈREMENT CLOS**. Alternatives pour la suite : **2ᵉ slice dissemblable** (top-down,
+> prouve l'intégration sur un axe différent du gameplay planétaire) · **UI-3** (timestamps GPU + seam
+> `FrameProfiler`, dette laissée depuis UI-2).
 >
 > ### Contexte — **Cap moteur** (réorientation S25)
 > **Vertical Slice CLOSE dans son intention** : VS-1 (S22) · VS-2 (S23) · VS-3 (S24) ont prouvé l'intégration

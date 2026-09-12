@@ -740,3 +740,168 @@ content authoring all shipped exactly as designed in §9.
 
 3c-3 (`ground_quad` generator + `drive` migration + final Sandbox cleanup) remains to
 be decomposed into its own task board per the phase gate — not started.
+
+## 11. 3c-3 design (concrete, decomposed 2026-09-12)
+
+Final gated sub-phase: `ground_quad` generator + `drive` migration + Sandbox cleanup. Unlike
+3c-2 (which reused 3c-1's `SceneSystem` shape almost verbatim), `drive`'s input model —
+continuous axis-vector movement steering an already-spawned body, not a periodic or
+command-triggered spawn — does not fit the "probe" shape at all. This is exactly the moment
+3c-2's audit-deferred debt (F2: the shared `ProbeModel`/`ProbeRadius` head being `required`
+will force a future non-spawning kind to author a dummy model; F4: the `ApplyCommand`-only
+guard doesn't cover `InputMap`/`SampleInput`) becomes live, so both are closed here rather
+than deferred again.
+
+### `ground_quad` generator (cook-time, no format bump)
+
+`GroundQuadGenerator.Build` — `ModelContent.BuildGroundModel`/`BuildGrassImage` moved
+verbatim into `Agapanthe.Assets.Pipeline/Procedural/GroundQuadGenerator.cs`, registered in
+`ProceduralGenerators.ByName["ground_quad"]`. TOML: `generator = "ground_quad"`, `size`
+(required float) — the old runtime code sized the ground dynamically from the loaded
+model's `AggregateBounds`; since D6 fixes `drive` on `models/DamagedHelmet.glb`, the size
+becomes a baked constant (derived via the same throwaway-script approach, reproducing
+`groundSize = max((span * 2.5) + (extent.Y * 8.0), 40.0)` at `DamagedHelmet.glb`'s actual
+bounds). `drive`'s zero-gravity physics, `ProceduralSky` environment, and deterministic
+`Fixed` camera all fit the **existing** v3 format — no bump needed for those.
+
+### `SceneSystemKind.DriveControl` — format bump to v4, 2 structural changes
+
+**Change 1 (closes 3c-2 audit finding F2)**: `SceneSystem.ProbeModel`/`ProbeLocalMesh`/
+`ProbeLocalMat`/`ProbeRadius` go from `required` to defaulted (`AssetKey.None`/`0`/`0`/
+`0f`) — `DriveControl` spawns nothing at runtime, so authoring a dummy probe model to
+satisfy `required` would be exactly the anti-pattern F2 warned about.
+`SceneMaterializer.Materialize`'s system-model-loading loop skips a `None` `ProbeModel`
+(`if (!system.ProbeModel.IsNone && !models.ContainsKey(...))`).
+
+**Change 2**: `SceneSystem` gains `int ControlledEntityIndex` (default 0) and `float
+MoveSpeed` (was the hardcoded `DriveMoveSpeed = 6f` constant in `DriveSceneRecipe`, now
+authored). `ControlledEntityIndex` names which of `def.Entities` (the flat, cook-time-
+ordered list) this system steers — `drive.toml` has exactly one `[[entity]]` with a
+`[body]` block, at index 0.
+
+**`MaterializeResult` gains `IReadOnlyList<EntityRef?> SpawnedEntities`** (parallel to
+`def.Entities`; `null` at an index where spawn was skipped for a pending restore —
+reuses 3c-2's `spawnEntities` mechanism, so `DriveControl` also correctly no-ops during
+a resume until the restore populates the world). `SceneMaterializer.Materialize` captures
+`GameWorld.SpawnBody`'s return value (an `EntityRef`, previously discarded) into this
+list instead of just calling it for effect.
+
+### `DriveControlSystemFactory` (client)
+
+`Kind => DriveControl`, `Stage => Stage.Input` (mirrors `ProbeDropSystemFactory` — this
+also polls a `SampleInput` callback every tick). `Create` resolves `result.
+SpawnedEntities[spec.ControlledEntityIndex]` (throws if `null`/out of range — a restore
+not yet applied when this runs would be a materializer ordering bug, not an authoring
+mistake, same posture as `LandingChallengeSystemFactory`'s attractor guard), constructs
+the exact `InputMap`/`SampleInput`/`ApplyCommand` wiring `DriveSceneRecipe` has today
+(axis-vector `BindAxisVector`, brake `BindButton(OnPress)`, `X`-key edge tracked in a
+small mutable field), scaled by `spec.MoveSpeed`.
+
+### Guard widening (closes 3c-2 audit finding F4)
+
+`SceneRecipe.Build`'s dispatch loop currently snapshots only `sim.Simulation.ApplyCommand`
+before/after each factory's `Create` call. `DriveControlSystemFactory` is the first factory
+to also assign `InputMap`/`SampleInput` — both are single-slot on `SimulationHost`, same as
+`ApplyCommand`. The guard is widened to snapshot and compare all three, throwing the same
+"more than one input-wiring system" `InvalidOperationException` if any of them changed
+after a `priorX is not null`. No scene declares two input-wiring systems today (drive never
+coexists with ProbeDrop/LandingChallenge), so this is defence-in-depth exercised for real
+by the format bump, not by a live conflict.
+
+### Content
+
+`content/procedural/ground.toml` (`ground_quad`, baked `size`). `content/scenes/drive.toml`
+— `models/DamagedHelmet.glb` fixed (D6: the CLI arbitrary-model arg is dropped, a confirmed,
+already-accepted capability loss), baked `Fixed` camera + 2 point lights (from
+`SandboxCameras.FrameCamera`/`SetupLights`'s deterministic formulas at the Helmet's actual
+bounds — same throwaway-script derivation as every prior migration), `[environment]
+procedural_sky = true`, `[physics] gravity = [0,0,0] ground_y = -100000`, `[[system]] kind
+= "drive_control" move_speed = 6.0 controlled_entity_index = 0`.
+
+### Cleanup (grep-verified 0-caller before deletion)
+
+`DriveSceneRecipe.cs` deleted. `ModelContent.cs` becomes **fully dead** and is deleted
+whole (`ResolveModelKey`/`LogModelStats`/`BuildGroundModel`/`BuildSkyEnvironment`/
+`BuildGrassImage` lose their only caller; `ParseGrid`/`ParseDrop`/`ModelDiagonal` were
+**already** 0-caller since Contenu-3b's `ModelSceneRecipe` deletion — pre-existing debt
+swept here, not new this phase). `SandboxCameras.cs` becomes fully dead and is deleted
+whole (`FrameCamera`/`SetupLights`/`NarrowBounds` lose their only caller). `RecipeInput.
+WireFreeFly` was already 0-caller (superseded by `Agapanthe.App.Scene.SceneInput.
+EnableFreeFly` back in Contenu-3b) — deleted here as the same kind of pre-existing sweep.
+`BenchSpinSystem.cs`/`ChurnSystem.cs` confirmed 0-caller (never wired into any recipe,
+pre-existing) — deleted per the original 3c-3 plan's "if confirmed dead" clause.
+
+### Deferred (unchanged from 3c-1/3c-2)
+
+Procedural environment as a real cooked `.agenv` (Contenu-2b) · entity name→`GlobalId`
+lookup (D8, no consumer) · `world_origin` not applied to `AttractorCenter`/`Centre`/
+`ZoneCenter` (3c-1/3c-2 debt, still inert while every scene uses a zero origin — `drive`
+also uses a zero origin, does not widen this) · `ProbeRadius`/`Every` validation (3c-1
+debt, `DriveControl` doesn't touch these fields at all).
+
+## 12. Outcome (3c-3, closed 2026-09-12) — CLOSES Contenu-3c (3/3), the domain "declarative scenes" effort finishes here
+
+Delivered as designed in §11, plus fixes from the double audit (below). Board:
+`.absolute-work/board.md` (archived to `.absolute-work/archive/board-contenu3c3.md`). 6
+waves, 20 tasks (CW-001 through CW-020).
+
+**Every Sandbox scene now runs on cooked `SceneRecipe` data — zero hand-coded recipes
+remain.** `model`/`grid`/`drop`/`metalrough` (Contenu-3b), `planet`/`planet-drop`
+(3c-1), `planet-challenge` (3c-2), `drive` (3c-3): 8 scenes, one generic
+`SceneRecipe(string)` each, backed by `content/scenes/*.toml`.
+
+**Gates**: 831 tests (821 close-of-3c-2 baseline + ~10 net this phase after audit-driven
+additions), 0 warning, 0 leak, 0 validation. `drive` capture pinned + human visual
+verdict PASS (`9030f6a64e9587b05d5abb99b487b1b9`). All 7 other scenes re-verified
+byte-identical across two forced full re-cooks (the `.agscene` v4 bump, then again
+after the audit fixes). `HeadlessSim --scene drive` → exit 1 confirmed (D9, message
+names `DriveControl`), on both JIT and a NativeAOT publish. Sandbox + HeadlessSim
+JIT == NativeAOT on every capture/snapshot.
+
+**Double audit** (`csharp-lowlevel` + `engine-architect`, parallel, full diff — plus,
+since this is the closing phase, a review of all 3 phases' accumulated 🟡 deferred
+debt for anything that should block domain close): PASS-with-concerns both, **2 🟠
+found independently by both and fixed**:
+1. `drive_control` + a pending restore (`AGAPANTHE_LOAD` or `[restore]`) was a hard
+   startup crash, contradicting this doc's own §11 claim that it "correctly no-ops
+   during a resume." Unlike `LandingChallengeSystem`'s lazy count-based seed,
+   `DriveControl` genuinely cannot resolve "the body at cook-time index N" after a
+   restore — fixed by rejecting the combination explicitly (cook time via
+   `SceneCompiler`, runtime via `SceneRecipe` for the `AGAPANTHE_LOAD` case cook time
+   can't see), not by attempting a broken no-op.
+2. `[[entity]] body = true` on a multi-mesh model or multi-member prefab silently
+   spawned N co-located, mutually-penetrating rigid bodies (`Place` stamps one
+   `SceneBody` onto every member×mesh `SceneEntity` it emits) — fixed by rejecting
+   at cook time unless exactly one entity results.
+
+5 additional 🟡 findings applied: `body`/`velocity` TOML keys leaked onto
+`[[grid]]`/`[[cluster]]` and were silently discarded there (violating
+`RejectUnknownKeys`' own no-silent-ignore guarantee) — now kind-gated; a forged/corrupt
+blob's `None` probe model on a non-`DriveControl` kind deferred to a much later,
+less legible failure — now rejected immediately, naming the kind; the mutable brake
+latch + `KeyPressed` subscription lived on the registry-singleton factory instead of
+the per-`Create` system instance — moved; `SceneRecipe`'s factory dispatch used
+`FirstOrDefault`, silently picking the first of several same-`Kind` factories — now
+throws on ambiguity; and — endorsed by both audits as the one 🟡 accumulated across
+all 3 phases worth closing before the domain closes, rather than left as backlog —
+`world_origin` was applied to entity positions but consumed raw by `ScenePhysics.
+AttractorCenter`/`SceneSystem.Centre`/`ZoneCenter`, a silent-wrong-answer landmine for
+the first scene wanting both non-zero — now rejected at cook time.
+`CookRunner.CookerVersion` bumped to `"contenu3c-3"` for the v3→v4 change (a 3c-2
+audit finding, applied consistently here too).
+
+**Deviations from this spec's §11, all confirmed correct or fixed in review**:
+`[[entity]]` needed an entirely new `body`/`velocity` authoring capability that §11
+had not anticipated (only `[[cluster]]` could build a `SceneBody` before this phase) —
+added as in-scope cook-side authoring work, then hardened by the audit fixes above.
+
+Contenu-3c is now **CLOS (3/3)**. The domain "declarative scenes" effort — spanning
+Contenu-1/2/3a/3b/3c-1/3c-2/3c-3 — is complete: every scene, prefab, and gameplay
+system is authored TOML compiled to cooked binary blobs, materialized by GPU-free
+shared code, with client and (eventually) a dedicated server able to run the exact
+same population path. What remains as explicitly scoped-out backlog (not blocking):
+procedural environment as a real cooked `.agenv`/`AssetKind.Environment` (Contenu-2b);
+entity name→`GlobalId` lookup (D8, no consumer); `ProbeRadius`/`Every` validation;
+`MoveSpeed`/`ShadowDistance` sentinel semantics formal documentation; the derivation
+scripts (`bake_planet.cs`, `bake_challenge.cs`, this phase's `drive` bake) not
+committed for traceability.

@@ -116,10 +116,10 @@ public sealed record SceneRestore
 
 /// <summary>Contenu-3c: which gameplay system a <see cref="SceneSystem"/> block describes. A closed tagged
 /// union — same style as <see cref="SceneLightKind"/>/<see cref="SceneCameraMode"/>/<see cref="SceneEnvironmentMode"/>,
-/// never an open/generic bag. <see cref="ProbeDrop"/> shipped in 3c-1; <see cref="LandingChallenge"/> in 3c-2 —
-/// each variant's fields were added to <see cref="SceneSystem"/> only once it had a real consumer (see
-/// <c>.agmodel</c> v1→v2, `.agscene` v1→v2→v3), never pre-declared speculatively.</summary>
-public enum SceneSystemKind : byte { ProbeDrop = 0, LandingChallenge = 1 }
+/// never an open/generic bag. <see cref="ProbeDrop"/> shipped in 3c-1; <see cref="LandingChallenge"/> in 3c-2;
+/// <see cref="DriveControl"/> in 3c-3 — each variant's fields were added to <see cref="SceneSystem"/> only once
+/// it had a real consumer (see <c>.agmodel</c> v1→v2, `.agscene` v1→v2→v3→v4), never pre-declared speculatively.</summary>
+public enum SceneSystemKind : byte { ProbeDrop = 0, LandingChallenge = 1, DriveControl = 2 }
 
 /// <summary>Contenu-3c: data for one client-attached game system. GPU-free — names only <see cref="AssetKey"/>/
 /// <see cref="Double3"/> — so <c>Agapanthe.Scene</c> can carry it without referencing <c>Agapanthe.Engine</c>; the
@@ -129,11 +129,14 @@ public sealed record SceneSystem
     public required SceneSystemKind Kind { get; init; }
 
     /// <summary>The probe model this system spawns at runtime (the golden-angle drop / the aimed landing shot —
-    /// shared by both <see cref="SceneSystemKind"/> variants, same kind of runtime-spawned drawable).</summary>
-    public required AssetKey ProbeModel { get; init; }
+    /// shared by <see cref="ProbeDrop"/>/<see cref="LandingChallenge"/>, same kind of runtime-spawned drawable).
+    /// <see cref="AssetKey.None"/> (the default) for <see cref="DriveControl"/>, which spawns nothing — 3c-3
+    /// relaxed this from `required` specifically so a non-spawning kind never has to author a dummy model
+    /// (audit finding, 3c-2 🟡 F2).</summary>
+    public AssetKey ProbeModel { get; init; }
     public int ProbeLocalMesh { get; init; }
     public int ProbeLocalMat { get; init; }
-    public required float ProbeRadius { get; init; }
+    public float ProbeRadius { get; init; }
 
     // ProbeDrop
     public int Every { get; init; }
@@ -152,4 +155,10 @@ public sealed record SceneSystem
     /// <summary>Where the F5 quicksave writes. Closes D7 (the <c>AGAPANTHE_SAVE</c> host-level vs. F5-quicksave
     /// name collision) by making the quicksave path authored scene data instead of an inline env-var read.</summary>
     public string QuicksavePath { get; init; } = "";
+
+    // DriveControl (3c-3). Names which of the scene's flat, cook-time-ordered Entities this system steers —
+    // MaterializeResult.SpawnedEntities[ControlledEntityIndex] is the EntityRef a client factory calls
+    // GameWorld.SetBodyVelocity on. MoveSpeed replaces the DriveSceneRecipe.DriveMoveSpeed constant.
+    public int ControlledEntityIndex { get; init; }
+    public float MoveSpeed { get; init; }
 }

@@ -216,6 +216,38 @@ public sealed class AgSceneFormatTests
     }
 
     [Fact]
+    public void Read_RejectsV3WithARecookMessage()
+    {
+        var bytes = Write(Sample());
+        BinaryPrimitives.WriteUInt32LittleEndian(bytes.AsSpan(4, 4), 3);
+        var ex = Assert.Throws<AgSceneException>(() => AgSceneFormat.Read(bytes));
+        Assert.Contains("re-run the asset cook", ex.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void RoundTrip_DriveControlSystem_HasNoProbeModel()
+    {
+        // Contenu-3c-3: the first non-spawning SceneSystemKind — ProbeModel stays AssetKey.None (key index 0,
+        // the sentinel), proving the shared probe head doesn't leak a stray key-table entry for this kind.
+        var d = Sample() with
+        {
+            Systems =
+            [
+                new SceneSystem { Kind = SceneSystemKind.DriveControl, ControlledEntityIndex = 1, MoveSpeed = 6f },
+            ],
+        };
+        var bytes = Write(d);
+        var restored = AgSceneFormat.Read(bytes);
+
+        Assert.Equal(bytes, Write(restored));
+        var sys = Assert.Single(restored.Systems);
+        Assert.Equal(SceneSystemKind.DriveControl, sys.Kind);
+        Assert.True(sys.ProbeModel.IsNone);
+        Assert.Equal(1, sys.ControlledEntityIndex);
+        Assert.Equal(6f, sys.MoveSpeed);
+    }
+
+    [Fact]
     public void RoundTrip_LandingChallengeSystem()
     {
         var d = Sample() with

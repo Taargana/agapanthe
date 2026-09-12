@@ -7,7 +7,7 @@ using Agapanthe.Core;
 namespace Agapanthe.Assets.Scene;
 
 /// <summary>
-/// The <c>.agscene</c> cooked-scene blob (Contenu-3b, bumped to v2 then v3 by Contenu-3c) — same container shape
+/// The <c>.agscene</c> cooked-scene blob (Contenu-3b, bumped v2→v3→v4 by Contenu-3c) — same container shape
 /// as <c>.agmodel</c>: <c>magic "AGSC" | version u32 LE | uncompressedPayloadLen u32 LE</c>, then a raw
 /// <see cref="DeflateStream"/> of the payload. Reader <b>public</b>; writer <b>internal</b> (producing blobs is
 /// the cooker's job — IVT to <c>Agapanthe.Assets.Pipeline</c>). Every count is bounded against the bytes that
@@ -17,15 +17,19 @@ namespace Agapanthe.Assets.Scene;
 /// v2 (Contenu-3c/3c-1) adds: a Newtonian attractor to <c>[physics]</c>, two fields to the <c>[fixed]</c> camera
 /// variant, two no-payload <c>[environment]</c> modes, and a <c>[[system]]</c> section with
 /// <see cref="SceneSystemKind.ProbeDrop"/>. v3 (Contenu-3c/3c-2) adds <see cref="SceneSystemKind.LandingChallenge"/>'s
-/// fields to that same section. This codebase's precedent for growing a cooked format is a version bump + drop
-/// the old reader entirely (see <c>.agmodel</c> v1→v2) — v1/v2 throw <see cref="AgSceneException"/> naming a
-/// re-cook, not an in-place upgrade.
+/// fields to that same section. v4 (Contenu-3c/3c-3) adds <see cref="SceneSystemKind.DriveControl"/> — the first
+/// kind that spawns nothing, so the `[[system]]` record's probe fields (`probeModelKeyIdx`/`probeLocalMesh`/
+/// `probeLocalMat`/`probeRadius`) are now written/read as a fixed-but-possibly-sentinel head for every kind
+/// rather than an always-meaningful one (`ProbeModel` on <see cref="SceneSystem"/> defaults to
+/// <see cref="AssetKey.None"/>, key index 0). This codebase's precedent for growing a cooked format is a version
+/// bump + drop the old reader entirely (see <c>.agmodel</c> v1→v2) — v1/v2/v3 throw <see cref="AgSceneException"/>
+/// naming a re-cook, not an in-place upgrade.
 /// </para>
 /// </summary>
 public static class AgSceneFormat
 {
     private static ReadOnlySpan<byte> Magic => "AGSC"u8;
-    public const uint Version = 3;
+    public const uint Version = 4;
     private const int ContainerHeaderBytes = 4 + 4 + 4;
     private const long MaxPayloadBytes = 1L << 26; // 64 MiB — a 100×100 grid is ~400 KB before deflate
 
@@ -50,6 +54,8 @@ public static class AgSceneFormat
                 1 => "The .agscene is format v1, which predates Contenu-3c (attractor physics, baked Fixed camera "
                      + "fields, ProceduralSky/Black environments, scene systems). There is no in-place upgrade — re-run the asset cook.",
                 2 => "The .agscene is format v2, which predates the LandingChallenge scene system (Contenu-3c-2). "
+                     + "There is no in-place upgrade — re-run the asset cook.",
+                3 => "The .agscene is format v3, which predates the DriveControl scene system (Contenu-3c-3). "
                      + "There is no in-place upgrade — re-run the asset cook.",
                 _ => $"Unsupported .agscene version {version} (this build reads version {Version}).",
             });
@@ -240,11 +246,13 @@ public static class AgSceneFormat
             ? new SceneRestore { SnapshotPath = r.ReadString() }
             : null;
 
-        // v2/v3 (Contenu-3c): scene systems, appended after [restore]. 45 = ProbeDrop's record size, the FLOOR
-        // across variants, not "the only kind" — kind(1) + probeModelKeyIdx(4) + probeLocalMesh(4) + probeLocalMat(4)
-        // + probeRadius(4) + every(4) + centre(24) = 45; LandingChallenge's record (v3) is 75+, strictly larger.
-        // Any future kind shorter than 45 bytes must lower this constant, or the count-forging guard below weakens.
-        var systemCount = r.ReadCount(minRecordBytes: 45);
+        // v2/v3/v4 (Contenu-3c): scene systems, appended after [restore]. 25 = DriveControl's record size (v4),
+        // the FLOOR across variants, not any single "shortest kind" claim frozen at one point in time — kind(1)
+        // + probeModelKeyIdx(4) + probeLocalMesh(4) + probeLocalMat(4) + probeRadius(4) + controlledEntityIndex(4)
+        // + moveSpeed(4) = 25; ProbeDrop is 45, LandingChallenge 75+. DriveControl became the floor precisely
+        // because it's the first non-spawning kind (3c-2 audit F2) — a future kind shorter than 25 bytes must
+        // lower this constant again, or the count-forging guard below weakens.
+        var systemCount = r.ReadCount(minRecordBytes: 25);
         var systems = new SceneSystem[systemCount];
         for (var s = 0; s < systemCount; s++)
         {
@@ -266,6 +274,12 @@ public static class AgSceneFormat
                     ProbeRadius = probeRadius, ZoneCenter = r.ReadDouble3(), ZoneRadius = r.ReadF64(),
                     SurfaceBand = r.ReadF64(), DropHeight = r.ReadF64(), TargetCount = (int)r.ReadU32(),
                     ShotBudget = (int)r.ReadU32(), QuicksavePath = r.ReadString(),
+                },
+                SceneSystemKind.DriveControl => new SceneSystem // v4 (Contenu-3c-3) — probeModel is AssetKey.None,
+                    // key index 0 (the sentinel), for this non-spawning kind; the shared head above still reads
+                    // uniformly, just discards it here.
+                {
+                    Kind = kind, ControlledEntityIndex = (int)r.ReadU32(), MoveSpeed = r.ReadF32(),
                 },
                 _ => throw new AgSceneException($".agscene system {s} has unknown kind {(byte)kind}."),
             };
@@ -410,7 +424,7 @@ public static class AgSceneFormat
             WriteString(ms, rs.SnapshotPath);
         }
 
-        // v2 (Contenu-3c): scene systems, appended after [restore].
+        // v2/v3/v4 (Contenu-3c): scene systems, appended after [restore].
         WriteU32(ms, checked((uint)def.Systems.Count));
         foreach (var sys in def.Systems)
         {
@@ -433,6 +447,10 @@ public static class AgSceneFormat
                     WriteU32(ms, checked((uint)sys.TargetCount));
                     WriteU32(ms, checked((uint)sys.ShotBudget));
                     WriteString(ms, sys.QuicksavePath);
+                    break;
+                case SceneSystemKind.DriveControl: // v4 (Contenu-3c-3)
+                    WriteU32(ms, checked((uint)sys.ControlledEntityIndex));
+                    WriteF32(ms, sys.MoveSpeed);
                     break;
                 default:
                     throw new AgSceneException($"unknown scene system kind {sys.Kind}.");

@@ -542,15 +542,34 @@ pas fixe = source de vérité unique (prérequis netcode) — voir §Physique.
         vérifiait le mauvais invariant, `AttractorSurfaceRadius` non validé au cook, aucune validation
         numérique sur les nouveaux champs, `QuicksavePath` non validé, `CookerVersion` pas bumpé, commentaire
         périmé) ; 797 tests.
-      - **3c-3** (à décomposer) — générateur `ground_quad`, migration `drive` (**perte confirmée** : son arg
-        CLI modèle arbitraire disparaît — `drive.toml` fixe sur `models/DamagedHelmet.glb`, cohérence avec
-        toute autre famille de scène post-3b), suppression de `ModelContent.ResolveModelKey` + l'arg CLI
-        Sandbox (dernière trace de la déviation D10 de 3b), nettoyage `SandboxCameras`/`PlanetContent`/
-        `PlanetStage`/`RecipeInput` s'ils deviennent 0-appelant.
+      - **3c-3 ✅ (S37) — Contenu-3c CLOS (3/3), domaine Contenu entièrement clos** — générateur `ground_quad`,
+        `SceneSystemKind.DriveControl` (1ᵉʳ système sans spawn ; `SceneSystem.ProbeModel`/`ProbeLocalMesh`/
+        `ProbeLocalMat`/`ProbeRadius` relaxés `required`→optionnels), nouveau `MaterializeResult.
+        SpawnedEntities`, nouvelle capacité d'authoring `[[entity]] body = true`/`velocity` (n'existait pas —
+        seul `[[cluster]]` construisait un `SceneBody` avant cette phase), migration `drive` (**perte
+        confirmée** : son arg CLI modèle arbitraire disparaît — `drive.toml` fixe sur
+        `models/DamagedHelmet.glb`, cohérence avec toute autre famille de scène post-3b). Suppression de
+        `DriveSceneRecipe.cs`, `ModelContent.cs`/`SandboxCameras.cs` (entièrement morts),
+        `BenchSpinSystem.cs`/`ChurnSystem.cs`, `RecipeInput.WireFreeFly` (tous 0-appelant grep-vérifié — dette
+        pré-existante balayée au passage, pas nouvelle). Garde single-slot de `SceneRecipe` élargie à
+        `InputMap`/`SampleInput` (ferme la dette 🟡 F4 de 3c-2). Spec 3c-3 = §11 ajoutée au doc 3c-1/3c-2 ;
+        double audit PASS-with-concerns ×2 (vague de clôture — a aussi revu la dette accumulée sur les 3
+        phases) : **2 🟠 trouvés indépendamment par les deux et corrigés** — `drive_control` + reprise en
+        attente plantait au lieu de no-op (rejeté explicitement au cook-time et au runtime, `DriveControl` ne
+        peut fondamentalement pas résoudre son index post-reprise contrairement au seed paresseux de
+        `LandingChallengeSystem`) ; `[[entity]] body = true` sur modèle multi-mesh/prefab multi-membres
+        spawnait N corps dupliqués co-localisés (rejeté au cook-time). + 5 🟡 (fuite `body`/`velocity` sur
+        `[[grid]]`/`[[cluster]]`, modèle-probe `None` non-`DriveControl` mal géré, état mutable sur fabrique
+        singleton, `FirstOrDefault` silencieux, **et la fermeture de `world_origin` non appliqué à
+        `AttractorCenter`/`Centre`/`ZoneCenter`** — seule dette 🟡 accumulée sur les 3 phases jugée digne d'être
+        fermée avant la clôture du domaine). `CookerVersion` bumpé à `contenu3c-3` ; 831 tests, capture `drive`
+        pinned + verdict visuel PASS.
       - Hors scope des 3 phases (déféré plus loin, non urgent) : nom d'entité → `GlobalId` (aucun
-        consommateur identifié) ; `BenchSpin`/`Churn` paramétrés par la scène ; instanciation runtime de
-        prefab ; `.agenv` réel + `AssetKind.Environment` pour l'environnement procédural (sky/black restent
-        du code runtime, pas cuits — Contenu-2b) ; ~30 env vars restantes → champs de scène.
+        consommateur identifié) ; `BenchSpin`/`Churn` paramétrés par la scène (supprimés, pas juste différés —
+        0 appelant confirmé) ; instanciation runtime de prefab ; `.agenv` réel + `AssetKind.Environment` pour
+        l'environnement procédural (sky/black restent du code runtime, pas cuits — Contenu-2b) ; validation
+        `ProbeRadius`/`Every` ; sémantique sentinelle `MoveSpeed`/`ShadowDistance` ; scripts de dérivation
+        (`bake_planet.cs`, `bake_challenge.cs`, drive) non committés pour traçabilité.
     - Dette 3a/3b → 3c : règle « rien dans `Build` ne lit le contenu du monde » à inscrire dans `ISceneRecipe` ;
       `Agapanthe.App` → `App` + `App.Client` avant `RunDedicatedServer` (Vulkan dans la closure ; concrètement,
       c'est là que le câblage `MaterializeResult.Physics/RestorePath → PhysicsSystem/RequestRestore`, dupliqué

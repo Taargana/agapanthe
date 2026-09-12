@@ -1,0 +1,5 @@
+# Contenu-3c-3 — the drive scene's ground quad. Size baked from a live run of the old
+# DriveSceneRecipe/ModelContent formula against models/DamagedHelmet.glb's actual bounds:
+# groundSize = max((span*2.5) + (extent.Y*8.0), 40.0), clamped to the 40 m floor for this small model.
+generator = "ground_quad"
+size = 40.0

@@ -174,6 +174,68 @@ public sealed class SceneMaterializerTests
     }
 
     [Fact]
+    public void Materialize_SpawnedEntities_ParallelToDefEntities_BodyGetsRef_DrawableGetsNull()
+    {
+        // Contenu-3c-3: a DriveControl factory indexes MaterializeResult.SpawnedEntities by
+        // SceneSystem.ControlledEntityIndex to find the body it steers — must be parallel to def.Entities,
+        // non-null exactly at a body-entity's index, null for a drawable-only entity.
+        using var world = new GameWorld();
+        var body = new SceneBody { Velocity = Vector3.Zero, InverseMass = 1f, Restitution = 0f, Radius = 1f };
+        var def = Scene([Entity("models/drawable.glb"), Entity("models/body.glb", body: body)]);
+
+        var result = SceneMaterializer.Materialize(def, Loader("models/drawable.glb", "models/body.glb"), world, 1f / 60f);
+
+        Assert.Equal(2, result.SpawnedEntities.Count);
+        Assert.Null(result.SpawnedEntities[0]);
+        Assert.NotNull(result.SpawnedEntities[1]);
+        Assert.True(world.IsAlive(result.SpawnedEntities[1]!.Value));
+    }
+
+    [Fact]
+    public void Materialize_SpawnEntitiesFalse_SpawnedEntitiesAllNull()
+    {
+        using var world = new GameWorld();
+        var body = new SceneBody { Velocity = Vector3.Zero, InverseMass = 1f, Restitution = 0f, Radius = 1f };
+        var def = Scene([Entity("models/body.glb", body: body)]);
+
+        var result = SceneMaterializer.Materialize(def, Loader("models/body.glb"), world, 1f / 60f, spawnEntities: false);
+
+        Assert.Single(result.SpawnedEntities);
+        Assert.Null(result.SpawnedEntities[0]);
+    }
+
+    [Fact]
+    public void Materialize_DriveControlSystem_NoProbeModel_DoesNotReachLoadModel()
+    {
+        // AssetKey.None must never reach loadModel — it expects a real catalog key.
+        using var world = new GameWorld();
+        var def = Scene([Entity("models/x.glb")]) with
+        {
+            Systems = [new SceneSystem { Kind = SceneSystemKind.DriveControl, ControlledEntityIndex = 0, MoveSpeed = 6f }],
+        };
+
+        var result = SceneMaterializer.Materialize(def, Loader("models/x.glb"), world, 1f / 60f);
+
+        Assert.Single(result.Models); // only models/x.glb — no AssetKey.None entry
+    }
+
+    [Fact]
+    public void Materialize_ProbeDropSystem_WithNoProbeModel_Throws()
+    {
+        // Audit finding (csharp-lowlevel, 🟡): AssetKey.None on ProbeModel is only legitimate for DriveControl —
+        // for any other kind it's reachable only via a forged/corrupt blob (ProbeModel was `required` through
+        // 3c-2's authoring surface) and must fail loudly here, not silently skip the load and defer to a much
+        // later, less legible failure inside a client factory.
+        using var world = new GameWorld();
+        var def = Scene([Entity("models/x.glb")]) with
+        {
+            Systems = [new SceneSystem { Kind = SceneSystemKind.ProbeDrop, ProbeRadius = 3f, Every = 30, Centre = default }],
+        };
+
+        Assert.Throws<AssetException>(() => SceneMaterializer.Materialize(def, Loader("models/x.glb"), world, 1f / 60f));
+    }
+
+    [Fact]
     public void Materialize_IdentityPlacement_ComposesTransform_LikeTheRenderPath()
     {
         // The render path (ResourceRegistry.Load → SceneBuilder.BuildEntries) splits mesh.WorldTransform into a

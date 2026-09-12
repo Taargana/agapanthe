@@ -386,4 +386,188 @@ public sealed class SceneCompilerTests
         Assert.Throws<AssetException>(() => SceneCompiler.Compile(
             scene, Loader("models/x.glb", "procedural/probe"), _ => throw new Xunit.Sdk.XunitException("no prefab")));
     }
+
+    [Fact]
+    public void Entity_WithBody_ProducesASceneBody()
+    {
+        // Contenu-3c-3: a bare [[entity]] can opt into a single physics body (`body = true`) — the `drive`
+        // scene's one steerable body, reusing [[cluster]]'s existing InverseMass/Restitution/Radius fields.
+        var scene = new AuthoredScene { Name = "x" };
+        scene.Items.Add(new AuthoredItem
+        {
+            Kind = AuthoredItemKind.Entity, Model = "models/x.glb", HasBody = true,
+            Velocity = new Vector3(1, 0, 0), InverseMass = 2f, Restitution = 0.1f, Radius = 0.5f,
+        });
+
+        var def = SceneCompiler.Compile(scene, Loader("models/x.glb"), _ => throw new Xunit.Sdk.XunitException("no prefab"));
+
+        var e = Assert.Single(def.Entities);
+        Assert.NotNull(e.Body);
+        Assert.Equal(new Vector3(1, 0, 0), e.Body!.Velocity);
+        Assert.Equal(2f, e.Body.InverseMass);
+        Assert.Equal(0.1f, e.Body.Restitution);
+        Assert.Equal(0.5f, e.Body.Radius);
+    }
+
+    [Fact]
+    public void Entity_WithoutBody_IsPlainDrawable()
+    {
+        var scene = new AuthoredScene { Name = "x" };
+        scene.Items.Add(new AuthoredItem { Kind = AuthoredItemKind.Entity, Model = "models/x.glb" });
+
+        var def = SceneCompiler.Compile(scene, Loader("models/x.glb"), _ => throw new Xunit.Sdk.XunitException("no prefab"));
+
+        Assert.Null(Assert.Single(def.Entities).Body);
+    }
+
+    [Fact]
+    public void ToSystem_DriveControl_ResolvesControlledEntity_NoProbeModelLoadNeeded()
+    {
+        var scene = new AuthoredScene { Name = "x" };
+        scene.Items.Add(new AuthoredItem { Kind = AuthoredItemKind.Entity, Model = "models/x.glb", HasBody = true, Radius = 1f });
+        scene.Systems.Add(new AuthoredSystem { Kind = "drive_control", ControlledEntityIndex = 0, MoveSpeed = 6f });
+
+        // Loader only knows the entity's own model — proves drive_control's system-resolution path never
+        // calls loadModel for a probe (it has none), unlike probe_drop/landing_challenge.
+        var def = SceneCompiler.Compile(scene, Loader("models/x.glb"), _ => throw new Xunit.Sdk.XunitException("no prefab"));
+
+        var sys = Assert.Single(def.Systems);
+        Assert.Equal(SceneSystemKind.DriveControl, sys.Kind);
+        Assert.True(sys.ProbeModel.IsNone);
+        Assert.Equal(0, sys.ControlledEntityIndex);
+        Assert.Equal(6f, sys.MoveSpeed);
+    }
+
+    [Fact]
+    public void ToSystem_DriveControl_OutOfRangeIndex_Throws()
+    {
+        var scene = new AuthoredScene { Name = "x" };
+        scene.Items.Add(new AuthoredItem { Kind = AuthoredItemKind.Entity, Model = "models/x.glb", HasBody = true, Radius = 1f });
+        scene.Systems.Add(new AuthoredSystem { Kind = "drive_control", ControlledEntityIndex = 1, MoveSpeed = 6f });
+
+        Assert.Throws<AssetException>(() => SceneCompiler.Compile(
+            scene, Loader("models/x.glb"), _ => throw new Xunit.Sdk.XunitException("no prefab")));
+    }
+
+    [Fact]
+    public void ToSystem_DriveControl_TargetsNonBodyEntity_Throws()
+    {
+        var scene = new AuthoredScene { Name = "x" };
+        scene.Items.Add(new AuthoredItem { Kind = AuthoredItemKind.Entity, Model = "models/x.glb" }); // no body
+        scene.Systems.Add(new AuthoredSystem { Kind = "drive_control", ControlledEntityIndex = 0, MoveSpeed = 6f });
+
+        Assert.Throws<AssetException>(() => SceneCompiler.Compile(
+            scene, Loader("models/x.glb"), _ => throw new Xunit.Sdk.XunitException("no prefab")));
+    }
+
+    [Fact]
+    public void ToSystem_DriveControl_InvalidMoveSpeed_Throws()
+    {
+        var scene = new AuthoredScene { Name = "x" };
+        scene.Items.Add(new AuthoredItem { Kind = AuthoredItemKind.Entity, Model = "models/x.glb", HasBody = true, Radius = 1f });
+        scene.Systems.Add(new AuthoredSystem { Kind = "drive_control", ControlledEntityIndex = 0, MoveSpeed = 0f });
+
+        Assert.Throws<AssetException>(() => SceneCompiler.Compile(
+            scene, Loader("models/x.glb"), _ => throw new Xunit.Sdk.XunitException("no prefab")));
+    }
+
+    [Fact]
+    public void ToSystem_DriveControl_WithRestore_Throws()
+    {
+        // Audit finding (both csharp-lowlevel and engine-architect, 🟠): DriveControl resolves its target via
+        // MaterializeResult.SpawnedEntities, which a pending restore leaves entirely null (spawn suppressed) —
+        // cook-time rejection of the [restore]+drive_control combination, closed alongside SceneRecipe's
+        // runtime AGAPANTHE_LOAD rejection (which this test can't reach — that's an integration-level check).
+        var scene = new AuthoredScene { Name = "x", Restore = new AuthoredRestore { Snapshot = "x.save" } };
+        scene.Items.Add(new AuthoredItem { Kind = AuthoredItemKind.Entity, Model = "models/x.glb", HasBody = true, Radius = 1f });
+        scene.Systems.Add(new AuthoredSystem { Kind = "drive_control", ControlledEntityIndex = 0, MoveSpeed = 6f });
+
+        Assert.Throws<AssetException>(() => SceneCompiler.Compile(
+            scene, Loader("models/x.glb"), _ => throw new Xunit.Sdk.XunitException("no prefab")));
+    }
+
+    private static ModelAsset MultiMeshFakeModel(string name) => new()
+    {
+        Meshes =
+        [
+            new MeshAsset { Positions = [new(-1, -1, -1), new(1, 1, 1)], Indices = [0, 1, 0], MaterialIndex = 0, BoundsCenter = Vector3.Zero, BoundsRadius = 1.7f },
+            new MeshAsset { Positions = [new(-1, -1, -1), new(1, 1, 1)], Indices = [0, 1, 0], MaterialIndex = 0, BoundsCenter = Vector3.Zero, BoundsRadius = 1.7f },
+        ],
+        Materials = [new MaterialAsset { Name = "m" }],
+        Images = [],
+        Name = name,
+    };
+
+    [Fact]
+    public void Entity_WithBody_OnMultiMeshModel_Throws()
+    {
+        // Audit finding (both csharp-lowlevel and engine-architect, 🟠): Place stamps the SAME SceneBody onto
+        // every (member × mesh) SceneEntity it emits — a multi-mesh model with body=true would silently spawn N
+        // co-located, mutually-penetrating rigid bodies. Reject the ambiguity at cook time.
+        var scene = new AuthoredScene { Name = "x" };
+        scene.Items.Add(new AuthoredItem { Kind = AuthoredItemKind.Entity, Model = "models/multi.glb", HasBody = true, Radius = 1f });
+
+        var loader = (Func<AssetKey, ModelAsset>)(k => k.Value == "models/multi.glb"
+            ? MultiMeshFakeModel("multi")
+            : throw new AssetException($"no cooked model '{k}'"));
+
+        Assert.Throws<AssetException>(() => SceneCompiler.Compile(
+            scene, loader, _ => throw new Xunit.Sdk.XunitException("no prefab")));
+    }
+
+    [Fact]
+    public void Entity_WithBody_OnMultiMemberPrefab_Throws()
+    {
+        var scene = new AuthoredScene { Name = "x" };
+        scene.Items.Add(new AuthoredItem { Kind = AuthoredItemKind.Entity, Prefab = "pair", HasBody = true, Radius = 1f });
+
+        var prefab = new AuthoredPrefab();
+        prefab.Entities.Add(new AuthoredItem { Kind = AuthoredItemKind.Entity, Model = "models/x.glb" });
+        prefab.Entities.Add(new AuthoredItem { Kind = AuthoredItemKind.Entity, Model = "models/x.glb" });
+
+        Assert.Throws<AssetException>(() => SceneCompiler.Compile(
+            scene, Loader("models/x.glb"), name => name == "pair" ? prefab : throw new Xunit.Sdk.XunitException("no prefab")));
+    }
+
+    [Fact]
+    public void Compile_NonZeroWorldOriginWithAttractor_Throws()
+    {
+        // Audit finding (engine-architect, 🟡, endorsed as worth closing before Contenu-3c's domain close):
+        // SceneMaterializer.Compose adds WorldOrigin to entity positions but ScenePhysics.AttractorCenter is
+        // consumed raw — a non-zero world_origin + an attractor would silently misalign entity vs. physics
+        // geometry.
+        var scene = new AuthoredScene
+        {
+            Name = "x", WorldOrigin = new Double3(1000, 0, 0),
+            Physics = new AuthoredPhysics { AttractorMu = 1e14, AttractorSurfaceRadius = 100.0 },
+        };
+        scene.Items.Add(new AuthoredItem { Kind = AuthoredItemKind.Entity, Model = "models/x.glb" });
+
+        Assert.Throws<AssetException>(() => SceneCompiler.Compile(
+            scene, Loader("models/x.glb"), _ => throw new Xunit.Sdk.XunitException("no prefab")));
+    }
+
+    [Fact]
+    public void Compile_NonZeroWorldOriginWithProbeDropSystem_Throws()
+    {
+        var scene = new AuthoredScene { Name = "x", WorldOrigin = new Double3(1000, 0, 0) };
+        scene.Items.Add(new AuthoredItem { Kind = AuthoredItemKind.Entity, Model = "models/x.glb" });
+        scene.Systems.Add(new AuthoredSystem { Kind = "probe_drop", ProbeModel = "procedural/probe", ProbeRadius = 3f });
+
+        Assert.Throws<AssetException>(() => SceneCompiler.Compile(
+            scene, Loader("models/x.glb", "procedural/probe"), _ => throw new Xunit.Sdk.XunitException("no prefab")));
+    }
+
+    [Fact]
+    public void Compile_NonZeroWorldOrigin_NoAttractorOrProbeSystem_Succeeds()
+    {
+        // world_origin alone (no attractor, no probe/zone system) is fine — every shipped scene family other
+        // than planet*/drive uses this shape.
+        var scene = new AuthoredScene { Name = "x", WorldOrigin = new Double3(1000, 0, 0) };
+        scene.Items.Add(new AuthoredItem { Kind = AuthoredItemKind.Entity, Model = "models/x.glb" });
+
+        var def = SceneCompiler.Compile(scene, Loader("models/x.glb"), _ => throw new Xunit.Sdk.XunitException("no prefab"));
+
+        Assert.Equal(new Double3(1000, 0, 0), def.WorldOrigin);
+    }
 }

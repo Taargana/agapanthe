@@ -32,7 +32,29 @@ internal static class SceneCompiler
             switch (item.Kind)
             {
                 case AuthoredItemKind.Entity:
-                    Place(entities, members, item.Position, item.Rotation, item.Scale, item.CastsShadow, body: null, loadModel);
+                    // Contenu-3c-3: a bare [[entity]] can opt into a single physics body (`body = true`) — the
+                    // `drive` scene's one steerable body, mirroring how [[cluster]] already builds SceneBody from
+                    // the same InverseMass/Restitution/Radius fields.
+                    var entityBody = item.HasBody
+                        ? new SceneBody { Velocity = item.Velocity, InverseMass = item.InverseMass, Restitution = item.Restitution, Radius = item.Radius ?? 1f }
+                        : null;
+                    var beforeCount = entities.Count;
+                    Place(entities, members, item.Position, item.Rotation, item.Scale, item.CastsShadow, entityBody, loadModel);
+
+                    // Audit finding (3c-3, both csharp-lowlevel and engine-architect, 🟠): `body = true` reads as
+                    // "this entity is ONE body" — but Place emits one SceneEntity per (prefab member × mesh), and
+                    // stamps the SAME SceneBody onto every one of them. A multi-mesh model or multi-member prefab
+                    // would silently spawn N co-located, mutually-penetrating rigid bodies at cook time, with no
+                    // runtime signal (DriveControl's controlled_entity_index would steer only one of the pile).
+                    // Reject the ambiguity at cook time rather than let a future author discover it as a physics
+                    // bug.
+                    if (item.HasBody && entities.Count - beforeCount != 1)
+                    {
+                        throw new AssetException(
+                            $"'{item.Model ?? item.Prefab}': body=true requires exactly one drawable (one mesh, "
+                            + $"one prefab member) — got {entities.Count - beforeCount}.");
+                    }
+
                     break;
 
                 case AuthoredItemKind.Grid:
@@ -45,6 +67,31 @@ internal static class SceneCompiler
 
                 default:
                     throw new AssetException($"unknown scene item kind {item.Kind}.");
+            }
+        }
+
+        // Audit finding (3c-3, engine-architect — the one pre-existing 🟡 endorsed as worth closing before
+        // Contenu-3c's domain close): SceneMaterializer.Compose adds WorldOrigin to every entity's Position, but
+        // ScenePhysics.AttractorCenter and SceneSystem.Centre/ZoneCenter are consumed raw — a scene with a
+        // non-zero world_origin AND an attractor/probe/zone would silently place the entities in one frame and
+        // the physics/gameplay geometry in another. Inert today (every shipped scene uses world_origin = 0);
+        // reject the combination at cook time rather than leave it a silent-wrong-answer landmine for whichever
+        // scene first wants a non-zero origin (the planet family, at ~1e10 m, is the obvious future candidate).
+        if (scene.WorldOrigin != Double3.Zero)
+        {
+            if (scene.Physics is { AttractorMu: > 0.0 })
+            {
+                throw new AssetException(
+                    "a scene with a non-zero world_origin cannot use a physics attractor — AttractorCenter is "
+                    + "not offset by world_origin (tracked debt). Author world_origin = 0 and bake the origin "
+                    + "into entity/attractor positions directly.");
+            }
+
+            if (scene.Systems.Any(s => s.Kind is "probe_drop" or "landing_challenge"))
+            {
+                throw new AssetException(
+                    "a scene with a non-zero world_origin cannot declare a probe_drop/landing_challenge system — "
+                    + "Centre/ZoneCenter are not offset by world_origin (tracked debt).");
             }
         }
 
@@ -65,7 +112,7 @@ internal static class SceneCompiler
                 }
                 : null,
             Restore = scene.Restore is { } r ? new SceneRestore { SnapshotPath = r.Snapshot } : null,
-            Systems = scene.Systems.Select(s => ToSystem(s, loadModel, scene.Physics)).ToArray(),
+            Systems = scene.Systems.Select(s => ToSystem(s, loadModel, scene.Physics, entities, scene.Restore is not null)).ToArray(),
         };
     }
 
@@ -273,8 +320,51 @@ internal static class SceneCompiler
     // Contenu-3c: resolves a [[system]]'s probe model the same way Place resolves a bare entity — mesh 0 (every
     // probe today is a dedicated single-mesh generated sphere), material via the appended-default-material
     // convention (Contenu-3b audit F5) — and validates both exist at cook time rather than at runtime materialize.
-    private static SceneSystem ToSystem(AuthoredSystem s, Func<AssetKey, ModelAsset> loadModel, AuthoredPhysics? physics)
+    // Contenu-3c-3: drive_control spawns no probe at all, so it's routed BEFORE the shared probe-model load
+    // (AssetKey(s.ProbeModel) on an empty string would either throw or resolve to something meaningless — this
+    // kind never touches that path).
+    private static SceneSystem ToSystem(
+        AuthoredSystem s, Func<AssetKey, ModelAsset> loadModel, AuthoredPhysics? physics, List<SceneEntity> entities, bool hasRestore)
     {
+        if (s.Kind == "drive_control")
+        {
+            // Audit finding (3c-3, both csharp-lowlevel and engine-architect, 🟠): DriveControl resolves its
+            // target via MaterializeResult.SpawnedEntities, which is entirely null when a restore is pending
+            // (spawn is suppressed so GameWorld.Load can populate an empty world) — there is no "resolve later"
+            // story for it, unlike LandingChallengeSystem's lazy count-based seed. Reject the combination at
+            // cook time (SceneRecipe additionally rejects the runtime AGAPANTHE_LOAD override, which this can't see).
+            if (hasRestore)
+            {
+                throw new AssetException(
+                    "scene system kind=drive_control is incompatible with a [restore] block — it steers an entity "
+                    + "spawned at cook time, which a restore's suppressed spawn pass never populates.");
+            }
+
+            if (s.ControlledEntityIndex < 0 || s.ControlledEntityIndex >= entities.Count)
+            {
+                throw new AssetException(
+                    $"scene system kind=drive_control 'controlled_entity_index' {s.ControlledEntityIndex} is out of "
+                    + $"range — the scene has {entities.Count} entities.");
+            }
+
+            if (entities[s.ControlledEntityIndex].Body is null)
+            {
+                throw new AssetException(
+                    $"scene system kind=drive_control 'controlled_entity_index' {s.ControlledEntityIndex} names an "
+                    + "entity with no [body] block — DriveControl steers a physics body, not a plain drawable.");
+            }
+
+            if (!float.IsFinite(s.MoveSpeed) || s.MoveSpeed <= 0f)
+            {
+                throw new AssetException($"scene system kind=drive_control 'move_speed' must be a positive finite number, got {s.MoveSpeed}.");
+            }
+
+            return new SceneSystem
+            {
+                Kind = SceneSystemKind.DriveControl, ControlledEntityIndex = s.ControlledEntityIndex, MoveSpeed = s.MoveSpeed,
+            };
+        }
+
         var key = new AssetKey(s.ProbeModel);
         var model = loadModel(key);
         if (model.Meshes.Count == 0)
@@ -310,7 +400,7 @@ internal static class SceneCompiler
                 : throw new AssetException(
                     "scene system kind=landing_challenge requires a [physics] block with an attractor (mu > 0 AND "
                     + "surface_radius > 0) — the system reads both from the scene's own materialized physics, not a duplicated field."),
-            _ => throw new AssetException($"unknown scene system kind '{s.Kind}' (probe_drop, landing_challenge)."),
+            _ => throw new AssetException($"unknown scene system kind '{s.Kind}' (probe_drop, landing_challenge, drive_control)."),
         };
     }
 

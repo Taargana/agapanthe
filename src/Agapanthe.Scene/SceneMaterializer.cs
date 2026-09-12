@@ -53,13 +53,34 @@ public static class SceneMaterializer
 
         foreach (var system in def.Systems)
         {
-            if (!models.ContainsKey(system.ProbeModel))
+            // Contenu-3c-3: DriveControl spawns nothing at runtime and authors no probe model (ProbeModel
+            // relaxed from `required` specifically so this kind never has to fake one) — AssetKey.None must
+            // never reach loadModel, which expects a real catalog key. But for every OTHER kind, None was
+            // `required` through 3c-2 and is only reachable now via a forged/corrupt v4 blob (audit finding,
+            // csharp-lowlevel, 🟡): silently skipping it here would defer the failure to a much-later, less
+            // legible `MissingKeyException` deep in a client factory's `result.Models[spec.ProbeModel]` lookup.
+            if (system.ProbeModel.IsNone)
+            {
+                if (system.Kind != SceneSystemKind.DriveControl)
+                {
+                    throw new AssetException(
+                        $"scene '{def.Name}' declares a '{system.Kind}' system with no probe model — only "
+                        + $"{SceneSystemKind.DriveControl} may omit one.");
+                }
+            }
+            else if (!models.ContainsKey(system.ProbeModel))
             {
                 models[system.ProbeModel] = loadModel(system.ProbeModel);
             }
         }
 
+        // Contenu-3c-3: parallel to def.Entities — the EntityRef a body-entity's SpawnBody returned (null for a
+        // drawable-only entity, or for every entity when spawnEntities is false and nothing was spawned at all).
+        // A DriveControl factory indexes this by SceneSystem.ControlledEntityIndex to find the body it steers.
+        var spawnedEntities = new EntityRef?[def.Entities.Count];
+
         uint order = 0;
+        var entityIndex = 0;
         foreach (var entity in def.Entities)
         {
             var model = models[entity.Model];
@@ -97,17 +118,20 @@ public static class SceneMaterializer
 
             if (!spawnEntities)
             {
+                entityIndex++;
                 continue;
             }
 
             if (entity.Body is { } body)
             {
-                world.SpawnBody(in spec, body.Velocity, body.InverseMass, body.Restitution, body.Radius);
+                spawnedEntities[entityIndex] = world.SpawnBody(in spec, body.Velocity, body.InverseMass, body.Restitution, body.Radius);
             }
             else
             {
                 world.SpawnImported(in spec, castsShadow: entity.CastsShadow);
             }
+
+            entityIndex++;
         }
 
         world.FlushStructuralChanges();
@@ -128,6 +152,7 @@ public static class SceneMaterializer
             Models = models,
             Physics = physics,
             RestorePath = def.Restore?.SnapshotPath,
+            SpawnedEntities = spawnedEntities,
         };
     }
 

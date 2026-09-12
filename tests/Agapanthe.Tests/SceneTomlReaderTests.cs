@@ -1,3 +1,4 @@
+using System.Numerics;
 using Agapanthe.Assets;
 using Agapanthe.Assets.Pipeline.Scene;
 using Agapanthe.Core;
@@ -407,6 +408,78 @@ public sealed class SceneTomlReaderTests
     }
 
     [Fact]
+    public void ReadScene_ParsesDriveControlSystem()
+    {
+        var path = TempToml("""
+            name = "x"
+            [[entity]]
+            model = "a"
+
+            [[system]]
+            kind = "drive_control"
+            controlled_entity_index = 0
+            move_speed = 6.0
+            """);
+        try
+        {
+            var s = SceneTomlReader.ReadScene(path);
+            var sys = Assert.Single(s.Systems);
+            Assert.Equal("drive_control", sys.Kind);
+            Assert.Equal(0, sys.ControlledEntityIndex);
+            Assert.Equal(6.0f, sys.MoveSpeed);
+            Assert.Equal(string.Empty, sys.ProbeModel);
+        }
+        finally
+        {
+            File.Delete(path);
+        }
+    }
+
+    [Fact]
+    public void ReadScene_DriveControlSystemMissingMoveSpeed_Throws()
+    {
+        var path = TempToml("""
+            name = "x"
+            [[entity]]
+            model = "a"
+            [[system]]
+            kind = "drive_control"
+            controlled_entity_index = 0
+            """);
+        try
+        {
+            Assert.Throws<AssetException>(() => SceneTomlReader.ReadScene(path));
+        }
+        finally
+        {
+            File.Delete(path);
+        }
+    }
+
+    [Fact]
+    public void ReadScene_DriveControlSystemUnknownKey_Throws()
+    {
+        var path = TempToml("""
+            name = "x"
+            [[entity]]
+            model = "a"
+            [[system]]
+            kind = "drive_control"
+            controlled_entity_index = 0
+            move_speed = 6.0
+            probe_model = "procedural/probe"
+            """);
+        try
+        {
+            Assert.Throws<AssetException>(() => SceneTomlReader.ReadScene(path));
+        }
+        finally
+        {
+            File.Delete(path);
+        }
+    }
+
+    [Fact]
     public void ReadScene_ParsesAttractorPhysics()
     {
         var path = TempToml("""
@@ -517,6 +590,77 @@ public sealed class SceneTomlReaderTests
         try
         {
             Assert.Throws<AssetException>(() => SceneTomlReader.ReadScene(path));
+        }
+        finally
+        {
+            File.Delete(path);
+        }
+    }
+
+    [Fact]
+    public void ReadScene_BodyOnGrid_Throws()
+    {
+        // Audit finding (engine-architect, 🟡): 'body'/'velocity' are only meaningful on a bare [[entity]] —
+        // Compile's Grid branch never reads them, so silently accepting them on [[grid]] would violate
+        // RejectUnknownKeys' own guarantee that no authoring key is accepted and then ignored.
+        var path = TempToml("""
+            name = "x"
+            [[grid]]
+            model = "a"
+            body = true
+            """);
+        try
+        {
+            Assert.Throws<AssetException>(() => SceneTomlReader.ReadScene(path));
+        }
+        finally
+        {
+            File.Delete(path);
+        }
+    }
+
+    [Fact]
+    public void ReadScene_VelocityOnCluster_Throws()
+    {
+        var path = TempToml("""
+            name = "x"
+            [[cluster]]
+            model = "a"
+            count = 4
+            velocity = [0.0, 5.0, 0.0]
+            """);
+        try
+        {
+            Assert.Throws<AssetException>(() => SceneTomlReader.ReadScene(path));
+        }
+        finally
+        {
+            File.Delete(path);
+        }
+    }
+
+    [Fact]
+    public void ReadScene_BodyOnEntity_Parses()
+    {
+        var path = TempToml("""
+            name = "x"
+            [[entity]]
+            model = "a"
+            body = true
+            velocity = [1.0, 0.0, 0.0]
+            inverse_mass = 2.0
+            restitution = 0.1
+            radius = 0.5
+            """);
+        try
+        {
+            var s = SceneTomlReader.ReadScene(path);
+            var item = Assert.Single(s.Items);
+            Assert.True(item.HasBody);
+            Assert.Equal(new Vector3(1, 0, 0), item.Velocity);
+            Assert.Equal(2f, item.InverseMass);
+            Assert.Equal(0.1f, item.Restitution);
+            Assert.Equal(0.5f, item.Radius);
         }
         finally
         {

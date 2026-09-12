@@ -17,12 +17,11 @@ internal sealed class SandboxGame : IGame
 
     public string DefaultScene => "model";
 
-    // Contenu-3b/3c: the `model` family (single / grid / cluster) and now `planet`/`planet-drop`/
-    // `planet-challenge` are cooked data — one generic `SceneRecipe` per `content/scenes/*.toml`. `drive`
-    // stays hand-coded (migrates in 3c-3: still needs its CLI arbitrary-model argument).
+    // Contenu-3b/3c: every scene is now cooked data — one generic `SceneRecipe` per `content/scenes/*.toml`.
+    // `drive` (last to migrate, Contenu-3c-3) dropped its CLI arbitrary-model argument (D6, confirmed capability
+    // loss) — `drive.toml` fixes on `models/DamagedHelmet.glb`, consistent with every other scene family.
     public IReadOnlyList<ISceneRecipe> Scenes { get; } =
     [
-        new DriveSceneRecipe(),
         new SceneRecipe("model"),
         new SceneRecipe("grid"),
         new SceneRecipe("drop"),
@@ -30,8 +29,10 @@ internal sealed class SandboxGame : IGame
         new SceneRecipe("planet"),
         new SceneRecipe("planet-drop"),
         new SceneRecipe("planet-challenge"),
+        new SceneRecipe("drive"),
     ];
 
     // Contenu-3c: the scene-system factory registry.
-    public IReadOnlyList<ISceneSystemFactory> SceneSystems { get; } = [new ProbeDropSystemFactory(), new LandingChallengeSystemFactory()];
+    public IReadOnlyList<ISceneSystemFactory> SceneSystems { get; } =
+        [new ProbeDropSystemFactory(), new LandingChallengeSystemFactory(), new DriveControlSystemFactory()];
 }

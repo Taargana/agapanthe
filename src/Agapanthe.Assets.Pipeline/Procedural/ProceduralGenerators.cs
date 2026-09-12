@@ -14,7 +14,11 @@ namespace Agapanthe.Assets.Pipeline.Procedural;
 internal static class ProceduralGenerators
 {
     private static readonly Dictionary<string, Func<TomlTable, string, ModelAsset>> ByName =
-        new(StringComparer.Ordinal) { ["uv_sphere"] = UvSphereGenerator.Build };
+        new(StringComparer.Ordinal)
+        {
+            ["uv_sphere"] = UvSphereGenerator.Build,
+            ["ground_quad"] = GroundQuadGenerator.Build,
+        };
 
     public static ModelAsset Build(string generatorName, TomlTable table, string path)
         => ByName.TryGetValue(generatorName, out var build)

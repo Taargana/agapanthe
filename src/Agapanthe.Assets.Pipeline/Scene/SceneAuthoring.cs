@@ -22,12 +22,18 @@ internal sealed class AuthoredItem
     public float Scale { get; init; } = 1f;
     public bool CastsShadow { get; init; } = true;
 
+    // Entity, single physics body (Contenu-3c-3 — `drive`'s steerable body; [[cluster]] builds its own bodies
+    // separately and does not use these). `HasBody` gates it, same convention as ScenePhysics.Mu>0 gating an
+    // attractor: presence is explicit, not inferred from some other field being non-default.
+    public bool HasBody { get; init; }
+    public Vector3 Velocity { get; init; }
+
     // Grid
     public int Rows { get; init; } = 1;
     public int Cols { get; init; } = 1;
     public double SpacingMul { get; init; } = 1.5;
 
-    // Cluster (a cube cluster of physics bodies — the drop scene)
+    // Cluster (a cube cluster of physics bodies — the drop scene) — and (Contenu-3c-3) the single Entity body above.
     public int Count { get; init; } = 1;
     public float InverseMass { get; init; } = 1f;
     public float Restitution { get; init; } = 0.3f;
@@ -85,12 +91,16 @@ internal sealed class AuthoredRestore
 }
 
 /// <summary>Contenu-3c: one `[[system]]` block. <see cref="Kind"/> is the TOML string (`"probe_drop"` |
-/// `"landing_challenge"`); <see cref="SceneCompiler.ToSystem"/> validates it against the known set.</summary>
+/// `"landing_challenge"` | `"drive_control"`); <see cref="SceneCompiler.ToSystem"/> validates it against the
+/// known set. <see cref="ProbeModel"/>/<see cref="ProbeRadius"/> were `required` through 3c-2 but relaxed to
+/// optional in 3c-3 (audit finding, 3c-2 🟡 F2) — <c>drive_control</c> is the first kind that spawns nothing, so
+/// forcing it to author a dummy probe model would have been exactly the anti-pattern that finding warned
+/// against.</summary>
 internal sealed class AuthoredSystem
 {
     public required string Kind { get; init; }
-    public required string ProbeModel { get; init; }
-    public required float ProbeRadius { get; init; }
+    public string ProbeModel { get; init; } = "";
+    public float ProbeRadius { get; init; }
 
     // ProbeDrop
     public int Every { get; init; } = 1;
@@ -104,6 +114,10 @@ internal sealed class AuthoredSystem
     public int TargetCount { get; init; } = 1;
     public int ShotBudget { get; init; } = 1;
     public string QuicksavePath { get; init; } = "";
+
+    // DriveControl (3c-3)
+    public int ControlledEntityIndex { get; init; }
+    public float MoveSpeed { get; init; }
 }
 
 internal sealed class AuthoredScene

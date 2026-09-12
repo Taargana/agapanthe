@@ -1,0 +1,66 @@
+# Contenu-3c-3 — the MP-0d interactive demo (AGAPANTHE_SCENE=drive): one steerable zero-gravity body
+# (WASD move, Space/C up-down, X brake), a fixed camera, a procedural ground quad, and a procedural
+# outdoor sky. Fixes drive.toml's model to models/DamagedHelmet.glb (D6: the old CLI arbitrary-model
+# argument is dropped — a confirmed, already-accepted capability loss, matching every other scene family
+# post-Contenu-3b). All numbers below were baked by instrumenting the old DriveSceneRecipe/SandboxCameras
+# formulas with temporary logging and running them once against the Helmet's actual cooked bounds — not
+# hand arithmetic.
+name = "drive"
+ambient = [0.08, 0.08, 0.09]
+
+[[entity]]
+model = "models/DamagedHelmet.glb"
+position = [0.0, 0.0, 0.0]
+body = true
+inverse_mass = 1.0
+restitution = 0.0
+radius = 1.2721857
+
+[[entity]]
+model = "procedural/ground"
+position = [-0.0024815797805786133, -1.3330625680489174, -0.18715496361255646]
+casts_shadow = false
+
+[[light]]
+kind = "directional"
+direction = [0.4, -0.7, -0.6]
+color = [1.0, 0.96, 0.9]
+intensity = 12.0
+
+[[light]]
+kind = "point"
+position = [-78.38615620136261, 86.84857042755655, -107.9647047072649]
+color = [0.55, 0.65, 1.0]
+intensity = 38400.0
+range = 587.87756
+
+[[light]]
+kind = "point"
+position = [88.17915141582489, -20.928981223444424, 117.38836078345776]
+color = [1.0, 0.85, 0.7]
+intensity = 14400.001
+range = 587.87756
+
+[environment]
+procedural_sky = true
+
+[camera]
+mode = "fixed"
+position = [-0.0024815797805786133, 2.1837821527915366, 6.052192971110344]
+yaw = 0.0
+pitch = -0.33667478
+fov_y = 60.0
+near = 0.044069804
+far = 44.069805
+move_speed = 2.2034903
+shadow_distance = 200.0
+free_fly = false
+
+[physics]
+gravity = [0.0, 0.0, 0.0]
+ground_y = -100000.0
+
+[[system]]
+kind = "drive_control"
+controlled_entity_index = 0
+move_speed = 6.0
