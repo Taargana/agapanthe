@@ -1,5 +1,6 @@
 using Agapanthe.Assets;
 using Agapanthe.Assets.Pipeline.Scene;
+using Agapanthe.Core;
 
 namespace Agapanthe.Tests;
 
@@ -177,6 +178,244 @@ public sealed class SceneTomlReaderTests
             [[entity]]
             model = "a"
             position = [1.0, 2.0]
+            """);
+        try
+        {
+            Assert.Throws<AssetException>(() => SceneTomlReader.ReadScene(path));
+        }
+        finally
+        {
+            File.Delete(path);
+        }
+    }
+
+    // --- Contenu-3c: attractor physics, [[system]], baked Fixed camera, new environment modes ------------------
+
+    [Fact]
+    public void ReadScene_ParsesProbeDropSystem()
+    {
+        var path = TempToml("""
+            name = "x"
+            [[entity]]
+            model = "a"
+
+            [[system]]
+            kind = "probe_drop"
+            probe_model = "procedural/probe"
+            probe_radius = 3.0
+            centre = [0.0, 100.0, 0.0]
+            every = 30
+            """);
+        try
+        {
+            var s = SceneTomlReader.ReadScene(path);
+            var sys = Assert.Single(s.Systems);
+            Assert.Equal("probe_drop", sys.Kind);
+            Assert.Equal("procedural/probe", sys.ProbeModel);
+            Assert.Equal(3.0f, sys.ProbeRadius);
+            Assert.Equal(30, sys.Every);
+            Assert.Equal(new Double3(0, 100, 0), sys.Centre);
+        }
+        finally
+        {
+            File.Delete(path);
+        }
+    }
+
+    [Fact]
+    public void ReadScene_SystemMissingKind_Throws()
+    {
+        var path = TempToml("""
+            name = "x"
+            [[entity]]
+            model = "a"
+            [[system]]
+            probe_model = "procedural/probe"
+            probe_radius = 3.0
+            """);
+        try
+        {
+            Assert.Throws<AssetException>(() => SceneTomlReader.ReadScene(path));
+        }
+        finally
+        {
+            File.Delete(path);
+        }
+    }
+
+    [Fact]
+    public void ReadScene_SystemUnknownKind_Throws()
+    {
+        var path = TempToml("""
+            name = "x"
+            [[entity]]
+            model = "a"
+            [[system]]
+            kind = "not_a_real_system"
+            probe_model = "procedural/probe"
+            probe_radius = 3.0
+            """);
+        try
+        {
+            Assert.Throws<AssetException>(() => SceneTomlReader.ReadScene(path));
+        }
+        finally
+        {
+            File.Delete(path);
+        }
+    }
+
+    [Fact]
+    public void ReadScene_ProbeDropSystemMissingProbeModel_Throws()
+    {
+        var path = TempToml("""
+            name = "x"
+            [[entity]]
+            model = "a"
+            [[system]]
+            kind = "probe_drop"
+            probe_radius = 3.0
+            """);
+        try
+        {
+            Assert.Throws<AssetException>(() => SceneTomlReader.ReadScene(path));
+        }
+        finally
+        {
+            File.Delete(path);
+        }
+    }
+
+    [Fact]
+    public void ReadScene_ProbeDropSystemUnknownKey_Throws()
+    {
+        var path = TempToml("""
+            name = "x"
+            [[entity]]
+            model = "a"
+            [[system]]
+            kind = "probe_drop"
+            probe_model = "procedural/probe"
+            probe_radius = 3.0
+            zone_radius = 15.0
+            """);
+        try
+        {
+            Assert.Throws<AssetException>(() => SceneTomlReader.ReadScene(path));
+        }
+        finally
+        {
+            File.Delete(path);
+        }
+    }
+
+    [Fact]
+    public void ReadScene_ParsesAttractorPhysics()
+    {
+        var path = TempToml("""
+            name = "x"
+            [[entity]]
+            model = "a"
+            [physics]
+            gravity = [0.0, 0.0, 0.0]
+            ground_y = 0.0
+            mu = 2.03e14
+            attractor_center = [0.0, 0.0, 0.0]
+            surface_radius = 3185500.0
+            """);
+        try
+        {
+            var s = SceneTomlReader.ReadScene(path);
+            Assert.NotNull(s.Physics);
+            Assert.Equal(2.03e14, s.Physics!.AttractorMu);
+            Assert.Equal(3185500.0, s.Physics.AttractorSurfaceRadius);
+        }
+        finally
+        {
+            File.Delete(path);
+        }
+    }
+
+    [Fact]
+    public void ReadScene_PartialAttractorSpec_Throws()
+    {
+        var path = TempToml("""
+            name = "x"
+            [[entity]]
+            model = "a"
+            [physics]
+            mu = 2.03e14
+            """);
+        try
+        {
+            Assert.Throws<AssetException>(() => SceneTomlReader.ReadScene(path));
+        }
+        finally
+        {
+            File.Delete(path);
+        }
+    }
+
+    [Fact]
+    public void ReadScene_ParsesFixedCameraWithMoveSpeedAndShadowDistance()
+    {
+        var path = TempToml("""
+            name = "x"
+            [[entity]]
+            model = "a"
+            [camera]
+            mode = "fixed"
+            position = [0.0, 5.0, 10.0]
+            fov_y = 70.0
+            move_speed = 20.0
+            shadow_distance = 1.0
+            """);
+        try
+        {
+            var s = SceneTomlReader.ReadScene(path);
+            Assert.Equal("fixed", s.Camera.Mode);
+            Assert.Equal(20.0f, s.Camera.MoveSpeed);
+            Assert.Equal(1.0f, s.Camera.ShadowDistance);
+        }
+        finally
+        {
+            File.Delete(path);
+        }
+    }
+
+    [Theory]
+    [InlineData("procedural_sky = true")]
+    [InlineData("black = true")]
+    public void ReadScene_ParsesNewEnvironmentModes(string envBody)
+    {
+        var path = TempToml($"""
+            name = "x"
+            [[entity]]
+            model = "a"
+            [environment]
+            {envBody}
+            """);
+        try
+        {
+            var s = SceneTomlReader.ReadScene(path);
+            Assert.True(s.Environment.ProceduralSky || s.Environment.Black);
+        }
+        finally
+        {
+            File.Delete(path);
+        }
+    }
+
+    [Fact]
+    public void ReadScene_EnvironmentBothHdriAndBlack_Throws()
+    {
+        var path = TempToml("""
+            name = "x"
+            [[entity]]
+            model = "a"
+            [environment]
+            hdri = "env/studio.hdr"
+            black = true
             """);
         try
         {

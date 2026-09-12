@@ -1,3 +1,4 @@
+using System.Linq;
 using System.Numerics;
 using Agapanthe.Assets;
 using Agapanthe.Assets.Scene;
@@ -297,6 +298,18 @@ static int RunScene(GameWorld world, string sceneKey, int ticks, string? savePat
     catch (Exception ex) when (ex is AssetException or AgSceneException or AgModelException)
     {
         Console.Error.WriteLine($"HeadlessSim: {ex.Message}");
+        return 1;
+    }
+
+    // Contenu-3c: scene systems (ProbeDropSystem, ...) are a client-only concept — they wire keyboard input and
+    // need a window/camera, neither of which a headless process has. A physics-only, no-gameplay partial run
+    // would silently diverge from what the Sandbox shows for the same scene; refuse outright instead.
+    if (result.Definition.Systems.Count > 0)
+    {
+        Console.Error.WriteLine(
+            $"HeadlessSim: scene '{key}' declares {result.Definition.Systems.Count} game system(s) "
+            + $"({string.Join(", ", result.Definition.Systems.Select(s => s.Kind))}) — HeadlessSim has no "
+            + "window/camera and cannot attach them. Run this scene through the Sandbox instead.");
         return 1;
     }
 

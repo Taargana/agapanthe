@@ -1,0 +1,10 @@
+# Contenu-3c — the P3-M8 planet sphere, half-scale (radius = 6_371_000 / 2 m), moved cook-time from
+# Sandbox.PlanetContent.SetupPlanetScene's hand-built ModelAsset.
+generator = "uv_sphere"
+radius = 3185500.0
+segments = 128
+rings = 64
+base_color = [0.16, 0.42, 0.62, 1.0]
+metallic = 0.0
+roughness = 0.9
+name = "PlanetSurface"

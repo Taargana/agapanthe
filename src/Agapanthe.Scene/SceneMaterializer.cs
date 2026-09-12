@@ -32,13 +32,24 @@ public static class SceneMaterializer
         ArgumentNullException.ThrowIfNull(loadModel);
         ArgumentNullException.ThrowIfNull(world);
 
-        // One decode per distinct model key.
+        // One decode per distinct model key — entities AND (Contenu-3c) scene systems' probe models. A probe-only
+        // model (referenced by no SceneEntity) still needs to land here: ClientScenePresenter uploads everything
+        // in MaterializeResult.Models, and a runtime-dropped probe needs an uploaded model to resolve its
+        // MeshRef against.
         var models = new Dictionary<AssetKey, ModelAsset>();
         foreach (var entity in def.Entities)
         {
             if (!models.ContainsKey(entity.Model))
             {
                 models[entity.Model] = loadModel(entity.Model);
+            }
+        }
+
+        foreach (var system in def.Systems)
+        {
+            if (!models.ContainsKey(system.ProbeModel))
+            {
+                models[system.ProbeModel] = loadModel(system.ProbeModel);
             }
         }
 
@@ -90,8 +101,14 @@ public static class SceneMaterializer
 
         world.FlushStructuralChanges();
 
+        // Audit finding (csharp-lowlevel, 🔴 blocking): Mu/AttractorCenter/SurfaceRadius were parsed, compiled,
+        // and round-tripped through the binary format, but never actually applied here — every attractor scene
+        // (planet-drop) silently ran uniform-gravity-with-a-zero-vector, i.e. no gravity at all. The capture gate
+        // couldn't catch it (a motionless probe still renders as a scene with a probe in it).
         PhysicsSettings? physics = def.Physics is { } p
-            ? new PhysicsSettings(p.Gravity, p.GroundY, fixedDeltaSeconds)
+            ? p.Mu > 0.0
+                ? new PhysicsSettings(p.Gravity, p.GroundY, fixedDeltaSeconds).WithAttractor(p.AttractorCenter, p.Mu, p.SurfaceRadius)
+                : new PhysicsSettings(p.Gravity, p.GroundY, fixedDeltaSeconds)
             : null;
 
         return new MaterializeResult
@@ -101,6 +118,53 @@ public static class SceneMaterializer
             Physics = physics,
             RestorePath = def.Restore?.SnapshotPath,
         };
+    }
+
+    /// <summary>
+    /// Contenu-3c: a GPU-free <see cref="ImportedEntitySpec"/> template for a runtime-spawned drawable (a scene
+    /// system's probe) — mesh/material handles left <see cref="MeshHandle.Invalid"/>/<see cref="MaterialHandle.Invalid"/>,
+    /// <see cref="ImportedEntitySpec.Position"/> a placeholder (the caller stamps a fresh one at every spawn).
+    /// <para>
+    /// This is exactly what <see cref="Compose"/> + the entity-spawn path above already build for a
+    /// <see cref="SceneEntity"/>, minus an authored placement (a probe's <em>scene</em> position is meaningless —
+    /// it spawns wherever the owning system computes at runtime). A client-side <c>ISceneSystemFactory</c> calls
+    /// this once at construction time, then resolves real handles via <c>ResourceRegistry.ResolveMeshRef</c> and
+    /// builds the final template <see cref="ImportedEntitySpec"/> it hands to its <c>ISystem</c>.
+    /// </para>
+    /// </summary>
+    public static ImportedEntitySpec BuildRuntimeTemplate(
+        AssetKey model, int localMesh, int localMat, IReadOnlyDictionary<AssetKey, ModelAsset> models)
+    {
+        ArgumentNullException.ThrowIfNull(models);
+        if (!models.TryGetValue(model, out var asset))
+        {
+            throw new AssetException($"'{model}' was not loaded into this scene's materialized models.");
+        }
+
+        if (localMesh < 0 || localMesh >= asset.Meshes.Count)
+        {
+            throw new AssetException($"'{model}' has {asset.Meshes.Count} mesh(es); mesh index {localMesh} is out of range.");
+        }
+
+        // Audit finding (csharp-lowlevel, 🟠): mirrors the entity path's LocalMat check above — Materials.Count
+        // itself is a valid index (the appended engine-default material). No caller in this codebase reaches
+        // this unvalidated today (ResolveMeshRef would throw first), but this is a public method with no such
+        // documented contract, and 3c-2's LandingChallenge factory (or a future server-side spawner) could.
+        if (localMat < 0 || localMat > asset.Materials.Count)
+        {
+            throw new AssetException($"'{model}' has {asset.Materials.Count} material(s); material index {localMat} is out of range.");
+        }
+
+        var mesh = asset.Meshes[localMesh];
+        var world = mesh.WorldTransform;
+        var rotationScale = world;
+        rotationScale.M41 = 0f;
+        rotationScale.M42 = 0f;
+        rotationScale.M43 = 0f;
+
+        return new ImportedEntitySpec(
+            MeshHandle.Invalid, MaterialHandle.Invalid, Double3.Zero, in rotationScale,
+            mesh.BoundsCenter, mesh.BoundsRadius, order: 0, new MeshRefKey(model, localMesh, localMat));
     }
 
     // Composes the mesh's own baked transform (model-local) with the entity's scene placement. When the entity

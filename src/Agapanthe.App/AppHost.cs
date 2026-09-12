@@ -152,6 +152,7 @@ public static class AppHost
                 Window = window,
                 RenderList = renderList,
                 Orchestrator = orchestrator,
+                SceneSystemFactories = game.SceneSystems,
             };
             recipe.Build(sim, presentation);
             WarnIfDrawablesMissingIdentity(world);

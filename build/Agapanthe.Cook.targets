@@ -1,14 +1,18 @@
 <Project>
 
-  <!-- ================= Offline asset cook (Contenu-2 / Contenu-3b) — shared =================
+  <!-- ================= Offline asset cook (Contenu-2 / Contenu-3b / Contenu-3c) — shared =================
        Extracted from samples/Sandbox/Sandbox.csproj so samples/HeadlessSim can import it too (a
        dedicated server loads the same cooked .agscene/.agmodel content). tools/AssetCooker cooks every
-       content/**/*.glb into a deterministic .agmodel blob AND every content/scenes/*.toml into an
-       .agscene blob, and writes content.agmanifest; AssetCatalog reads them. The RUNTIME never parses
-       glTF or TOML. AssetCooker is deliberately NOT a ProjectReference — that would drag
-       Agapanthe.Assets.Pipeline + StbImageSharp + Tomlyn + the glTF parser into the AOT closure.
+       content/**/*.glb into a deterministic .agmodel blob, every content/procedural/*.toml into an
+       ordinary .agmodel blob too (Contenu-3c — cook-time geometry generators), AND every
+       content/scenes/*.toml into an .agscene blob, and writes content.agmanifest; AssetCatalog reads
+       them. The RUNTIME never parses glTF or TOML. AssetCooker is deliberately NOT a ProjectReference —
+       that would drag Agapanthe.Assets.Pipeline + StbImageSharp + Tomlyn + the glTF parser into the
+       AOT closure.
 
-       $(MSBuildThisFileDirectory) here is <repo>/build/, so "..\content" = <repo>/content. -->
+       $(MSBuildThisFileDirectory) here is <repo>/build/, so "..\content" = <repo>/content. The
+       AssetSourceFile glob below is already `content/**/*` — content/procedural/ needs no glob change,
+       only noted here since a new content subdirectory is exactly the kind of thing worth confirming. -->
   <PropertyGroup>
     <ContentSourceDir>$([MSBuild]::NormalizeDirectory('$(MSBuildThisFileDirectory)..\content'))</ContentSourceDir>
     <AssetCookerProject>$([MSBuild]::NormalizePath('$(MSBuildThisFileDirectory)..\tools\AssetCooker\AssetCooker.csproj'))</AssetCookerProject>

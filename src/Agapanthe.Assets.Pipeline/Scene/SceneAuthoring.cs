@@ -56,22 +56,45 @@ internal sealed class AuthoredCamera
     public float Pitch { get; init; }
     public float Near { get; init; }
     public float Far { get; init; }
+    public float MoveSpeed { get; init; }        // Fixed only, Contenu-3c
+    public float ShadowDistance { get; init; }   // Fixed only, Contenu-3c
 }
 
 internal sealed class AuthoredEnvironment
 {
     public string? Hdri { get; init; }
+    public bool ProceduralSky { get; init; }  // Contenu-3c — mutually exclusive with Hdri/Black
+    public bool Black { get; init; }          // Contenu-3c — mutually exclusive with Hdri/ProceduralSky
 }
 
+/// <summary><see cref="AttractorMu"/> `> 0` selects a Newtonian point-attractor (Contenu-3c) instead of uniform
+/// gravity — `attractor_center`/`mu`/`surface_radius` must all be present together in TOML or none of them
+/// (a partial spec is rejected, not defaulted).</summary>
 internal sealed class AuthoredPhysics
 {
     public Vector3 Gravity { get; init; } = new(0f, -9.81f, 0f);
     public float GroundY { get; init; }
+    public Double3 AttractorCenter { get; init; }
+    public double AttractorMu { get; init; }
+    public double AttractorSurfaceRadius { get; init; }
 }
 
 internal sealed class AuthoredRestore
 {
     public required string Snapshot { get; init; }
+}
+
+/// <summary>Contenu-3c: one `[[system]]` block. <see cref="Kind"/> is the TOML string (`"probe_drop"`);
+/// <see cref="SceneCompiler.ToSystem"/> validates it against the known set.</summary>
+internal sealed class AuthoredSystem
+{
+    public required string Kind { get; init; }
+    public required string ProbeModel { get; init; }
+    public required float ProbeRadius { get; init; }
+
+    // ProbeDrop
+    public int Every { get; init; } = 1;
+    public Double3 Centre { get; init; }
 }
 
 internal sealed class AuthoredScene
@@ -80,6 +103,7 @@ internal sealed class AuthoredScene
     public Double3 WorldOrigin { get; init; }
     public List<AuthoredItem> Items { get; } = [];
     public List<AuthoredLight> Lights { get; } = [];
+    public List<AuthoredSystem> Systems { get; } = [];
     public Vector3 Ambient { get; init; } = new(0.08f, 0.08f, 0.09f);
     public AuthoredCamera Camera { get; init; } = new();
     public AuthoredEnvironment Environment { get; init; } = new();

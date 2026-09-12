@@ -7,16 +7,23 @@ using Agapanthe.Core;
 namespace Agapanthe.Assets.Scene;
 
 /// <summary>
-/// The <c>.agscene</c> cooked-scene blob (Contenu-3b) — same container shape as <c>.agmodel</c>:
-/// <c>magic "AGSC" | version u32 LE | uncompressedPayloadLen u32 LE</c>, then a raw <see cref="DeflateStream"/>
-/// of the payload. Reader <b>public</b>; writer <b>internal</b> (producing blobs is the cooker's job — IVT to
-/// <c>Agapanthe.Assets.Pipeline</c>). Every count is bounded against the bytes that remain before it drives an
-/// allocation; a corrupt blob throws <see cref="AgSceneException"/>, never a half-built <see cref="SceneDefinition"/>.
+/// The <c>.agscene</c> cooked-scene blob (Contenu-3b, bumped to v2 by Contenu-3c) — same container shape as
+/// <c>.agmodel</c>: <c>magic "AGSC" | version u32 LE | uncompressedPayloadLen u32 LE</c>, then a raw
+/// <see cref="DeflateStream"/> of the payload. Reader <b>public</b>; writer <b>internal</b> (producing blobs is
+/// the cooker's job — IVT to <c>Agapanthe.Assets.Pipeline</c>). Every count is bounded against the bytes that
+/// remain (by a per-block <c>minRecordBytes</c> divisor) before it drives an allocation; a corrupt blob throws
+/// <see cref="AgSceneException"/>, never a half-built <see cref="SceneDefinition"/>.
+/// <para>
+/// v2 (Contenu-3c) adds: a Newtonian attractor to <c>[physics]</c>, two fields to the <c>[fixed]</c> camera
+/// variant, two no-payload <c>[environment]</c> modes, and a <c>[[system]]</c> section. This codebase's precedent
+/// for growing a cooked format is a version bump + drop the old reader entirely (see <c>.agmodel</c> v1→v2) — v1
+/// throws <see cref="AgSceneException"/> naming a re-cook, not an in-place upgrade.
+/// </para>
 /// </summary>
 public static class AgSceneFormat
 {
     private static ReadOnlySpan<byte> Magic => "AGSC"u8;
-    public const uint Version = 1;
+    public const uint Version = 2;
     private const int ContainerHeaderBytes = 4 + 4 + 4;
     private const long MaxPayloadBytes = 1L << 26; // 64 MiB — a 100×100 grid is ~400 KB before deflate
 
@@ -36,7 +43,10 @@ public static class AgSceneFormat
         var version = BinaryPrimitives.ReadUInt32LittleEndian(bytes.Slice(4, 4));
         if (version != Version)
         {
-            throw new AgSceneException($"Unsupported .agscene version {version} (this build reads version {Version}).");
+            throw new AgSceneException(version == 1
+                ? "The .agscene is format v1, which predates Contenu-3c (attractor physics, baked Fixed camera "
+                  + "fields, ProceduralSky/Black environments, scene systems). There is no in-place upgrade — re-run the asset cook."
+                : $"Unsupported .agscene version {version} (this build reads version {Version}).");
         }
 
         var uncompressedLen = BinaryPrimitives.ReadUInt32LittleEndian(bytes.Slice(8, 4));
@@ -120,7 +130,7 @@ public static class AgSceneFormat
 
         AssetKey Key(uint idx) => idx < (uint)keyTable.Length
             ? keyTable[idx]
-            : throw new AgSceneException($".agscene entity key index {idx} is beyond the {keyTable.Length}-entry key table.");
+            : throw new AgSceneException($".agscene key index {idx} is beyond the {keyTable.Length}-entry key table.");
 
         // Shortest entity: keyIdx(4) + localMesh(4) + localMat(4) + position(24) + rotation(16) + scale(4) + flags(1),
         // no body block.
@@ -197,6 +207,7 @@ public static class AgSceneFormat
             {
                 Mode = camMode, FovY = fovY, FreeFly = freeFly,
                 Position = r.ReadDouble3(), Yaw = r.ReadF32(), Pitch = r.ReadF32(), Near = r.ReadF32(), Far = r.ReadF32(),
+                MoveSpeed = r.ReadF32(), ShadowDistance = r.ReadF32(), // v2 (Contenu-3c)
             },
             _ => throw new AgSceneException($".agscene camera has unknown mode {(byte)camMode}."),
         };
@@ -206,16 +217,45 @@ public static class AgSceneFormat
         {
             SceneEnvironmentMode.None => new SceneEnvironment { Mode = envMode },
             SceneEnvironmentMode.HdriPath => new SceneEnvironment { Mode = envMode, HdriPath = r.ReadString() },
+            SceneEnvironmentMode.ProceduralSky => new SceneEnvironment { Mode = envMode }, // v2, no payload
+            SceneEnvironmentMode.Black => new SceneEnvironment { Mode = envMode },          // v2, no payload
             _ => throw new AgSceneException($".agscene environment has unknown mode {(byte)envMode}."),
         };
 
         ScenePhysics? physics = r.ReadByte() != 0
-            ? new ScenePhysics { Gravity = r.ReadVector3(), GroundY = r.ReadF32() }
+            ? new ScenePhysics
+            {
+                Gravity = r.ReadVector3(), GroundY = r.ReadF32(),
+                Mu = r.ReadF64(), AttractorCenter = r.ReadDouble3(), SurfaceRadius = r.ReadF64(), // v2 (Contenu-3c)
+            }
             : null;
 
         SceneRestore? restore = r.ReadByte() != 0
             ? new SceneRestore { SnapshotPath = r.ReadString() }
             : null;
+
+        // v2 (Contenu-3c): scene systems, appended after [restore]. Shortest record: kind(1) + probeModelKeyIdx(4)
+        // + probeLocalMesh(4) + probeLocalMat(4) + probeRadius(4) + every(4) + centre(24) — the only kind today
+        // (ProbeDrop) IS the shortest/only shape.
+        var systemCount = r.ReadCount(minRecordBytes: 45);
+        var systems = new SceneSystem[systemCount];
+        for (var s = 0; s < systemCount; s++)
+        {
+            var kind = (SceneSystemKind)r.ReadByte();
+            var probeModel = Key(r.ReadU32());
+            var probeLocalMesh = (int)r.ReadU32();
+            var probeLocalMat = (int)r.ReadU32();
+            var probeRadius = r.ReadF32();
+            systems[s] = kind switch
+            {
+                SceneSystemKind.ProbeDrop => new SceneSystem
+                {
+                    Kind = kind, ProbeModel = probeModel, ProbeLocalMesh = probeLocalMesh, ProbeLocalMat = probeLocalMat,
+                    ProbeRadius = probeRadius, Every = (int)r.ReadU32(), Centre = r.ReadDouble3(),
+                },
+                _ => throw new AgSceneException($".agscene system {s} has unknown kind {(byte)kind}."),
+            };
+        }
 
         r.RequireExhausted();
 
@@ -230,6 +270,7 @@ public static class AgSceneFormat
             Environment = environment,
             Physics = physics,
             Restore = restore,
+            Systems = systems,
         };
     }
 
@@ -255,8 +296,12 @@ public static class AgSceneFormat
         WriteString(ms, def.Name);
         WriteDouble3(ms, def.WorldOrigin);
 
-        // Key table: entry 0 = "" sentinel, then the distinct non-None entity keys, ordinal-ascending.
-        var keys = def.Entities.Select(e => e.Model).Where(k => !k.IsNone).Select(k => k.Value!)
+        // Key table: entry 0 = "" sentinel, then the distinct non-None keys — entities AND (v2, Contenu-3c) scene
+        // systems' probe models, ordinal-ascending. A probe-only model (referenced by no SceneEntity) still needs
+        // a slot here so the client uploads it (ClientScenePresenter walks MaterializeResult.Models, which
+        // SceneMaterializer populates from every key this table can name).
+        var keys = def.Entities.Select(e => e.Model).Concat(def.Systems.Select(s => s.ProbeModel))
+            .Where(k => !k.IsNone).Select(k => k.Value!)
             .Distinct(StringComparer.Ordinal).OrderBy(s => s, StringComparer.Ordinal).ToArray();
         var keyToIdx = new Dictionary<string, uint>(StringComparer.Ordinal);
         WriteU32(ms, checked((uint)(keys.Length + 1)));
@@ -323,6 +368,8 @@ public static class AgSceneFormat
             WriteF32(ms, def.Camera.Pitch);
             WriteF32(ms, def.Camera.Near);
             WriteF32(ms, def.Camera.Far);
+            WriteF32(ms, def.Camera.MoveSpeed);       // v2 (Contenu-3c)
+            WriteF32(ms, def.Camera.ShadowDistance);  // v2 (Contenu-3c)
         }
 
         ms.WriteByte((byte)def.Environment.Mode);
@@ -331,17 +378,42 @@ public static class AgSceneFormat
             WriteString(ms, def.Environment.HdriPath);
         }
 
+        // ProceduralSky / Black (v2, Contenu-3c) carry no payload.
+
         ms.WriteByte((byte)(def.Physics is null ? 0 : 1));
         if (def.Physics is { } ph)
         {
             WriteVector3(ms, ph.Gravity);
             WriteF32(ms, ph.GroundY);
+            WriteF64(ms, ph.Mu);                  // v2 (Contenu-3c)
+            WriteDouble3(ms, ph.AttractorCenter);  // v2
+            WriteF64(ms, ph.SurfaceRadius);        // v2
         }
 
         ms.WriteByte((byte)(def.Restore is null ? 0 : 1));
         if (def.Restore is { } rs)
         {
             WriteString(ms, rs.SnapshotPath);
+        }
+
+        // v2 (Contenu-3c): scene systems, appended after [restore].
+        WriteU32(ms, checked((uint)def.Systems.Count));
+        foreach (var sys in def.Systems)
+        {
+            ms.WriteByte((byte)sys.Kind);
+            WriteU32(ms, sys.ProbeModel.IsNone ? 0u : keyToIdx[sys.ProbeModel.Value!]);
+            WriteU32(ms, checked((uint)sys.ProbeLocalMesh));
+            WriteU32(ms, checked((uint)sys.ProbeLocalMat));
+            WriteF32(ms, sys.ProbeRadius);
+            switch (sys.Kind)
+            {
+                case SceneSystemKind.ProbeDrop:
+                    WriteU32(ms, checked((uint)sys.Every));
+                    WriteDouble3(ms, sys.Centre);
+                    break;
+                default:
+                    throw new AgSceneException($"unknown scene system kind {sys.Kind}.");
+            }
         }
 
         return ms.ToArray();

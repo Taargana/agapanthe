@@ -17,18 +17,24 @@ internal sealed class SandboxGame : IGame
 
     public string DefaultScene => "model";
 
-    // Contenu-3b: the `model` family (single / grid / cluster) is now cooked data — one `SceneRecipe` per
-    // `content/scenes/*.toml`. `drive` + `planet*` stay hand-coded recipes (migrated in 3c). Named scenes get
-    // first refusal at SelectRecipe; the `model` SceneRecipe is the DefaultScene fallback (name equality).
+    // Contenu-3b/3c: the `model` family (single / grid / cluster) and now `planet`/`planet-drop` are cooked
+    // data — one generic `SceneRecipe` per `content/scenes/*.toml`. `planet-challenge` + `drive` stay
+    // hand-coded (migrate in 3c-2/3c-3): `planet-challenge` still needs `LandingChallengeSystem` (no factory
+    // registered for it yet), `drive` still needs its CLI arbitrary-model argument.
     public IReadOnlyList<ISceneRecipe> Scenes { get; } =
     [
-        new PlanetSceneRecipe(),
-        new PlanetDropSceneRecipe(),
         new PlanetChallengeSceneRecipe(),
         new DriveSceneRecipe(),
         new SceneRecipe("model"),
         new SceneRecipe("grid"),
         new SceneRecipe("drop"),
         new SceneRecipe("metalrough"),
+        new SceneRecipe("planet"),
+        new SceneRecipe("planet-drop"),
     ];
+
+    // Contenu-3c: the scene-system factory registry. ProbeDropSystemFactory has no consumer yet (planet-drop
+    // migrates in Wave 7) — registering it now is harmless (SceneRecipe only dispatches a scene's OWN declared
+    // Systems list) and keeps this wave's registry wiring complete and testable in isolation.
+    public IReadOnlyList<ISceneSystemFactory> SceneSystems { get; } = [new ProbeDropSystemFactory()];
 }

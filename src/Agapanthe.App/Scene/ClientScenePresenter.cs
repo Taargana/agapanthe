@@ -1,3 +1,4 @@
+using System.Numerics;
 using Agapanthe.Assets;
 using Agapanthe.Assets.Scene;
 using Agapanthe.Core;
@@ -30,7 +31,7 @@ public static class ClientScenePresenter
 
         var def = result.Definition;
         SceneLightRig.Apply(def.Lights, def.Ambient, p.Renderer.Lights);
-        ApplyEnvironment(def.Environment, p);
+        ApplyEnvironment(def, p);
         SceneCameraApplier.Apply(def.Camera, p.Camera, p.Controller, p.Renderer, sim.World.AggregateBounds());
 
         if (def.Camera.FreeFly)
@@ -39,24 +40,46 @@ public static class ClientScenePresenter
         }
     }
 
-    private static void ApplyEnvironment(SceneEnvironment environment, PresentationSceneContext p)
+    private static void ApplyEnvironment(SceneDefinition def, PresentationSceneContext p)
     {
-        if (environment.Mode != SceneEnvironmentMode.HdriPath || environment.HdriPath.Length == 0)
+        var environment = def.Environment;
+        switch (environment.Mode)
         {
-            return;
+            case SceneEnvironmentMode.HdriPath:
+                if (environment.HdriPath.Length == 0)
+                {
+                    return;
+                }
+
+                var path = Path.IsPathRooted(environment.HdriPath)
+                    ? environment.HdriPath
+                    : Path.Combine(AppContext.BaseDirectory, environment.HdriPath.Replace('/', Path.DirectorySeparatorChar));
+
+                if (!File.Exists(path))
+                {
+                    Log.Warn($"AppHost: [scene] environment HDR '{path}' not found — the scene renders without IBL.");
+                    return;
+                }
+
+                p.Renderer.SetEnvironment(HdrImageLoader.Load(path));
+                Log.Info($"AppHost: [scene] environment '{path}'.");
+                break;
+
+            case SceneEnvironmentMode.ProceduralSky:
+                // Contenu-3c: derives the sun direction from the scene's own directional light — the same source
+                // of truth the light rig just applied, so the sky's sun glow lines up with the actual shadow caster.
+                var sunDir = def.Lights.FirstOrDefault(l => l.Kind == SceneLightKind.Directional)?.Direction ?? Vector3.UnitY;
+                p.Renderer.SetEnvironment(ProceduralSky.Build(sunDir));
+                Log.Info("AppHost: [scene] environment = procedural outdoor sky.");
+                break;
+
+            case SceneEnvironmentMode.Black:
+                p.Renderer.SetEnvironment(BlackEnvironment.Build());
+                Log.Info("AppHost: [scene] environment = black (no ambient/skybox).");
+                break;
+
+            case SceneEnvironmentMode.None:
+                break;
         }
-
-        var path = Path.IsPathRooted(environment.HdriPath)
-            ? environment.HdriPath
-            : Path.Combine(AppContext.BaseDirectory, environment.HdriPath.Replace('/', Path.DirectorySeparatorChar));
-
-        if (!File.Exists(path))
-        {
-            Log.Warn($"AppHost: [scene] environment HDR '{path}' not found — the scene renders without IBL.");
-            return;
-        }
-
-        p.Renderer.SetEnvironment(HdrImageLoader.Load(path));
-        Log.Info($"AppHost: [scene] environment '{path}'.");
     }
 }

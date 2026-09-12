@@ -298,7 +298,7 @@ public sealed class AppHostContractTests
                 Catalog = AssetCatalog.Empty,
                 Args = [],
                 Options = HostOptions.FromEnvironment(_ => null),
-            };
+        };
 
             sim.RequestRestore(path, SnapshotAllocatorPolicy.AdoptFromHeader);
             Assert.Equal(0, world.LiveEntityCount);          // a request alone changes nothing — Build would see this

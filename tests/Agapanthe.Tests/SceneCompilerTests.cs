@@ -175,4 +175,62 @@ public sealed class SceneCompilerTests
         Assert.Equal(new AssetKey("models/x.glb"), restored.Entities[0].Model);
         Assert.Single(restored.Lights);
     }
+
+    // --- Contenu-3c: attractor physics, [[system]] → SceneSystem ------------------------------------------------
+
+    [Fact]
+    public void ToPhysics_AttractorFields_Translated()
+    {
+        var scene = new AuthoredScene
+        {
+            Name = "x",
+            Physics = new AuthoredPhysics
+            {
+                Gravity = Vector3.Zero, GroundY = 0f,
+                AttractorMu = 2.03e14, AttractorCenter = new Double3(1, 2, 3), AttractorSurfaceRadius = 3185500.0,
+            },
+        };
+        scene.Items.Add(new AuthoredItem { Kind = AuthoredItemKind.Entity, Model = "models/x.glb" });
+
+        var def = SceneCompiler.Compile(scene, Loader("models/x.glb"), _ => throw new Xunit.Sdk.XunitException("no prefab"));
+
+        Assert.NotNull(def.Physics);
+        Assert.Equal(2.03e14, def.Physics!.Mu);
+        Assert.Equal(new Double3(1, 2, 3), def.Physics.AttractorCenter);
+        Assert.Equal(3185500.0, def.Physics.SurfaceRadius);
+    }
+
+    [Fact]
+    public void ToSystem_ProbeDrop_ResolvesMeshAndMaterial()
+    {
+        var scene = new AuthoredScene { Name = "x" };
+        scene.Items.Add(new AuthoredItem { Kind = AuthoredItemKind.Entity, Model = "models/x.glb" });
+        scene.Systems.Add(new AuthoredSystem
+        {
+            Kind = "probe_drop", ProbeModel = "procedural/probe", ProbeRadius = 3f, Every = 30, Centre = new Double3(0, 100, 0),
+        });
+
+        var def = SceneCompiler.Compile(
+            scene, Loader("models/x.glb", "procedural/probe"), _ => throw new Xunit.Sdk.XunitException("no prefab"));
+
+        var sys = Assert.Single(def.Systems);
+        Assert.Equal(SceneSystemKind.ProbeDrop, sys.Kind);
+        Assert.Equal(new AssetKey("procedural/probe"), sys.ProbeModel);
+        Assert.Equal(0, sys.ProbeLocalMesh);
+        Assert.Equal(0, sys.ProbeLocalMat); // FakeModel's single mesh has MaterialIndex 0
+        Assert.Equal(3f, sys.ProbeRadius);
+        Assert.Equal(30, sys.Every);
+        Assert.Equal(new Double3(0, 100, 0), sys.Centre);
+    }
+
+    [Fact]
+    public void ToSystem_UnknownProbeModel_Throws()
+    {
+        var scene = new AuthoredScene { Name = "x" };
+        scene.Items.Add(new AuthoredItem { Kind = AuthoredItemKind.Entity, Model = "models/x.glb" });
+        scene.Systems.Add(new AuthoredSystem { Kind = "probe_drop", ProbeModel = "procedural/missing", ProbeRadius = 3f });
+
+        Assert.Throws<AssetException>(() => SceneCompiler.Compile(
+            scene, Loader("models/x.glb"), _ => throw new Xunit.Sdk.XunitException("no prefab")));
+    }
 }

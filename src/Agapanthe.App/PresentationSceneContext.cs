@@ -38,4 +38,12 @@ public sealed class PresentationSceneContext
     /// <summary>The frame assembly — register <c>IRenderSystem</c>s here. Simulation systems go through
     /// <see cref="SimSceneContext.AddSystem"/>.</summary>
     public required FrameOrchestrator Orchestrator { get; init; }
+
+    /// <summary>Contenu-3c: this game's scene-system factory registry (from <see cref="IGame.SceneSystems"/>).
+    /// Lives here, not on <see cref="SimSceneContext"/>, because <see cref="ISceneSystemFactory.Create"/> itself
+    /// names <see cref="PresentationSceneContext"/> — a scene-system factory is a client-only concept (window/
+    /// camera-coupled), so the headless-safe context must not carry it even transitively (audit finding,
+    /// engine-architect: the prior placement weakened the <c>SimSceneContext_NamesNoGpuOrWindowType</c> gate's
+    /// intent without tripping its assertion).</summary>
+    public required IReadOnlyList<ISceneSystemFactory> SceneSystemFactories { get; init; }
 }

@@ -38,7 +38,9 @@ public sealed class SceneMaterializerTests
         return k => set.Contains(k.Value!) ? FakeModel(k.Value!) : throw new AssetException($"no cooked model '{k}'");
     }
 
-    private static SceneDefinition Scene(IReadOnlyList<SceneEntity> entities, ScenePhysics? physics = null, string? restore = null) => new()
+    private static SceneDefinition Scene(
+        IReadOnlyList<SceneEntity> entities, ScenePhysics? physics = null, string? restore = null,
+        IReadOnlyList<SceneSystem>? systems = null) => new()
     {
         Name = "t",
         WorldOrigin = Double3.Zero,
@@ -49,6 +51,7 @@ public sealed class SceneMaterializerTests
         Environment = new SceneEnvironment { Mode = SceneEnvironmentMode.None },
         Physics = physics,
         Restore = restore is null ? null : new SceneRestore { SnapshotPath = restore },
+        Systems = systems ?? [],
     };
 
     private static SceneEntity Entity(string model, int mesh = 0, SceneBody? body = null) => new()
@@ -105,6 +108,40 @@ public sealed class SceneMaterializerTests
         Assert.Equal(new Vector3(0, -9.81f, 0), result.Physics!.Value.Gravity);
         Assert.Equal(-5f, result.Physics!.Value.GroundY);
         Assert.Equal(1f / 120f, result.Physics!.Value.FixedDt);
+    }
+
+    [Fact]
+    public void Materialize_AttractorPhysics_AppliesWithAttractor()
+    {
+        // Audit finding (both csharp-lowlevel and engine-architect, 🔴 blocking): Mu/AttractorCenter/SurfaceRadius
+        // were parsed, compiled, and round-tripped through the binary format, but Materialize silently dropped
+        // them — every attractor scene (planet-drop) ran with NO gravity at all. This is the regression test.
+        using var world = new GameWorld();
+        var physics = new ScenePhysics
+        {
+            Gravity = Vector3.Zero, GroundY = 0f,
+            Mu = 2.03e14, AttractorCenter = new Double3(1, 2, 3), SurfaceRadius = 3185500.0,
+        };
+        var result = SceneMaterializer.Materialize(Scene([Entity("models/x.glb")], physics: physics), Loader("models/x.glb"), world, 1f / 60f);
+
+        Assert.NotNull(result.Physics);
+        Assert.Equal(2.03e14, result.Physics!.Value.Mu);
+        Assert.Equal(new Double3(1, 2, 3), result.Physics.Value.AttractorCenter);
+        Assert.Equal(3185500.0, result.Physics.Value.SurfaceRadius);
+    }
+
+    [Fact]
+    public void Materialize_MuZero_TakesTheUniformGravityPath_ByteIdenticalToBefore()
+    {
+        // Mu == 0 (the default) must keep using the 3-arg ctor — the uniform-gravity path (e.g. the `drop`
+        // scene's cluster) stays byte-identical, matching PhysicsSettings' own "Mu == 0 ⇒ no attractor" contract.
+        using var world = new GameWorld();
+        var physics = new ScenePhysics { Gravity = new Vector3(0, -9.81f, 0), GroundY = -5f };
+        var result = SceneMaterializer.Materialize(Scene([Entity("models/x.glb")], physics: physics), Loader("models/x.glb"), world, 1f / 60f);
+
+        Assert.NotNull(result.Physics);
+        Assert.Equal(0.0, result.Physics!.Value.Mu);
+        Assert.Equal(new Vector3(0, -9.81f, 0), result.Physics.Value.Gravity);
     }
 
     [Fact]
@@ -180,5 +217,48 @@ public sealed class SceneMaterializerTests
             Scene([Entity("models/x.glb")], restore: "save/world.agworld"), Loader("models/x.glb"), world, 1f / 60f);
 
         Assert.Equal("save/world.agworld", result.RestorePath);
+    }
+
+    // --- Contenu-3c: SceneSystem.ProbeModel loading + BuildRuntimeTemplate --------------------------------------
+
+    [Fact]
+    public void Materialize_ProbeOnlyModel_NotReferencedByAnyEntity_StillLandsInModels()
+    {
+        using var world = new GameWorld();
+        var system = new SceneSystem { Kind = SceneSystemKind.ProbeDrop, ProbeModel = new AssetKey("procedural/probe"), ProbeRadius = 3f };
+
+        var result = SceneMaterializer.Materialize(
+            Scene([Entity("models/x.glb")], systems: [system]), Loader("models/x.glb", "procedural/probe"), world, 1f / 60f);
+
+        Assert.True(result.Models.ContainsKey(new AssetKey("procedural/probe")));
+        Assert.Equal(1, world.LiveEntityCount); // the probe model spawns no static entity of its own
+    }
+
+    [Fact]
+    public void BuildRuntimeTemplate_ProducesGpuFreeSpecFromMeshBoundsAndTransform()
+    {
+        var models = new Dictionary<AssetKey, ModelAsset> { [new AssetKey("procedural/probe")] = FakeModel("probe") };
+
+        var template = SceneMaterializer.BuildRuntimeTemplate(new AssetKey("procedural/probe"), 0, 0, models);
+
+        Assert.False(template.Mesh.IsValid);
+        Assert.False(template.Material.IsValid);
+        Assert.Equal(Vector3.Zero, template.BoundsCenter);
+        Assert.Equal(1.7320508f, template.BoundsRadius);
+        Assert.Equal(new MeshRefKey(new AssetKey("procedural/probe"), 0, 0), template.Identity);
+    }
+
+    [Fact]
+    public void BuildRuntimeTemplate_UnknownModel_Throws()
+    {
+        var models = new Dictionary<AssetKey, ModelAsset>();
+        Assert.Throws<AssetException>(() => SceneMaterializer.BuildRuntimeTemplate(new AssetKey("procedural/missing"), 0, 0, models));
+    }
+
+    [Fact]
+    public void BuildRuntimeTemplate_MeshOutOfRange_Throws()
+    {
+        var models = new Dictionary<AssetKey, ModelAsset> { [new AssetKey("procedural/probe")] = FakeModel("probe") };
+        Assert.Throws<AssetException>(() => SceneMaterializer.BuildRuntimeTemplate(new AssetKey("procedural/probe"), 5, 0, models));
     }
 }

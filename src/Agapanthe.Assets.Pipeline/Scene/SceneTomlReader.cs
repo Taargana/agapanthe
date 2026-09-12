@@ -3,6 +3,7 @@ using Agapanthe.Assets;
 using Agapanthe.Core;
 using Tomlyn;
 using Tomlyn.Model;
+using static Agapanthe.Assets.Pipeline.Scene.TomlHelpers;
 
 namespace Agapanthe.Assets.Pipeline.Scene;
 
@@ -12,7 +13,7 @@ namespace Agapanthe.Assets.Pipeline.Scene;
 internal static class SceneTomlReader
 {
     private static readonly string[] SceneTopKeys =
-        ["name", "world_origin", "ambient", "camera", "environment", "physics", "restore", "entity", "grid", "cluster", "light"];
+        ["name", "world_origin", "ambient", "camera", "environment", "physics", "restore", "entity", "grid", "cluster", "light", "system"];
     private static readonly string[] PrefabTopKeys = ["entity"];
     private static readonly string[] ItemKeys =
     [
@@ -21,10 +22,16 @@ internal static class SceneTomlReader
     ];
     private static readonly string[] LightKeys = ["kind", "color", "intensity", "direction", "position", "range"];
     private static readonly string[] CameraKeys =
-        ["mode", "fov_y", "free_fly", "view_dir", "distance_mul", "position", "yaw", "pitch", "near", "far"];
-    private static readonly string[] EnvironmentKeys = ["hdri"];
-    private static readonly string[] PhysicsKeys = ["gravity", "ground_y"];
+    [
+        "mode", "fov_y", "free_fly", "view_dir", "distance_mul", "position", "yaw", "pitch", "near", "far",
+        "move_speed", "shadow_distance",
+    ];
+    private static readonly string[] EnvironmentKeys = ["hdri", "procedural_sky", "black"];
+    private static readonly string[] PhysicsKeys = ["gravity", "ground_y", "mu", "attractor_center", "surface_radius"];
     private static readonly string[] RestoreKeys = ["snapshot"];
+    // Contenu-3c: probe_drop's TOML surface. Keys not in this kind's own list are rejected (per-kind split, same
+    // style [[grid]]/[[cluster]] already use).
+    private static readonly string[] ProbeDropSystemKeys = ["kind", "probe_model", "probe_radius", "every", "centre"];
 
     public static AuthoredScene ReadScene(string path)
     {
@@ -45,6 +52,7 @@ internal static class SceneTomlReader
         foreach (var it in ReadItems(table, "grid", path, AuthoredItemKind.Grid)) scene.Items.Add(it);
         foreach (var it in ReadItems(table, "cluster", path, AuthoredItemKind.Cluster)) scene.Items.Add(it);
         foreach (var l in ReadLights(table, path)) scene.Lights.Add(l);
+        foreach (var s in ReadSystems(table, path)) scene.Systems.Add(s);
 
         if (scene.Items.Count == 0)
         {
@@ -66,20 +74,6 @@ internal static class SceneTomlReader
         }
 
         return prefab;
-    }
-
-    // Contenu-3b audit (engine-architect F1): the class doc and the design spec both promise an unknown key is
-    // rejected — nothing enforced it. A typo (`fov` for `fov_y`, `spacing` for `spacing_mul`) silently took the
-    // default instead of failing the cook, and the author debugged the renderer instead of the file.
-    private static void RejectUnknownKeys(TomlTable t, string path, string context, string[] known)
-    {
-        var unknown = t.Keys.Where(k => !known.Contains(k, StringComparer.Ordinal)).ToArray();
-        if (unknown.Length > 0)
-        {
-            throw new AssetException(
-                $"'{path}': unknown key(s) in [{context}]: {string.Join(", ", unknown)}. "
-                + $"Known keys: {string.Join(", ", known)}.");
-        }
     }
 
     private static TomlTable Parse(string path)
@@ -174,6 +168,48 @@ internal static class SceneTomlReader
         }
     }
 
+    // Contenu-3c: [[system]] — a per-kind required/rejected key split (only "kind" is common up front; the rest
+    // of the allowed set depends on it, same idea as [[grid]] vs [[cluster]] sharing ItemKeys but this one is
+    // stricter because there is only ever one kind live at a time today).
+    private static IEnumerable<AuthoredSystem> ReadSystems(TomlTable table, string path)
+    {
+        if (!table.TryGetValue("system", out var raw))
+        {
+            yield break;
+        }
+
+        if (raw is not TomlTableArray arr)
+        {
+            throw new AssetException($"'{path}': [[system]] must be an array of tables.");
+        }
+
+        foreach (var t in arr)
+        {
+            var kind = Str(t, "kind", path)
+                       ?? throw new AssetException($"'{path}': a [[system]] is missing 'kind'.");
+            yield return kind switch
+            {
+                "probe_drop" => ReadProbeDropSystem(t, path),
+                _ => throw new AssetException($"'{path}': unknown [[system]] kind '{kind}' (probe_drop)."),
+            };
+        }
+    }
+
+    private static AuthoredSystem ReadProbeDropSystem(TomlTable t, string path)
+    {
+        RejectUnknownKeys(t, path, "system (probe_drop)", ProbeDropSystemKeys);
+        return new AuthoredSystem
+        {
+            Kind = "probe_drop",
+            ProbeModel = Str(t, "probe_model", path)
+                         ?? throw new AssetException($"'{path}': [[system]] kind=probe_drop is missing 'probe_model'."),
+            ProbeRadius = (float)(NumOpt(t, "probe_radius", path)
+                          ?? throw new AssetException($"'{path}': [[system]] kind=probe_drop is missing 'probe_radius'.")),
+            Every = (int)(NumOpt(t, "every", path) ?? 1),
+            Centre = Double3Opt(t, "centre", path) ?? default,
+        };
+    }
+
     private static AuthoredCamera ReadCamera(TomlTable table, string path)
     {
         if (!table.TryGetValue("camera", out var raw))
@@ -195,6 +231,8 @@ internal static class SceneTomlReader
             Pitch = (float)(NumOpt(t, "pitch", path) ?? 0.0),
             Near = (float)(NumOpt(t, "near", path) ?? 0.0),
             Far = (float)(NumOpt(t, "far", path) ?? 0.0),
+            MoveSpeed = (float)(NumOpt(t, "move_speed", path) ?? 0.0),
+            ShadowDistance = (float)(NumOpt(t, "shadow_distance", path) ?? 0.0),
         };
     }
 
@@ -207,16 +245,40 @@ internal static class SceneTomlReader
 
         var t = AsTable(raw, "environment", path);
         RejectUnknownKeys(t, path, "environment", EnvironmentKeys);
-        return new AuthoredEnvironment { Hdri = Str(t, "hdri", path) };
+        var hdri = Str(t, "hdri", path);
+        var proceduralSky = BoolOpt(t, "procedural_sky", path) ?? false;
+        var black = BoolOpt(t, "black", path) ?? false;
+
+        var modeCount = (hdri is not null ? 1 : 0) + (proceduralSky ? 1 : 0) + (black ? 1 : 0);
+        if (modeCount > 1)
+        {
+            throw new AssetException($"'{path}': [environment] must set at most one of 'hdri'/'procedural_sky'/'black'.");
+        }
+
+        return new AuthoredEnvironment { Hdri = hdri, ProceduralSky = proceduralSky, Black = black };
     }
 
     private static AuthoredPhysics ReadPhysics(TomlTable t, string path)
     {
         RejectUnknownKeys(t, path, "physics", PhysicsKeys);
+
+        var mu = NumOpt(t, "mu", path);
+        var attractorCenter = Double3Opt(t, "attractor_center", path);
+        var surfaceRadius = NumOpt(t, "surface_radius", path);
+        var attractorFieldCount = (mu is not null ? 1 : 0) + (attractorCenter is not null ? 1 : 0) + (surfaceRadius is not null ? 1 : 0);
+        if (attractorFieldCount is not (0 or 3))
+        {
+            throw new AssetException(
+                $"'{path}': [physics] 'mu'/'attractor_center'/'surface_radius' must be all present or all absent — got {attractorFieldCount} of 3.");
+        }
+
         return new AuthoredPhysics
         {
             Gravity = Vec3Opt(t, "gravity", path) ?? new Vector3(0f, -9.81f, 0f),
             GroundY = (float)(NumOpt(t, "ground_y", path) ?? 0.0),
+            AttractorMu = mu ?? 0.0,
+            AttractorCenter = attractorCenter ?? default,
+            AttractorSurfaceRadius = surfaceRadius ?? 0.0,
         };
     }
 
@@ -228,114 +290,5 @@ internal static class SceneTomlReader
             Snapshot = Str(t, "snapshot", path)
                        ?? throw new AssetException($"'{path}': [restore] is missing 'snapshot'."),
         };
-    }
-
-    // --- scalar helpers -------------------------------------------------------------------------------------
-
-    private static TomlTable AsTable(object? o, string where, string path)
-        => o as TomlTable ?? throw new AssetException($"'{path}': '{where}' must be a table.");
-
-    private static string? Str(TomlTable t, string key, string path)
-        => t.TryGetValue(key, out var v)
-            ? v as string ?? throw new AssetException($"'{path}': '{key}' must be a string.")
-            : null;
-
-    private static double? NumOpt(TomlTable t, string key, string path)
-    {
-        if (!t.TryGetValue(key, out var v))
-        {
-            return null;
-        }
-
-        return v switch
-        {
-            long l => l,
-            double d => d,
-            _ => throw new AssetException($"'{path}': '{key}' must be a number."),
-        };
-    }
-
-    private static bool? BoolOpt(TomlTable t, string key, string path)
-        => t.TryGetValue(key, out var v)
-            ? v as bool? ?? throw new AssetException($"'{path}': '{key}' must be a boolean.")
-            : null;
-
-    private static float[] Floats(TomlTable t, string key, string path, int n)
-    {
-        if (t[key] is not TomlArray a || a.Count != n)
-        {
-            throw new AssetException($"'{path}': '{key}' must be an array of {n} numbers.");
-        }
-
-        var r = new float[n];
-        for (var i = 0; i < n; i++)
-        {
-            r[i] = a[i] switch
-            {
-                long l => l,
-                double d => (float)d,
-                _ => throw new AssetException($"'{path}': '{key}'[{i}] is not a number."),
-            };
-        }
-
-        return r;
-    }
-
-    private static Vector3? Vec3Opt(TomlTable t, string key, string path)
-    {
-        if (!t.ContainsKey(key))
-        {
-            return null;
-        }
-
-        var f = Floats(t, key, path, 3);
-        return new Vector3(f[0], f[1], f[2]);
-    }
-
-    // Contenu-3b audit (engine-architect F2): `Double3Opt` used to route through `Floats` (an f32 array), silently
-    // quantizing a large-magnitude authored position (world_origin, a point light, a fixed camera — precisely the
-    // fields the engine's double-precision world exists for) down to float precision before ever reaching the f64
-    // blob field. A `Doubles()` sibling keeps full precision from the TOML number through to the .agscene payload.
-    private static double[] Doubles(TomlTable t, string key, string path, int n)
-    {
-        if (t[key] is not TomlArray a || a.Count != n)
-        {
-            throw new AssetException($"'{path}': '{key}' must be an array of {n} numbers.");
-        }
-
-        var r = new double[n];
-        for (var i = 0; i < n; i++)
-        {
-            r[i] = a[i] switch
-            {
-                long l => l,
-                double d => d,
-                _ => throw new AssetException($"'{path}': '{key}'[{i}] is not a number."),
-            };
-        }
-
-        return r;
-    }
-
-    private static Double3? Double3Opt(TomlTable t, string key, string path)
-    {
-        if (!t.ContainsKey(key))
-        {
-            return null;
-        }
-
-        var d = Doubles(t, key, path, 3);
-        return new Double3(d[0], d[1], d[2]);
-    }
-
-    private static Quaternion? QuatOpt(TomlTable t, string key, string path)
-    {
-        if (!t.ContainsKey(key))
-        {
-            return null;
-        }
-
-        var f = Floats(t, key, path, 4);
-        return new Quaternion(f[0], f[1], f[2], f[3]);
     }
 }

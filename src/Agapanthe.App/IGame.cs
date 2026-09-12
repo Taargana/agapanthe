@@ -24,4 +24,10 @@ public interface IGame
     /// "unidentified" state that keeps JIT/AOT determinism. <see cref="AppHost"/> lets <c>AGAPANTHE_UNIVERSE</c>
     /// override it.</summary>
     UniverseId Universe => UniverseId.None;
+
+    /// <summary>Contenu-3c: the scene-system factories this game knows how to construct, one per
+    /// <see cref="Assets.Scene.SceneSystemKind"/> it supports. Defaults to none — a game whose scenes declare no
+    /// <c>[[system]]</c> block needs no changes here. <see cref="SceneRecipe"/> dispatches by matching
+    /// <see cref="ISceneSystemFactory.Kind"/> and throws for a kind with no registered factory.</summary>
+    IReadOnlyList<ISceneSystemFactory> SceneSystems => [];
 }

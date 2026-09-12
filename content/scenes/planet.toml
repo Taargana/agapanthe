@@ -1,0 +1,44 @@
+# Contenu-3c — the P3-M8 planet scene (AGAPANTHE_SCENE=planet). Numbers baked at cook time from
+# Sandbox.PlanetContent.SetupPlanetScene + Sandbox.SandboxCameras.FramePlanetCamera's defaults
+# (AGAPANTHE_PLANET_PHASE=40, AGAPANTHE_PLANET_ALT=3.4, AGAPANTHE_PLANET_FOV=70, AGAPANTHE_SUN_DIR
+# default (0.55, 0.25, -0.8)) — derived via a throwaway script reproducing those exact formulas, not
+# hand arithmetic. Sun-only lighting: the directional light is zeroed (a point light co-located with
+# the Sun sphere is the sole illuminant), black space environment.
+name = "planet"
+ambient = [0.0, 0.0, 0.0]
+
+[[entity]]
+model = "procedural/planet-surface"
+position = [0.0, 0.0, 0.0]
+casts_shadow = false
+
+[[entity]]
+model = "procedural/sun-surface"
+position = [41036947456.0, 18653157376.0, -59690106880.0]
+casts_shadow = false
+
+[[light]]
+kind = "directional"
+direction = [-0.5486301183700562, -0.2493773102760315, 0.7980074286460876]
+intensity = 0.0
+
+[[light]]
+kind = "point"
+position = [41036947456.0, 18653157376.0, -59690106880.0]
+color = [1.0, 0.97, 0.92]
+intensity = 1.9582080685811528e22
+
+[environment]
+black = true
+
+[camera]
+mode = "fixed"
+position = [-10255132.0, 374540.0625, 3463532.5]
+yaw = 1.2450881004333496
+pitch = -0.03458822891116142
+fov_y = 70.0
+near = 31855.0
+far = 104718504496.84
+move_speed = 1592750.0
+shadow_distance = 1.0
+free_fly = true

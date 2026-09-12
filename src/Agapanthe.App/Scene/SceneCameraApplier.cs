@@ -44,6 +44,18 @@ public static class SceneCameraApplier
                 camera.Far = scene.Far;
             }
 
+            // Contenu-3c: baked planet/drive framing has no scene bounds to derive these from dynamically (unlike
+            // FrameBounds below) — the cook-time trig that computed the fixed pose also computes these two.
+            if (scene.MoveSpeed > 0f)
+            {
+                controller.MoveSpeed = scene.MoveSpeed;
+            }
+
+            if (scene.ShadowDistance > 0f)
+            {
+                renderer.ShadowDistance = scene.ShadowDistance;
+            }
+
             return;
         }
 

@@ -38,6 +38,15 @@ public sealed class AgSceneFormatTests
         Environment = new SceneEnvironment { Mode = SceneEnvironmentMode.HdriPath, HdriPath = "models/studio_small_1k.hdr" },
         Physics = new ScenePhysics { Gravity = new Vector3(0, -9.81f, 0), GroundY = 0f },
         Restore = new SceneRestore { SnapshotPath = "challenge.save" },
+        // Contenu-3c: a probe-only model, referenced by no SceneEntity — exercises the key-table extension.
+        Systems =
+        [
+            new SceneSystem
+            {
+                Kind = SceneSystemKind.ProbeDrop, ProbeModel = new AssetKey("procedural/probe"),
+                ProbeLocalMesh = 0, ProbeLocalMat = 0, ProbeRadius = 3f, Every = 30, Centre = new Double3(0, 100, 0),
+            },
+        ],
     };
 
     private static byte[] Write(SceneDefinition d)
@@ -90,7 +99,56 @@ public sealed class AgSceneFormatTests
         Assert.Equal(SceneEnvironmentMode.HdriPath, restored.Environment.Mode);
         Assert.Equal("models/studio_small_1k.hdr", restored.Environment.HdriPath);
         Assert.Equal(new Vector3(0, -9.81f, 0), restored.Physics!.Gravity);
+        Assert.Equal(0.0, restored.Physics!.Mu); // no attractor in this sample
         Assert.Equal("challenge.save", restored.Restore!.SnapshotPath);
+
+        var sys = Assert.Single(restored.Systems);
+        Assert.Equal(SceneSystemKind.ProbeDrop, sys.Kind);
+        Assert.Equal(new AssetKey("procedural/probe"), sys.ProbeModel);
+        Assert.Equal(3f, sys.ProbeRadius);
+        Assert.Equal(30, sys.Every);
+        Assert.Equal(new Double3(0, 100, 0), sys.Centre);
+    }
+
+    [Fact]
+    public void RoundTrip_PhysicsWithAttractor()
+    {
+        var d = Sample() with
+        {
+            Physics = new ScenePhysics
+            {
+                Gravity = Vector3.Zero, GroundY = 0f,
+                Mu = 2.03e14, AttractorCenter = new Double3(1, 2, 3), SurfaceRadius = 3185500.0,
+            },
+        };
+        var restored = AgSceneFormat.Read(Write(d));
+        Assert.Equal(2.03e14, restored.Physics!.Mu);
+        Assert.Equal(new Double3(1, 2, 3), restored.Physics.AttractorCenter);
+        Assert.Equal(3185500.0, restored.Physics.SurfaceRadius);
+    }
+
+    [Fact]
+    public void RoundTrip_ProceduralSkyEnvironment()
+    {
+        var d = Sample() with { Environment = new SceneEnvironment { Mode = SceneEnvironmentMode.ProceduralSky } };
+        var restored = AgSceneFormat.Read(Write(d));
+        Assert.Equal(SceneEnvironmentMode.ProceduralSky, restored.Environment.Mode);
+    }
+
+    [Fact]
+    public void RoundTrip_BlackEnvironment()
+    {
+        var d = Sample() with { Environment = new SceneEnvironment { Mode = SceneEnvironmentMode.Black } };
+        var restored = AgSceneFormat.Read(Write(d));
+        Assert.Equal(SceneEnvironmentMode.Black, restored.Environment.Mode);
+    }
+
+    [Fact]
+    public void RoundTrip_NoSystems_IsEmptyNotNull()
+    {
+        var d = Sample() with { Systems = [] };
+        var restored = AgSceneFormat.Read(Write(d));
+        Assert.Empty(restored.Systems);
     }
 
     [Fact]
@@ -112,12 +170,15 @@ public sealed class AgSceneFormatTests
             {
                 Mode = SceneCameraMode.Fixed, FovY = 70f, FreeFly = false,
                 Position = new Double3(0, 5, 10), Yaw = 0.1f, Pitch = -0.2f, Near = 1f, Far = 1000f,
+                MoveSpeed = 20f, ShadowDistance = 1f,
             },
         };
         var restored = AgSceneFormat.Read(Write(d));
         Assert.Equal(SceneCameraMode.Fixed, restored.Camera.Mode);
         Assert.Equal(new Double3(0, 5, 10), restored.Camera.Position);
         Assert.Equal(1000f, restored.Camera.Far);
+        Assert.Equal(20f, restored.Camera.MoveSpeed);
+        Assert.Equal(1f, restored.Camera.ShadowDistance);
     }
 
     [Fact]
@@ -134,6 +195,15 @@ public sealed class AgSceneFormatTests
         var bytes = Write(Sample());
         BinaryPrimitives.WriteUInt32LittleEndian(bytes.AsSpan(4, 4), 999);
         Assert.Throws<AgSceneException>(() => AgSceneFormat.Read(bytes));
+    }
+
+    [Fact]
+    public void Read_RejectsV1WithARecookMessage()
+    {
+        var bytes = Write(Sample());
+        BinaryPrimitives.WriteUInt32LittleEndian(bytes.AsSpan(4, 4), 1);
+        var ex = Assert.Throws<AgSceneException>(() => AgSceneFormat.Read(bytes));
+        Assert.Contains("re-run the asset cook", ex.Message, StringComparison.OrdinalIgnoreCase);
     }
 
     [Fact]
@@ -236,6 +306,44 @@ public sealed class AgSceneFormatTests
         // Kind is written as a raw byte with no validation on write (writer trusts the DTO); the reader must catch
         // the out-of-range value on the way back in.
         Assert.Throws<AgSceneException>(() => AgSceneFormat.Read(Write(d)));
+    }
+
+    [Fact]
+    public void Read_RejectsUnknownSystemKind()
+    {
+        var d = Sample() with
+        {
+            Systems = [new SceneSystem { Kind = (SceneSystemKind)200, ProbeModel = new AssetKey("procedural/probe"), ProbeRadius = 1f }],
+        };
+
+        Assert.Throws<AgSceneException>(() => AgSceneFormat.Read(Write(d)));
+    }
+
+    [Fact]
+    public void Read_RejectsForgedSystemCount_BeyondWhatRemainingBytesCouldHold()
+    {
+        // A minimal, otherwise-valid v2 payload (no entities/lights/systems, FrameBounds camera, None env, no
+        // physics/restore) followed by a forged systemCount far beyond what the trailing bytes could hold.
+        using var ms = new MemoryStream();
+        Span<byte> u32 = stackalloc byte[4];
+        ms.Write(new byte[2]);                                             // name length 0
+        ms.Write(new byte[24]);                                            // worldOrigin
+        BinaryPrimitives.WriteUInt32LittleEndian(u32, 1); ms.Write(u32);   // keyCount = 1 (sentinel only)
+        ms.Write(new byte[2]);                                             // sentinel string length 0
+        BinaryPrimitives.WriteUInt32LittleEndian(u32, 0); ms.Write(u32);   // entityCount = 0
+        BinaryPrimitives.WriteUInt32LittleEndian(u32, 0); ms.Write(u32);   // lightCount = 0
+        ms.Write(new byte[12]);                                            // ambient
+        ms.WriteByte((byte)SceneCameraMode.FrameBounds);
+        ms.Write(new byte[4]);                                             // fovY
+        ms.WriteByte(0);                                                   // freeFly
+        ms.Write(new byte[12 + 4]);                                        // viewDir, distanceMul
+        ms.WriteByte((byte)SceneEnvironmentMode.None);
+        ms.WriteByte(0);                                                   // physics present = 0
+        ms.WriteByte(0);                                                   // restore present = 0
+        BinaryPrimitives.WriteUInt32LittleEndian(u32, 100); ms.Write(u32); // systemCount = 100 (forged)
+        ms.Write(new byte[10]);                                            // nowhere near 100×45 bytes
+
+        Assert.Throws<AgSceneException>(() => AgSceneFormat.Read(Container(ms.ToArray())));
     }
 
     [Fact]

@@ -1,6 +1,15 @@
 # Agapanthe — Plan complet & état d'avancement
 
-**Mis à jour** : 2026-09-11 (session 34 — **Contenu-3b CLOS → domaine Contenu CLOS (3/3)** : format de scène
+**Mis à jour** : 2026-09-12 (session 35 — **Contenu-3c-1 CLOS** : 1ᵉʳ des 3 sous-phases gatées de Contenu-3c —
+`.agscene` v2 (attracteur newtonien, caméra `Fixed` +2 champs, 2 modes environnement, `[[system]]`), **2
+registres** (`ISceneSystemFactory` client via `IGame` + générateurs procéduraux cook-time-only), 3 caméras
+planète bespoke collapsent en trig cuite, `UvSphereGenerator` (cook-time, byte-identique à
+`Primitives.UvSphere`), `planet`/`planet-drop` migrées vers `SceneRecipe` générique, `HeadlessSim` refuse
+(exit 1) toute scène à systèmes ; spec 4,30/5, double audit `csharp-lowlevel`+`engine-architect`
+PASS-with-concerns, **1 🔴 trouvé par les deux et corrigé** (`SceneMaterializer` oubliait
+`WithAttractor(...)` → `planet-drop` tournait à gravité nulle, invisible dans la capture pinned — 2 tests de
+régression ajoutés) + 4 findings 🟠 appliqués ; 780 tests, captures/snapshots inchangés JIT==NativeAOT, 0
+leak/0 validation, verdict visuel humain PASS) · 2026-09-11 (session 34 — **Contenu-3b CLOS → domaine Contenu CLOS (3/3)** : format de scène
 déclaratif `.agscene`/`.agprefab` (TOML cook-side via Tomlyn → blob binaire déterministe, patron `.agmodel`) lu
 par un `SceneLoader` GPU-free (nouveau `Agapanthe.Scene` = `{Core, World, Assets}`) — **client et serveur
 partagent enfin le code de peuplement** : `HeadlessSim --scene <clé>` charge le même fichier que le Sandbox ;
@@ -717,9 +726,61 @@ Spec : [2026-07-25-vs2-spawn-runtime-newtonian-gravity-design.md](plans/2026-07-
 > `ModelContent.ResolveModelKey` + l'arg CLI modèle du Sandbox restent (déviation D10 documentée — `drive`
 > les utilise encore, migre en 3c). **Verdict visuel humain : PASS** (2026-09-09).
 >
-> ### ▶️ Reprise — **Contenu-3c** (registres de fabriques de jeu + migration `drive`/`planet*`), ou 2ᵉ slice dissemblable, ou UI-3
-> Le domaine **Contenu est CLOS (3/3)**. Feu vert humain requis avant de reprendre le fil 3c (non urgent —
-> c'est du confort/uniformisation, pas une dette bloquante). Alternatives : **2ᵉ slice dissemblable**
+> ### ✅ **Contenu-3c-1 CLOS (S35)** — registres de fabriques + migration `planet`/`planet-drop`
+> Spec : **[plans/2026-09-11-content-3c-scene-systems-design.md](plans/2026-09-11-content-3c-scene-systems-design.md)**
+> (approuvée **4,30/5**, revue scorée 3,70 → 4,30). 1ᵉʳ des **3 sous-phases gatées** de Contenu-3c (3c-1 infra +
+> `planet`/`planet-drop` · 3c-2 `LandingChallenge` + `planet-challenge` · 3c-3 `ground_quad` + `drive` + cleanup).
+>
+> **Livré** : **`.agscene` v2** (`ScenePhysics` gagne un attracteur newtonien optionnel `Mu`/`AttractorCenter`/
+> `SurfaceRadius`, `SceneCamera.Fixed` gagne `MoveSpeed`/`ShadowDistance`, `SceneEnvironmentMode` +
+> `ProceduralSky`/`Black`, nouveau `[[system]]` — `SceneSystemKind.ProbeDrop` seul déclaré, pas de
+> pré-déclaration spéculative de `LandingChallenge`, confirmé par les deux audits) · **2 registres, pas 3**
+> (décision verrouillée en interview) — `ISceneSystemFactory` côté client (`IGame.SceneSystems`, sur
+> `PresentationSceneContext.SceneSystemFactories` après déplacement post-audit) et un registre de
+> **générateurs procéduraux cook-time-only** (`Agapanthe.Assets.Pipeline/Procedural/`, invisible à
+> `IGame`/au runtime) · **`UvSphereGenerator`** réimplémente `Primitives.UvSphere` en SoA cook-side (vérifié
+> byte-identique par test dédié) → sphères planète/soleil/probe deviennent de vrais blobs `.agmodel` cuits ·
+> **3 caméras planète bespoke collapsent en trig cuite** dans `SceneCamera.Fixed` (0 nouvelle logique caméra
+> runtime, juste 2 champs copiés) · `SceneMaterializer.BuildRuntimeTemplate` (nouveau, public, GPU-free) —
+> un système client résout les vrais handles via `ResourceRegistry.ResolveMeshRef` sur ce patron ·
+> `HeadlessSim` refuse (exit 1) toute scène déclarant des systèmes (concept client-only, jamais un run
+> partiel silencieux) · `PlanetSceneRecipe`/`PlanetDropSceneRecipe` supprimées, `planet`/`planet-drop`
+> deviennent `SceneRecipe("planet"/"planet-drop")` génériques + `content/procedural/*.toml` +
+> `content/scenes/{planet,planet-drop}.toml` (nombres cuits dérivés d'un script jetable rejouant les
+> anciennes formules à leurs défauts env-var).
+>
+> **Gates** : **780 tests** · 0 warning · captures `planet`/`planet-drop` **pinned + verdict visuel humain
+> PASS** (`99e2f4a3…`/`81ddf074…`) · `model`/`grid`/`drop`/`metalrough`/`headless-default`/`planet-challenge`/
+> `drive` tous re-vérifiés inchangés · `--scene planet-drop` → exit 1 confirmé (D9) · Sandbox + HeadlessSim +
+> `AotComponentProbe` **JIT == NativeAOT** sur toutes les captures/snapshots, re-confirmé après les
+> corrections d'audit · 0 leak · 0 validation.
+>
+> **Double audit** : `csharp-lowlevel` + `engine-architect` PASS-with-concerns, **1 🔴 trouvé indépendamment
+> par les deux et corrigé** — `SceneMaterializer.Materialize` parsait/compilait/round-trippait l'attracteur
+> (`Mu`/`AttractorCenter`/`SurfaceRadius`) mais n'appelait jamais `PhysicsSettings.WithAttractor(...)` :
+> `planet-drop` tournait avec **zéro gravité**, chaque probe restait immobile — bug invisible dans la
+> capture pinned (aucune probe n'y apparaît, elle ne spawn que sur `B`), découvert uniquement par l'audit,
+> pas par le protocole visuel. Corrigé + 2 tests de régression ajoutés (`SceneMaterializerTests` —
+> csharp-lowlevel avait explicitement signalé le trou de couverture `ScenePhysics → PhysicsSettings`).
+> 4 autres findings 🟠 appliqués : bounds check `localMat` manquant dans `BuildRuntimeTemplate` · garde de
+> suffixe `.toml` dans `CookRunner` (un near-miss de wildcard Win32 pouvait mal-keyer un fichier) ·
+> `SceneSystemFactories` déplacé de `SimSceneContext` vers `PresentationSceneContext` (nommer
+> `PresentationSceneContext` dans `Create` aurait transitivement réintroduit un type GPU/fenêtre dans le
+> contexte headless-safe) · garde single-slot `SimulationHost.ApplyCommand` centralisée dans `SceneRecipe`
+> au lieu d'être dupliquée par fabrique · warning `AGAPANTHE_LOAD` ajouté pour toute scène cuite sans bloc
+> `[restore]` (vrai depuis Contenu-3b, pas une régression 3c-1 — le §3.5 du spec l'affirmait à tort
+> "inaffecté").
+>
+> **Dette laissée** (board §Deferred, → 3c-2/3c-3) : validation `ProbeRadius`/`Every` · sémantique sentinelle
+> `MoveSpeed`/`ShadowDistance` (0 = dérivation dynamique, pas documenté comme contrat formel) · fabrique
+> dupliquée sur un même `Kind` prend silencieusement la première trouvée · `ApplyEnvironment` sans bras
+> `default` explicite · script `bake_planet.cs` non committé (traçabilité des nombres cuits). **Verdict
+> visuel humain : PASS** (2026-09-12).
+>
+> ### ▶️ Reprise — **Contenu-3c-2** (`LandingChallenge` + migration `planet-challenge`), ou 2ᵉ slice dissemblable, ou UI-3
+> 3c-1 clos. 3c-2/3c-3 restent à décomposer en board (le plan complet des 3 phases existe déjà,
+> `docs/plans/2026-09-11-content-3c-scene-systems-design.md` + le plan-mode file couvrent le design des 3).
+> Non urgent — confort/uniformisation, pas une dette bloquante. Alternatives : **2ᵉ slice dissemblable**
 > (top-down) · **UI-3** (timestamps GPU + seam `FrameProfiler`).
 >
 > ### Contexte — **Cap moteur** (réorientation S25)

@@ -126,36 +126,6 @@ internal static class PlanetContent
         return (-sunFromPlanet, planetRadius, sunOrigin);
     }
 
-    /// <summary>VS-2 planet-drop setup: a single Newtonian attractor at the planet centre, a radial ground
-    /// half-space at the planet radius, and a small probe sphere loaded once.</summary>
-    public static (PhysicsSettings Physics, ImportedEntitySpec ProbeSpec, Double3 DropCentre, float ProbeRadius) SetupPlanetDrop(
-        GraphicsDevice device, ResourceRegistry registry, DescriptorSetLayout materialLayout,
-        Double3 planetCentre, double planetRadius, float fixedDt)
-    {
-        var probeRadius = (float)SandboxEnv.EnvDouble("AGAPANTHE_PROBE_RADIUS", 3.0);
-        var dropHeight = SandboxEnv.EnvDouble("AGAPANTHE_DROP_HEIGHT", 120.0);
-        var mu = SandboxEnv.EnvDouble("AGAPANTHE_PLANET_MU", 10.0 * planetRadius * planetRadius);
-        var physics = new PhysicsSettings(Vector3.Zero, groundY: 0f, fixedDt: fixedDt)
-            .WithAttractor(planetCentre, mu, planetRadius);
-
-        var probeMaterial = new MaterialAsset
-        {
-            BaseColorFactor = new Vector4(0.9f, 0.35f, 0.1f, 1f),
-            MetallicFactor = 0.1f,
-            RoughnessFactor = 0.6f,
-            Name = "Probe",
-        };
-        var dropCentre = planetCentre + new Double3(0.0, planetRadius + dropHeight, 0.0);
-        var (_, probeSpecs) = registry.Load(
-            device, BuildProbeSphere(probeRadius, probeMaterial), materialLayout, new AssetKey("sandbox/probe"), dropCentre);
-
-        var g = mu / (planetRadius * planetRadius);
-        Log.Info(
-            $"Sandbox: [scene] planet-drop — probe r={probeRadius:F1} m from {dropHeight:F0} m up, surface g={g:F2} m/s² " +
-            $"(μ={mu:E2}); tune with AGAPANTHE_DROP_EVERY / _PLANET_MU / _DROP_HEIGHT / _PROBE_RADIUS, key B drops one.");
-        return (physics, probeSpecs[0], dropCentre, probeRadius);
-    }
-
     /// <summary>VS-3 planet-challenge setup: the same attractor as planet-drop + a target zone and a floating
     /// emissive beacon. Loads probe + beacon assets in a FIXED order (Option 1 seam).</summary>
     public static ChallengeSetup SetupPlanetChallenge(

@@ -114,63 +114,10 @@ internal static class SandboxCameras
         renderer.ShadowDistance = MathF.Max(MathF.Max(diagonal * 4f, 1f), renderer.Cascades.MaxDistance);
     }
 
-    public static void FramePlanetCamera(
-        Camera camera, FreeCameraController controller, Renderer renderer,
-        Double3 planetOrigin, Double3 sunOrigin, double planetRadius, Vector3 sunTravelDir)
-    {
-        var backDir = Vector3.Normalize(sunTravelDir);
-        var worldUp = MathF.Abs(backDir.Y) > 0.95f ? Vector3.UnitX : Vector3.UnitY;
-        var right = Vector3.Normalize(Vector3.Cross(backDir, worldUp));
-        var up = Vector3.Cross(right, backDir);
-        var beta = (float)(SandboxEnv.EnvDouble("AGAPANTHE_PLANET_PHASE", 40.0) * MathF.PI / 180.0);
-        var side = Vector3.Normalize((right * 0.9f) + (up * 0.35f));
-        var camDir = Vector3.Normalize((backDir * MathF.Cos(beta)) + (side * MathF.Sin(beta)));
-
-        var altMul = (float)SandboxEnv.EnvDouble("AGAPANTHE_PLANET_ALT", 3.4);
-        var distance = planetRadius * altMul;
-        camera.Position = planetOrigin + new Double3(new Vector3(
-            (float)(camDir.X * distance), (float)(camDir.Y * distance), (float)(camDir.Z * distance)));
-
-        var forward = -camDir;
-        camera.Pitch = MathF.Asin(Math.Clamp(forward.Y, -1f, 1f));
-        camera.Yaw = MathF.Atan2(forward.X, -forward.Z);
-        camera.FovY = (float)(SandboxEnv.EnvDouble("AGAPANTHE_PLANET_FOV", 70.0) * MathF.PI / 180.0);
-
-        camera.Near = (float)MathF.Max((float)(planetRadius * 0.01), 100f);
-        camera.Far = (float)(Double3.Distance(planetOrigin, sunOrigin) * 1.4);
-
-        renderer.ShadowDistance = 1f;
-        controller.MoveSpeed = (float)(planetRadius * 0.5);
-    }
-
-    public static void FramePlanetDropCamera(
-        Camera camera, FreeCameraController controller, Renderer renderer,
-        Double3 planetCentre, Double3 sunOrigin, double planetRadius, Vector3 sunTravelDir)
-    {
-        var surface = planetCentre + new Double3(0.0, planetRadius, 0.0);
-        var sunDir = -Vector3.Normalize(sunTravelDir);
-        var bearing = new Vector3(sunDir.X, 0f, sunDir.Z);
-        bearing = bearing.LengthSquared() > 1e-6f ? Vector3.Normalize(bearing) : -Vector3.UnitZ;
-
-        var sunOff = (float)(SandboxEnv.EnvDouble("AGAPANTHE_DROP_SUN_OFF", 32.0) * Math.PI / 180.0);
-        var (so, co) = MathF.SinCos(sunOff);
-        var lookAz = new Vector3((bearing.X * co) + (bearing.Z * so), 0f, (-bearing.X * so) + (bearing.Z * co));
-
-        var camBack = (float)SandboxEnv.EnvDouble("AGAPANTHE_DROP_CAM_BACK", 60.0);
-        var camHeight = (float)SandboxEnv.EnvDouble("AGAPANTHE_DROP_CAM_HEIGHT", 8.0);
-        camera.Position = surface + new Double3(-lookAz.X * camBack, camHeight, -lookAz.Z * camBack);
-
-        var target = surface + new Double3(0.0, 30.0, 0.0);
-        var forward = Vector3.Normalize((target - camera.Position).ToVector3(Double3.Zero));
-        camera.Pitch = MathF.Asin(Math.Clamp(forward.Y, -1f, 1f));
-        camera.Yaw = MathF.Atan2(forward.X, -forward.Z);
-        camera.FovY = (float)(SandboxEnv.EnvDouble("AGAPANTHE_PLANET_FOV", 70.0) * MathF.PI / 180.0);
-
-        camera.Near = 1f;
-        camera.Far = (float)(Double3.Distance(planetCentre, sunOrigin) * 1.4);
-        renderer.ShadowDistance = 1f;
-        controller.MoveSpeed = 20f;
-    }
+    // FramePlanetCamera / FramePlanetDropCamera removed (Contenu-3c): `planet`/`planet-drop` migrated to cooked
+    // scenes — the fully-deterministic eye/yaw/pitch/fov/near/far/moveSpeed/shadowDistance these computed from
+    // AGAPANTHE_* env vars are now baked into content/scenes/{planet,planet-drop}.toml's [camera] block
+    // (SceneCamera.Fixed), applied at runtime by SceneCameraApplier with zero new logic.
 
     public static void FramePlanetChallengeCamera(
         Camera camera, FreeCameraController controller, Renderer renderer,

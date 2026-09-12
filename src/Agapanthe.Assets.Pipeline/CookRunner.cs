@@ -26,7 +26,7 @@ public static class CookRunner
 {
     /// <summary>Bump when the <c>.agmodel</c> payload layout or the glTF decode changes — every blob then
     /// re-cooks on the next run regardless of source hashes.</summary>
-    public const string CookerVersion = "contenu3b-1"; // .agmodel v2 (per-mesh bounds)
+    public const string CookerVersion = "contenu3c-1"; // .agscene v2 (attractor/systems/camera fields) + procedural generators
 
     private const string StateFileName = ".cookstate";
 
@@ -98,8 +98,17 @@ public static class CookRunner
             totalBlobBytes += blobBytes.LongLength;
         }
 
-        // Contenu-3b: after the models, cook every content/scenes/*.toml into a flat .agscene blob. The scene
-        // compiler reads back the just-written .agmodel blobs (for bounds / diagonals) — models are done above.
+        // Contenu-3c: cook every content/procedural/*.toml into an ordinary .agmodel blob (AssetKind.Model — a
+        // scene references it exactly like a glTF-sourced model; SceneCompiler/CookScenes's LoadModel below does
+        // not need to know where a model came from). Must run BEFORE CookScenes: a scene may reference a
+        // procedural key, and CookScenes's LoadModel reads back the just-written blob by key. `cooked` keeps
+        // accumulating across both model sources, so the `anyModelCooked: cooked > 0` flag CookScenes uses below
+        // already covers "a procedural model was (re)cooked this run" with no separate tracking needed.
+        CookProcedural(contentRoot, outputDir, state, freshState, entries, byKey, ref cooked, ref skipped, ref totalBlobBytes);
+
+        // Contenu-3b: after the models (glTF + Contenu-3c procedural), cook every content/scenes/*.toml into a
+        // flat .agscene blob. The scene compiler reads back the just-written .agmodel blobs (for bounds/
+        // diagonals) — every model (of either origin) is done above.
         CookScenes(contentRoot, outputDir, state, freshState, entries, byKey, ref cooked, ref skipped, ref totalBlobBytes, anyModelCooked: cooked > 0);
 
         PruneOrphanBlobs(outputDir, entries);
@@ -107,6 +116,58 @@ public static class CookRunner
         WriteState(Path.Combine(outputDir, StateFileName), freshState);
 
         return new CookSummary(cooked, skipped, totalBlobBytes);
+    }
+
+    // Contenu-3c: cooks every content/procedural/*.toml into an ordinary .agmodel blob (AssetKind.Model).
+    // Incrementality is simpler than CookScenes': a generator's output is a PURE function of its TOML text alone
+    // (no source-model dependency to fold in — a generator never references another cooked asset).
+    private static void CookProcedural(
+        string contentRoot, string outputDir,
+        CookState state, List<string> freshState, List<ManifestEntry> entries, Dictionary<AssetKey, string> byKey,
+        ref int cooked, ref int skipped, ref long totalBlobBytes)
+    {
+        var proceduralDir = Path.Combine(contentRoot, "procedural");
+        if (!Directory.Exists(proceduralDir))
+        {
+            return;
+        }
+
+        foreach (var tomlPath in Directory.EnumerateFiles(proceduralDir, "*.toml", SearchOption.AllDirectories).OrderBy(p => p, StringComparer.Ordinal))
+        {
+            var key = AssetKey.FromContentPath(contentRoot, tomlPath);
+            // Strip the ".toml" extension so the key matches what a scene's `model = "procedural/xxx"` names —
+            // same convention CookScenes uses for its own ".toml"-suffixed source keys.
+            key = new AssetKey(StripTomlExtension(key.Value!, tomlPath));
+            if (!byKey.TryAdd(key, tomlPath))
+            {
+                throw new AssetException($"two sources map to key '{key}': '{byKey[key]}' and '{tomlPath}'.");
+            }
+
+            var tomlHash = HashHex(File.ReadAllBytes(tomlPath));
+            var blobRelative = key.Value + ".agmodel";
+            var blobFull = Path.Combine(outputDir, blobRelative);
+
+            var upToDate = state.CookerVersion == CookerVersion
+                           && state.SourceHashes.TryGetValue(key, out var prev)
+                           && prev == tomlHash
+                           && File.Exists(blobFull);
+
+            if (upToDate)
+            {
+                skipped++;
+            }
+            else
+            {
+                var model = Procedural.ProceduralTomlReader.Read(tomlPath);
+                AgModelWriter.WriteFile(blobFull, model);
+                cooked++;
+            }
+
+            var blobBytes = File.ReadAllBytes(blobFull);
+            entries.Add(new ManifestEntry(key, AssetKind.Model, blobRelative, SHA256.HashData(blobBytes)));
+            freshState.Add($"{key.Value}\t{tomlHash}");
+            totalBlobBytes += blobBytes.LongLength;
+        }
     }
 
     private static void CookScenes(
@@ -176,7 +237,7 @@ public static class CookRunner
             // Contenu-2 fix for "directory jettisoned") — scenes must too, so a subdirectory under content/scenes/
             // coexists instead of colliding on Path.GetFileNameWithoutExtension.
             var pathKey = AssetKey.FromContentPath(contentRoot, tomlPath);
-            var key = new AssetKey(pathKey.Value![..^".toml".Length]);
+            var key = new AssetKey(StripTomlExtension(pathKey.Value!, tomlPath));
             if (!byKey.TryAdd(key, tomlPath))
             {
                 throw new AssetException($"two sources map to key '{key}': '{byKey[key]}' and '{tomlPath}'.");
@@ -286,4 +347,18 @@ public static class CookRunner
     }
 
     private static string HashHex(byte[] bytes) => Convert.ToHexStringLower(SHA256.HashData(bytes));
+
+    // Audit finding (csharp-lowlevel, 🟠): Directory.EnumerateFiles(dir, "*.toml") on Windows goes through Win32
+    // wildcard matching, documented to also match a file whose extension merely BEGINS with the pattern's
+    // extension (e.g. "probe.tomlbak"). A blind `[..^".toml".Length]` slice would then silently derive a wrong
+    // key ("procedural/probe.tom") instead of failing loudly. Every ".toml"-stripping call site uses this.
+    private static string StripTomlExtension(string key, string path)
+    {
+        if (!key.EndsWith(".toml", StringComparison.Ordinal))
+        {
+            throw new AssetException($"'{path}': expected a key ending in '.toml', got '{key}' (Win32 wildcard matching can return near-miss extensions).");
+        }
+
+        return key[..^".toml".Length];
+    }
 }

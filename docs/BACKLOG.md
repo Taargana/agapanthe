@@ -509,13 +509,36 @@ pas fixe = source de vérité unique (prérequis netcode) — voir §Physique.
       (bounds par mesh précalculés au cook). Spec `docs/plans/2026-09-09-content-3b-declarative-scenes-design.md`
       4,4/5 ; double audit 4,1/4,1 PASS-with-concerns, aucun 🔴, 12 findings 🟠 appliqués. **Sphères UV / quad
       de sol / ciel equirect cuits (les générateurs procéduraux) reportés à 3c** — hors scope 3b dès la spec.
-    - **3c** (non urgent — confort/uniformisation, pas une dette bloquante) — générateurs procéduraux
-      (sol/herbe/ciel/sphère) en `.agenv` réel + `AssetKind.Environment` ; 3 registres de fabriques via
-      `IGame` (systèmes, générateurs procéduraux, command-handlers) ; `ProbeDrop`/`LandingChallenge`/
-      `BenchSpin`/`Churn` paramétrés par la scène ; nom d'entité → `GlobalId` ; `drive` = table de bindings ;
-      migration `drive` + `planet*` vers `SceneRecipe` (puis suppression de `ModelContent.ResolveModelKey` +
-      l'arg CLI modèle du Sandbox, dernière trace de la déviation D10 de 3b) ; instanciation runtime de prefab ;
-      ~30 env vars → champs de scène.
+    - **Contenu-3c — registres de fabriques + migration `drive`/`planet*`** : décomposé en **3 sous-phases
+      gatées** (interview S35 ; ordre = dépendance d'infra, pas de sévérité — le format/registre est un
+      prérequis partagé strict, chaque scène migrée est sinon indépendante).
+      - **3c-1 ✅ (S35)** — `.agscene` v2 (attracteur newtonien optionnel dans `ScenePhysics`, `SceneCamera.
+        Fixed` +`MoveSpeed`/`ShadowDistance`, `SceneEnvironmentMode` +`ProceduralSky`/`Black`, `[[system]]`
+        avec `SceneSystemKind.ProbeDrop` seul déclaré — pas de pré-déclaration spéculative de
+        `LandingChallenge`) ; **2 registres, pas 3** (décision verrouillée en interview — un registre
+        « command-handler » séparé a été **rejeté**, chaque fabrique câble son propre input) :
+        `ISceneSystemFactory` client (`IGame.SceneSystems`, sur `PresentationSceneContext.
+        SceneSystemFactories`) + générateurs procéduraux **cook-time-only** (`Agapanthe.Assets.Pipeline/
+        Procedural/`, invisibles à `IGame`) ; `UvSphereGenerator` (cook-time, byte-identique à `Primitives.
+        UvSphere`) — sphères planète/soleil/probe deviennent de vrais blobs `.agmodel` cuits ; les 3 caméras
+        planète bespoke collapsent en trig cuite dans `SceneCamera.Fixed` ; `SceneMaterializer.
+        BuildRuntimeTemplate` (nouveau, public, GPU-free) pour les spawns runtime (probes) ; `HeadlessSim`
+        refuse (exit 1) toute scène à systèmes ; `planet`/`planet-drop` migrées vers `SceneRecipe`. Spec
+        `docs/plans/2026-09-11-content-3c-scene-systems-design.md` 4,30/5 ; double audit PASS-with-concerns,
+        **1 🔴 trouvé-et-corrigé** (`SceneMaterializer` oubliait `.WithAttractor(...)` → `planet-drop` à
+        gravité nulle, invisible dans la capture pinned, trouvé par audit seul).
+      - **3c-2** (à décomposer) — `SceneSystemKind.LandingChallenge` + sa fabrique, `SceneSystem.
+        QuicksavePath` (résout la collision `AGAPANTHE_SAVE` host-level vs. F5 quicksave par élimination du
+        second), migration `planet-challenge`.
+      - **3c-3** (à décomposer) — générateur `ground_quad`, migration `drive` (**perte confirmée** : son arg
+        CLI modèle arbitraire disparaît — `drive.toml` fixe sur `models/DamagedHelmet.glb`, cohérence avec
+        toute autre famille de scène post-3b), suppression de `ModelContent.ResolveModelKey` + l'arg CLI
+        Sandbox (dernière trace de la déviation D10 de 3b), nettoyage `SandboxCameras`/`PlanetContent`/
+        `PlanetStage`/`RecipeInput` s'ils deviennent 0-appelant.
+      - Hors scope des 3 phases (déféré plus loin, non urgent) : nom d'entité → `GlobalId` (aucun
+        consommateur identifié) ; `BenchSpin`/`Churn` paramétrés par la scène ; instanciation runtime de
+        prefab ; `.agenv` réel + `AssetKind.Environment` pour l'environnement procédural (sky/black restent
+        du code runtime, pas cuits — Contenu-2b) ; ~30 env vars restantes → champs de scène.
     - Dette 3a/3b → 3c : règle « rien dans `Build` ne lit le contenu du monde » à inscrire dans `ISceneRecipe` ;
       `Agapanthe.App` → `App` + `App.Client` avant `RunDedicatedServer` (Vulkan dans la closure ; concrètement,
       c'est là que le câblage `MaterializeResult.Physics/RestorePath → PhysicsSystem/RequestRestore`, dupliqué

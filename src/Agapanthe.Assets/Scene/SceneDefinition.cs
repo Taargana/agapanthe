@@ -20,6 +20,11 @@ public sealed record SceneDefinition
     public required SceneEnvironment Environment { get; init; }
     public ScenePhysics? Physics { get; init; }
     public SceneRestore? Restore { get; init; }
+
+    /// <summary>Contenu-3c: game systems a client-side host attaches after materialisation (e.g. a probe
+    /// spawner). Empty for every scene with no gameplay system — <c>HeadlessSim</c> refuses (exit 1) any
+    /// non-empty list, since a scene system is a client-only concept (window/camera-coupled).</summary>
+    public IReadOnlyList<SceneSystem> Systems { get; init; } = [];
 }
 
 /// <summary>One drawable (or physics body). Transform is <c>Position</c> (world, double) + <c>Rotation</c> +
@@ -58,8 +63,10 @@ public sealed record SceneLight
 
 public enum SceneCameraMode : byte { FrameBounds = 0, Fixed = 1 }
 
-/// <summary>Camera setup. <see cref="SceneCameraMode.Fixed"/> is parsed/round-tripped but no 3b scene uses it
-/// (it is <c>drive</c>'s camera, migrated in 3c).</summary>
+/// <summary>Camera setup. <see cref="SceneCameraMode.Fixed"/> is used starting Contenu-3c: the 3 planet camera
+/// framers' fully-deterministic eye/yaw/pitch/fov/near/far are baked at cook time into a fixed pose, with
+/// <see cref="MoveSpeed"/>/<see cref="ShadowDistance"/> (Fixed-only; 0 = <see cref="SceneCameraMode.FrameBounds"/>
+/// keeps deriving them dynamically from the scene's bounds, as before).</summary>
 public sealed record SceneCamera
 {
     public required SceneCameraMode Mode { get; init; }
@@ -72,9 +79,15 @@ public sealed record SceneCamera
     public float Pitch { get; init; }
     public float Near { get; init; }
     public float Far { get; init; }
+    public float MoveSpeed { get; init; }         // Fixed only, Contenu-3c
+    public float ShadowDistance { get; init; }    // Fixed only, Contenu-3c
 }
 
-public enum SceneEnvironmentMode : byte { None = 0, HdriPath = 1 }
+/// <summary><see cref="ProceduralSky"/>/<see cref="Black"/> (Contenu-3c) carry no payload — the client derives
+/// what they need at apply time (the sun direction from the scene's directional light, nothing at all for
+/// <see cref="Black"/>) rather than baking a cooked HDR blob (deferred to Contenu-2b's real
+/// <c>AssetKind.Environment</c>).</summary>
+public enum SceneEnvironmentMode : byte { None = 0, HdriPath = 1, ProceduralSky = 2, Black = 3 }
 
 public sealed record SceneEnvironment
 {
@@ -82,15 +95,47 @@ public sealed record SceneEnvironment
     public string HdriPath { get; init; } = string.Empty;
 }
 
+/// <summary><see cref="Mu"/> `== 0` (default) means no attractor — <see cref="Gravity"/>/<see cref="GroundY"/>
+/// drive a uniform-gravity <c>PhysicsSettings</c>, byte-identical to Contenu-3b. <see cref="Mu"/> `&gt; 0` selects
+/// a Newtonian point-attractor instead (Contenu-3c), via <c>PhysicsSettings.WithAttractor</c>.</summary>
 public sealed record ScenePhysics
 {
     public required Vector3 Gravity { get; init; }
     public required float GroundY { get; init; }
+    public Double3 AttractorCenter { get; init; }
+    public double Mu { get; init; }
+    public double SurfaceRadius { get; init; }
 }
 
-/// <summary>A snapshot to restore into the world after materialisation. Parsed/round-tripped but no 3b scene
-/// uses it (it is <c>planet*</c>'s resume, migrated in 3c).</summary>
+/// <summary>A snapshot to restore into the world after materialisation. Parsed/round-tripped but no scene uses
+/// it yet (it is <c>planet*</c>'s resume, migrated across 3c).</summary>
 public sealed record SceneRestore
 {
     public required string SnapshotPath { get; init; }
+}
+
+/// <summary>Contenu-3c: which gameplay system a <see cref="SceneSystem"/> block describes. A closed tagged
+/// union — same style as <see cref="SceneLightKind"/>/<see cref="SceneCameraMode"/>/<see cref="SceneEnvironmentMode"/>,
+/// never an open/generic bag. Only <see cref="ProbeDrop"/> exists in 3c-1; <c>LandingChallenge</c> is added (with
+/// its own fields on <see cref="SceneSystem"/> and a matching format bump) when 3c-2 actually needs it — this
+/// codebase's precedent for growing a cooked format is a version bump when a real consumer exists, not
+/// pre-declaring unused variants (see <c>.agmodel</c> v1→v2, `.agscene` v1→v2).</summary>
+public enum SceneSystemKind : byte { ProbeDrop = 0 }
+
+/// <summary>Contenu-3c: data for one client-attached game system. GPU-free — names only <see cref="AssetKey"/>/
+/// <see cref="Double3"/> — so <c>Agapanthe.Scene</c> can carry it without referencing <c>Agapanthe.Engine</c>; the
+/// caller in <c>Agapanthe.App</c> (which does reference <c>Engine</c>) constructs the concrete <c>ISystem</c>.</summary>
+public sealed record SceneSystem
+{
+    public required SceneSystemKind Kind { get; init; }
+
+    /// <summary>The probe model this system spawns at runtime (the golden-angle drop).</summary>
+    public required AssetKey ProbeModel { get; init; }
+    public int ProbeLocalMesh { get; init; }
+    public int ProbeLocalMat { get; init; }
+    public required float ProbeRadius { get; init; }
+
+    // ProbeDrop
+    public int Every { get; init; }
+    public Double3 Centre { get; init; }
 }

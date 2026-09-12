@@ -1,0 +1,56 @@
+# Contenu-3c — the VS-2 planet-drop scene (AGAPANTHE_SCENE=planet-drop). Planet/sun/lighting/environment
+# identical to planet.toml (see its header comment for how the numbers were derived); adds a Newtonian
+# attractor + a probe-drop scene system (golden-angle spiral, every 30 ticks — AGAPANTHE_DROP_EVERY's
+# default) reproducing Sandbox.PlanetContent.SetupPlanetDrop + Sandbox.SandboxCameras.FramePlanetDropCamera.
+name = "planet-drop"
+ambient = [0.0, 0.0, 0.0]
+
+[[entity]]
+model = "procedural/planet-surface"
+position = [0.0, 0.0, 0.0]
+casts_shadow = false
+
+[[entity]]
+model = "procedural/sun-surface"
+position = [41036947456.0, 18653157376.0, -59690106880.0]
+casts_shadow = false
+
+[[light]]
+kind = "directional"
+direction = [-0.5486301183700562, -0.2493773102760315, 0.7980074286460876]
+intensity = 0.0
+
+[[light]]
+kind = "point"
+position = [41036947456.0, 18653157376.0, -59690106880.0]
+color = [1.0, 0.97, 0.92]
+intensity = 1.9582080685811528e22
+
+[environment]
+black = true
+
+[camera]
+mode = "fixed"
+position = [-2.6260828971862793, 3185508.0, 59.942500591278076]
+yaw = 0.04378203675150871
+pitch = 0.351444810628891
+fov_y = 70.0
+near = 1.0
+far = 104718504496.84
+move_speed = 20.0
+shadow_distance = 1.0
+free_fly = true
+
+[physics]
+gravity = [0.0, 0.0, 0.0]
+ground_y = 0.0
+mu = 101474102500000.0
+attractor_center = [0.0, 0.0, 0.0]
+surface_radius = 3185500.0
+
+[[system]]
+kind = "probe_drop"
+probe_model = "procedural/probe"
+probe_radius = 3.0
+centre = [0.0, 3185620.0, 0.0]
+every = 30

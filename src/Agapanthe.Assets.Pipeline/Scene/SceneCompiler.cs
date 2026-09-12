@@ -54,11 +54,16 @@ internal static class SceneCompiler
             Lights = scene.Lights.Select(ToLight).ToArray(),
             Ambient = scene.Ambient,
             Camera = ToCamera(scene.Camera),
-            Environment = scene.Environment.Hdri is { Length: > 0 } h
-                ? new SceneEnvironment { Mode = SceneEnvironmentMode.HdriPath, HdriPath = h }
-                : new SceneEnvironment { Mode = SceneEnvironmentMode.None },
-            Physics = scene.Physics is { } p ? new ScenePhysics { Gravity = p.Gravity, GroundY = p.GroundY } : null,
+            Environment = ToEnvironment(scene.Environment),
+            Physics = scene.Physics is { } p
+                ? new ScenePhysics
+                {
+                    Gravity = p.Gravity, GroundY = p.GroundY,
+                    Mu = p.AttractorMu, AttractorCenter = p.AttractorCenter, SurfaceRadius = p.AttractorSurfaceRadius,
+                }
+                : null,
             Restore = scene.Restore is { } r ? new SceneRestore { SnapshotPath = r.Snapshot } : null,
+            Systems = scene.Systems.Select(s => ToSystem(s, loadModel)).ToArray(),
         };
     }
 
@@ -240,7 +245,54 @@ internal static class SceneCompiler
         {
             Mode = SceneCameraMode.Fixed, FovY = c.FovY, FreeFly = c.FreeFly,
             Position = c.Position, Yaw = c.Yaw, Pitch = c.Pitch, Near = c.Near, Far = c.Far,
+            MoveSpeed = c.MoveSpeed, ShadowDistance = c.ShadowDistance,
         },
         _ => throw new AssetException($"unknown camera mode '{c.Mode}' (frame-bounds|fixed)."),
     };
+
+    // Contenu-3c: hdri/procedural_sky/black are already validated mutually-exclusive by SceneTomlReader.
+    private static SceneEnvironment ToEnvironment(AuthoredEnvironment e)
+    {
+        if (e.Hdri is { Length: > 0 } h)
+        {
+            return new SceneEnvironment { Mode = SceneEnvironmentMode.HdriPath, HdriPath = h };
+        }
+
+        if (e.ProceduralSky)
+        {
+            return new SceneEnvironment { Mode = SceneEnvironmentMode.ProceduralSky };
+        }
+
+        return e.Black
+            ? new SceneEnvironment { Mode = SceneEnvironmentMode.Black }
+            : new SceneEnvironment { Mode = SceneEnvironmentMode.None };
+    }
+
+    // Contenu-3c: resolves a [[system]]'s probe model the same way Place resolves a bare entity — mesh 0 (every
+    // probe today is a dedicated single-mesh generated sphere), material via the appended-default-material
+    // convention (Contenu-3b audit F5) — and validates both exist at cook time rather than at runtime materialize.
+    private static SceneSystem ToSystem(AuthoredSystem s, Func<AssetKey, ModelAsset> loadModel)
+    {
+        var key = new AssetKey(s.ProbeModel);
+        var model = loadModel(key);
+        if (model.Meshes.Count == 0)
+        {
+            throw new AssetException($"scene system references '{key}', which has no meshes.");
+        }
+
+        var mesh = model.Meshes[0];
+        var localMat = mesh.MaterialIndex >= 0 && mesh.MaterialIndex < model.Materials.Count
+            ? mesh.MaterialIndex
+            : model.Materials.Count;
+
+        return s.Kind switch
+        {
+            "probe_drop" => new SceneSystem
+            {
+                Kind = SceneSystemKind.ProbeDrop, ProbeModel = key, ProbeLocalMesh = 0, ProbeLocalMat = localMat,
+                ProbeRadius = s.ProbeRadius, Every = s.Every, Centre = s.Centre,
+            },
+            _ => throw new AssetException($"unknown scene system kind '{s.Kind}' (probe_drop)."),
+        };
+    }
 }

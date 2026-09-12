@@ -1,0 +1,12 @@
+# Contenu-3c — the P3-M8 Sun sphere, half-scale (radius = 696_340_000 / 2 m), moved cook-time from
+# Sandbox.PlanetContent.SetupPlanetScene's hand-built ModelAsset.
+generator = "uv_sphere"
+radius = 348170000.0
+segments = 64
+rings = 32
+base_color = [0.02, 0.02, 0.02, 1.0]
+metallic = 0.0
+roughness = 1.0
+emissive = [1.0, 0.95, 0.85]
+emissive_strength = 40.0
+name = "SunSurface"
