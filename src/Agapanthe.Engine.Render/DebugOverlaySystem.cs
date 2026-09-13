@@ -38,6 +38,11 @@ public sealed class DebugOverlaySystem : ISystem
     private const uint FrameGraphColour = 0x5AC8FAFFu;
     private const uint AllocGraphGoodColour = 0x4CD97BFFu; // green while the 0-alloc gate holds
     private const uint AllocGraphBadColour = 0xFF6B4AFFu; // red the moment it does not
+    private const uint GpuGraphColour = 0xC77DFFFFu; // UI-3: distinct from the CPU frame-time graph's blue
+
+    // UI-3: placeholder for a region that did not run this cycle (D4) — must read visibly different from
+    // "0.00 ms", a real (and legitimate) zero-cost sample.
+    private const string GpuValuePlaceholder = "--";
 
     /// <summary>Frame-time budget the graph scales to at minimum, so a smooth 60 Hz reads flat instead of being
     /// auto-scaled into fake spikes.</summary>
@@ -49,6 +54,15 @@ public sealed class DebugOverlaySystem : ISystem
     private readonly RenderList _renderList;
     private readonly FrameStats _stats;
     private readonly float[] _graphScratch;
+
+    // UI-3: owned HERE, not on FrameStats/FrameSeries (D3/D6) — GPU results arrive ~2 frames late and are
+    // fundamentally a render-side concept (a headless server has no Renderer), unlike CPU frame time.
+    // This is the sum of whichever regions were actually available THIS frame (not derived after the
+    // fact from 4 per-region histories) — only ONE series, because the per-pass breakdown is already
+    // fully conveyed by the text line below every single frame; a per-region history each would be
+    // written every frame and read by nothing (audit finding, csharp-lowlevel, 🟠 — exactly the
+    // write-but-never-read shape MP-0a's AggregateBoundsSystem removal already named and closed once).
+    private readonly FrameSeries _gpuTotalMs;
 
     public DebugOverlaySystem(
         UiDrawList drawList, FontAsset font, Renderer renderer, RenderList renderList, FrameStats stats)
@@ -68,6 +82,11 @@ public sealed class DebugOverlaySystem : ISystem
         // raising FrameStats.DefaultCapacity would then silently truncate the graph. Allocated ONCE — a per-frame
         // stackalloc of this size would be a per-frame memset, and this system exists to keep per-frame cost honest.
         _graphScratch = new float[stats.FrameTimeMs.Capacity];
+
+        // UI-3: same capacity as the CPU series, for the same reason (visual/retention consistency, and a
+        // ceiling raise elsewhere would otherwise silently truncate this too). Allocated unconditionally —
+        // cheap, and the check that actually gates anything is in Execute, not here.
+        _gpuTotalMs = new FrameSeries(stats.FrameTimeMs.Capacity);
     }
 
     /// <summary>The metrics history. Owned by the SimulationHost (which records it every frame whether or not this
@@ -96,7 +115,8 @@ public sealed class DebugOverlaySystem : ISystem
         }
 
         var y = Margin;
-        var panelHeight = (LineHeight * 3) + (GraphHeight * 2) + (Margin * 3);
+        var showGpu = _renderer.SupportsGpuTimestamps;
+        var panelHeight = (LineHeight * (showGpu ? 4 : 3)) + (GraphHeight * (showGpu ? 3 : 2)) + (Margin * 3);
         _drawList.AddRect(
             new Vector4(Margin, Margin, Margin + PanelWidth, Margin + panelHeight),
             _font.WhiteTexelUv,
@@ -167,5 +187,58 @@ public sealed class DebugOverlaySystem : ISystem
             // scale a real 512 B/frame regression rasterises to 0.04 px, i.e. an empty graph while the gate is
             // broken. When the gate holds every sample is 0 and the graph is honestly empty.
             scaleMax: MathF.Max(Stats.AllocatedBytes.Last * 4f, MathF.Min(Stats.AllocatedBytes.Max, 4096f)));
+        y += GraphHeight + (Margin * 0.5f);
+
+        // ---- GPU timestamps (UI-3) — clean absence when unsupported, per-region breakdown when not ------------
+        if (!showGpu)
+        {
+            return;
+        }
+
+        var t = _renderer.LastGpuPassTimingsMs;
+
+        // The total is the sum of whichever regions were actually available THIS frame (a null UI field —
+        // the common case, nothing else queued — must not make the total vanish for one frame). Recorded
+        // only when AT LEAST ONE region is available: audit finding (csharp-lowlevel, 🟠) — recording a
+        // bare 0 when all 4 are null (every field genuinely unavailable, e.g. warm-up) is indistinguishable
+        // from a real free frame, and the graph would then show a false floor instead of simply not
+        // advancing that sample.
+        if (t.Shadow is not null || t.Scene is not null || t.Tonemap is not null || t.Ui is not null)
+        {
+            _gpuTotalMs.Record((t.Shadow ?? 0f) + (t.Scene ?? 0f) + (t.Tonemap ?? 0f) + (t.Ui ?? 0f));
+        }
+
+        line = new TextBuilder(buffer);
+        line.Append("gpu  shadow ");
+        AppendMsOrPlaceholder(ref line, t.Shadow);
+        line.Append("  scene ");
+        AppendMsOrPlaceholder(ref line, t.Scene);
+        line.Append("  tonemap ");
+        AppendMsOrPlaceholder(ref line, t.Tonemap);
+        line.Append("  ui ");
+        AppendMsOrPlaceholder(ref line, t.Ui);
+        line.Append(" ms");
+        TextLayout.DrawText(_drawList, line.Written, _font, new Vector2(x, y), TextSize, LabelColour);
+        y += LineHeight + (Margin * 0.5f);
+
+        var gpuTotals = _gpuTotalMs.CopyChronological(_graphScratch);
+        Sparkline.Draw(
+            _drawList, gpuTotals, new Vector4(x, y, x + graphWidth, y + GraphHeight), _font.WhiteTexelUv,
+            GpuGraphColour,
+            scaleMax: MathF.Max(_gpuTotalMs.Max, FrameBudgetMs));
+    }
+
+    // A field absent this frame (region didn't run, e.g. UI with nothing queued — or, in principle, not yet
+    // finished) must read visibly different from a genuine 0.00 ms sample.
+    private static void AppendMsOrPlaceholder(ref TextBuilder line, float? ms)
+    {
+        if (ms is { } value)
+        {
+            line.Append(value, "F2");
+        }
+        else
+        {
+            line.Append(GpuValuePlaceholder);
+        }
     }
 }

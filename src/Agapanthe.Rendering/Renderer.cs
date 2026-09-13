@@ -112,6 +112,27 @@ public sealed class Renderer : IDisposable
     private const string TonemapPassLabel = "Tonemap";
     private const string UiPassLabel = "UI";
 
+    // UI-3: the 4 GPU-timestamp-instrumented regions — exactly the 4 existing debug-label regions above
+    // (Skybox is nested inside Scene and shares its pair). 2 queries per region (begin, end), one block
+    // of GpuQueriesPerSlot per frame-in-flight slot so a slot being read back is never the one being
+    // written that same frame.
+    private enum GpuRegion { Shadow = 0, Scene = 1, Tonemap = 2, Ui = 3 }
+    private const int GpuRegionCount = 4;
+    private const int GpuQueriesPerRegion = 2;
+    private const int GpuQueriesPerSlot = GpuRegionCount * GpuQueriesPerRegion;
+
+    private readonly QueryPool? _gpuTimestampPool;
+
+    // Audit finding (graphics-3d, 🔴, caught before closure): every query starts UNINITIALIZED
+    // (VUID-vkGetQueryPoolResults-None-09401 — "must not be uninitialized"), and a slot is only ever
+    // reset+written by BeginGpuTimestampFrame ONE CALL AFTER its own turn (the call that resets slot S
+    // is the S-th call, FramesInFlight calls after slot S was last written). So the first
+    // FramesInFlight frames would read pools no command ever touched — a real spec violation on every
+    // single run, not merely a validation-layer gap the installed SDK happens not to check yet. Counts
+    // calls (not GraphicsDevice.CurrentFrameIndex, which this Renderer does not own) and skips reading
+    // until every slot has completed one full reset+write cycle.
+    private int _gpuTimestampFramesSeen;
+
     // Per-frame-slot camera UBOs: host-visible, rewritten every frame (Write<T> is correct — no staging).
     private readonly GpuBuffer?[] _cameraUbos = new GpuBuffer?[GraphicsDevice.FramesInFlight];
     private readonly GpuBuffer?[] _lightsUbos = new GpuBuffer?[GraphicsDevice.FramesInFlight];
@@ -185,6 +206,33 @@ public sealed class Renderer : IDisposable
     public int LastSceneDrawCalls { get; private set; }
 
     public int LastShadowDrawCalls { get; private set; }
+
+    /// <summary>
+    /// UI-3 — whether this <see cref="Renderer"/> actually instruments GPU timestamps: the device's
+    /// hardware capability (<see cref="GraphicsDevice.SupportsGpuTimestamps"/>) ANDed with the
+    /// caller-supplied <c>gpuTimestampsRequested</c> constructor flag (the <c>AGAPANTHE_GPU_TIMESTAMPS</c>
+    /// knob lives one layer up, in <c>Agapanthe.App</c>). When <see langword="false"/>, no
+    /// <see cref="QueryPool"/> exists, no timestamp is ever written, and <see cref="LastGpuPassTimingsMs"/>
+    /// permanently reads its all-<see langword="null"/>-fields default.
+    /// </summary>
+    public bool SupportsGpuTimestamps { get; }
+
+    /// <summary>Per-region GPU time for the frame whose timestamps most recently became available (UI-3)
+    /// — typically ~2 frames behind the current frame (<see cref="GraphicsDevice.FramesInFlight"/>). A
+    /// field is <see langword="null"/> when its region did not run that cycle (e.g. <c>UI</c> with
+    /// nothing to draw) or, in principle, was not yet finished — the two are indistinguishable and both
+    /// treated as "no sample this cycle", never a stall and never a fabricated value.</summary>
+    public readonly struct GpuPassTimingsMs
+    {
+        public float? Shadow { get; init; }
+        public float? Scene { get; init; }
+        public float? Tonemap { get; init; }
+        public float? Ui { get; init; }
+    }
+
+    /// <summary>The latest available <see cref="GpuPassTimingsMs"/> — see its own remarks. Refreshed once
+    /// per frame, at the very start of <see cref="DrawScene"/>.</summary>
+    public GpuPassTimingsMs LastGpuPassTimingsMs { get; private set; }
 
     private readonly GraphicsDevice _device;
 
@@ -288,13 +336,17 @@ public sealed class Renderer : IDisposable
     /// <param name="device">The graphics device.</param>
     /// <param name="swapchain">Provides the color attachment format the pipeline renders to.</param>
     /// <param name="shaderDirectory">Directory holding <c>mesh.vert</c> and <c>mesh.frag</c>.</param>
-    public Renderer(GraphicsDevice device, Swapchain swapchain, string shaderDirectory)
+    /// <param name="gpuTimestampsRequested">UI-3: ANDed with <see cref="GraphicsDevice.SupportsGpuTimestamps"/>
+    /// to produce <see cref="SupportsGpuTimestamps"/>. Default <see langword="true"/> — the caller-facing
+    /// knob (<c>AGAPANTHE_GPU_TIMESTAMPS</c>) lives in <c>Agapanthe.App</c>, one layer up.</param>
+    public Renderer(GraphicsDevice device, Swapchain swapchain, string shaderDirectory, bool gpuTimestampsRequested = true)
     {
         ArgumentNullException.ThrowIfNull(device);
         ArgumentNullException.ThrowIfNull(swapchain);
         ArgumentNullException.ThrowIfNull(shaderDirectory);
 
         _device = device;
+        SupportsGpuTimestamps = device.SupportsGpuTimestamps && gpuTimestampsRequested;
         _sceneTransforms = new InstanceBufferRing(device);
         _shadowTransforms = new InstanceBufferRing(device);
         _sceneArgs = new IndirectArgsRing(device);
@@ -306,6 +358,13 @@ public sealed class Renderer : IDisposable
 
         try
         {
+            // UI-3: created once (device lifetime, not swapchain-size-dependent — no resize dance) only
+            // when actually needed, so the unsupported/disabled path allocates nothing at all.
+            if (SupportsGpuTimestamps)
+            {
+                _gpuTimestampPool = new QueryPool(device, GpuQueriesPerSlot * GraphicsDevice.FramesInFlight);
+            }
+
             // Owned by the Renderer and borrowed by every pass for its Build + Reload path. CreateForBuild picks
             // the mode (Debug = full runtime compilation + hot reload; Release = pre-cooked only, no shaderc).
             _shaderCompiler = ShaderCompiler.CreateForBuild();
@@ -868,6 +927,13 @@ public sealed class Renderer : IDisposable
         // resolution-invariant and lives outside this.
         EnsureTargets(target.Width, target.Height);
 
+        // UI-3: the ONE per-frame hook — DrawScene runs unconditionally, every frame, before DrawUi (SceneViewSystem
+        // is registered before UiRenderSystem in every host, see FrameOrchestrator.CreateDefault/AppHost), so this
+        // is the single place to read back the previous cycle's results (all 4 regions, including UI's — DrawUi's
+        // own writes for THIS frame happen later, but reading back is about the OTHER slot's already-finished work)
+        // and reset the current slot before anything writes into it this frame.
+        BeginGpuTimestampFrame(cmd, frame);
+
         // Sync the persistent candidate buffer ONCE (spec §5): both culls read the same device-local buffer
         // read-only, so it is brought up to date before either dispatch. Sync writes the host-visible staging (the
         // mirror), records the staging→device-local copy + a transfer→compute barrier on cmd, and returns the
@@ -882,6 +948,102 @@ public sealed class Renderer : IDisposable
             cmd, frame, sceneCandidates, candidateBuffer, registry, in view, in cameraFrustum, target, cascades,
             cascadeSplits);
         RecordTonemapPass(cmd, frame, target);
+    }
+
+    // UI-3: base query index for `region` within `slot`'s GpuQueriesPerSlot-query block.
+    private static uint GpuQueryBase(int slot, GpuRegion region) =>
+        (uint)((slot * GpuQueriesPerSlot) + ((int)region * GpuQueriesPerRegion));
+
+    private void WriteGpuTimestampBegin(CommandList cmd, FrameContext frame, GpuRegion region)
+    {
+        if (!SupportsGpuTimestamps)
+        {
+            return;
+        }
+
+        cmd.WriteTimestampBegin(_gpuTimestampPool!, GpuQueryBase(frame.Slot, region));
+    }
+
+    private void WriteGpuTimestampEnd(CommandList cmd, FrameContext frame, GpuRegion region)
+    {
+        if (!SupportsGpuTimestamps)
+        {
+            return;
+        }
+
+        cmd.WriteTimestampEnd(_gpuTimestampPool!, GpuQueryBase(frame.Slot, region) + 1);
+    }
+
+    /// <summary>
+    /// UI-3 — the once-per-frame hook: reads back THIS slot's results (non-blocking, per-region, D4)
+    /// into <see cref="LastGpuPassTimingsMs"/>, then resets the same slot's queries before anything
+    /// writes into it this frame. A no-op (0 cost) when <see cref="SupportsGpuTimestamps"/> is false.
+    /// <para>
+    /// Audit finding (csharp-lowlevel, 🔴, caught before closure): the first draft read back
+    /// <c>frame.Slot - 1</c> ("the other slot"), reasoning that the current slot was the one about to
+    /// be reused. That is backwards — <see cref="FrameRenderer"/> waits
+    /// <c>_inFlightFences[_frameSlot]</c> for the CURRENT slot before this method ever runs (the whole
+    /// point of the fence), so <c>frame.Slot</c> is the slot GUARANTEED complete (its GPU work is 2
+    /// frames old); the other slot was submitted moments ago with no fence wait at all — reading it
+    /// races the GPU: a reset there could be concurrent with this host read, and a straddled
+    /// reset/write could pair a begin from one frame with an end from a different one (a positive,
+    /// plausible-looking, entirely wrong delta the wraparound guard cannot catch). Reading the ALREADY
+    /// fence-waited slot removes the race entirely; the reset below still targets the same slot,
+    /// recorded on the command buffer to run 2 frames from now, in the same before-the-4-regions order
+    /// as before.
+    /// </para>
+    /// <para>
+    /// Audit finding (graphics-3d, 🔴, caught before closure): every query is UNINITIALIZED until its
+    /// first reset+write (<c>VUID-vkGetQueryPoolResults-None-09401</c>) — so the very first
+    /// <see cref="GraphicsDevice.FramesInFlight"/> calls to this method must not attempt to read at all,
+    /// only write-then-reset (this method's own reset call, further down, is what performs each slot's
+    /// FIRST initialization). <see cref="_gpuTimestampFramesSeen"/> counts calls, not
+    /// <see cref="GraphicsDevice.CurrentFrameIndex"/> (a device-wide counter this Renderer does not own
+    /// and that a headless-adjacent caller could advance independently of how many times this method
+    /// itself has actually run).
+    /// </para>
+    /// </summary>
+    private void BeginGpuTimestampFrame(CommandList cmd, FrameContext frame)
+    {
+        if (!SupportsGpuTimestamps)
+        {
+            return;
+        }
+
+        if (_gpuTimestampFramesSeen < GraphicsDevice.FramesInFlight)
+        {
+            _gpuTimestampFramesSeen++;
+            cmd.ResetQueryPool(_gpuTimestampPool!, GpuQueryBase(frame.Slot, GpuRegion.Shadow), GpuQueriesPerSlot);
+            return;
+        }
+
+        LastGpuPassTimingsMs = new GpuPassTimingsMs
+        {
+            Shadow = ReadGpuRegionMs(frame.Slot, GpuRegion.Shadow),
+            Scene = ReadGpuRegionMs(frame.Slot, GpuRegion.Scene),
+            Tonemap = ReadGpuRegionMs(frame.Slot, GpuRegion.Tonemap),
+            Ui = ReadGpuRegionMs(frame.Slot, GpuRegion.Ui),
+        };
+
+        cmd.ResetQueryPool(_gpuTimestampPool!, GpuQueryBase(frame.Slot, GpuRegion.Shadow), GpuQueriesPerSlot);
+    }
+
+    // Reads one region's begin/end pair, independently of the other 3 (D4/D6): null when either half of
+    // the pair is not yet available (the region didn't run this cycle — e.g. UI with nothing to draw — or,
+    // in principle, the GPU genuinely hasn't finished) — never a stall, never a fabricated value.
+    private float? ReadGpuRegionMs(int slot, GpuRegion region)
+    {
+        Span<ulong> raw = stackalloc ulong[4]; // [beginValue, beginAvailable, endValue, endAvailable]
+        _gpuTimestampPool!.ReadResultsNonBlocking(GpuQueryBase(slot, region), GpuQueriesPerRegion, raw);
+
+        if (raw[1] == 0 || raw[3] == 0)
+        {
+            return null;
+        }
+
+        return GpuTimestampMath.TryToMilliseconds(raw[0], raw[2], _device.TimestampPeriodNs, out var ms, _device.TimestampValidBits)
+            ? ms
+            : null;
     }
 
     /// <summary>
@@ -901,6 +1063,7 @@ public sealed class Renderer : IDisposable
         // RenderDoc/Nsight capture region for the whole pass (barriers + draws). No-op when debug utils is
         // off, so it stays on the per-frame path at zero cost; the name is a literal (no per-frame alloc).
         using var _ = cmd.PushDebugLabel(ShadowPassLabel);
+        WriteGpuTimestampBegin(cmd, frame, GpuRegion.Shadow);
 
         var pipeline = _shadowPass!.Pipeline;
         var shadow = _shadowMap!;
@@ -989,6 +1152,7 @@ public sealed class Renderer : IDisposable
         // Hand the depth result to the scene pass as a sampled texture: wait for the late-fragment-test depth
         // writes before the scene fragment stage samples it (DepthAttachment→ShaderReadOnly, RAW barrier).
         cmd.TransitionImage(shadow, ImageLayoutState.DepthAttachment, ImageLayoutState.ShaderReadOnly);
+        WriteGpuTimestampEnd(cmd, frame, GpuRegion.Shadow);
     }
 
     // Dispatches the GPU shadow cull (P3-M6 W3): uploads the per-region indirect args (indexCount from each region's
@@ -1097,6 +1261,7 @@ public sealed class Renderer : IDisposable
     {
         // Capture region for the forward PBR pass; the skybox draw below nests its own "Skybox" sub-label.
         using var _ = cmd.PushDebugLabel(ScenePassLabel);
+        WriteGpuTimestampBegin(cmd, frame, GpuRegion.Scene);
 
         var pipeline = _scenePass!.Pipeline;
         var hdr = _hdrImage!;
@@ -1231,6 +1396,7 @@ public sealed class Renderer : IDisposable
         }
 
         cmd.EndRendering();
+        WriteGpuTimestampEnd(cmd, frame, GpuRegion.Scene);
     }
 
     /// <summary>
@@ -1244,6 +1410,7 @@ public sealed class Renderer : IDisposable
     {
         // Capture region for the HDR resolve (barrier + fullscreen triangle).
         using var _ = cmd.PushDebugLabel(TonemapPassLabel);
+        WriteGpuTimestampBegin(cmd, frame, GpuRegion.Tonemap);
 
         var tonemapPipeline = _tonemapPass!.Pipeline;
         var hdr = _hdrImage!;
@@ -1274,6 +1441,7 @@ public sealed class Renderer : IDisposable
         cmd.Draw(3);
 
         cmd.EndRendering();
+        WriteGpuTimestampEnd(cmd, frame, GpuRegion.Tonemap);
     }
 
     /// <summary>
@@ -1319,6 +1487,7 @@ public sealed class Renderer : IDisposable
         }
 
         using var _ = cmd.PushDebugLabel(UiPassLabel);
+        WriteGpuTimestampBegin(cmd, frame, GpuRegion.Ui);
 
         var quadBuffer = _uiQuads.Upload(frame.Slot, quads);
 
@@ -1360,6 +1529,7 @@ public sealed class Renderer : IDisposable
         cmd.Draw((uint)quads.Length * 6);
 
         cmd.EndRendering();
+        WriteGpuTimestampEnd(cmd, frame, GpuRegion.Ui);
     }
 
     // Mirrors the push-constant block in ui.vert / ui.frag: vec2 + float, 12 bytes.
@@ -1610,6 +1780,9 @@ public sealed class Renderer : IDisposable
         _reloader?.Dispose();
         _reloader = null;
         _reloadablePasses = [];
+
+        // UI-3: no ordering dependency on anything else torn down here.
+        _gpuTimestampPool?.Dispose();
 
         // Deferred release: the caller idles the GPU before Dispose (see the type remarks) and drains the
         // deletion queue with FlushAll afterwards, so the HDR/depth/shadow images are freed before the leak check.

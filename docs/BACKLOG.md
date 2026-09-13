@@ -40,6 +40,15 @@ d'entité, `GlobalIdRange` + `ContactPairKey` + `UniverseId`/snapshot v2 ; §4qu
 
 - 🔴 **Validation Linux / macOS** (P3-M0). AOT et SPIR-V hors-ligne sont **prouvés Windows uniquement** ; le titre
   « fondations cross-platform » est une hypothèse tant qu'un vrai Linux n'a pas tourné. *Bloqué : pas de machine.*
+  **UI-3 (S39) a documenté par recherche 4 risques MoltenVK concrets pour les timestamps GPU**, à vérifier dès
+  qu'une machine Apple Silicon est disponible : `VkPipelineStageFlags2` de `vkCmdWriteTimestamp2` est **entièrement
+  ignoré par MoltenVK** (donc le fix `TOP_OF_PIPE`→`ALL_COMMANDS` d'UI-3 est un no-op là-bas, sans risque non plus) ·
+  granularité **par encodeur Metal, pas par draw**, sur Apple Silicon (tous les timestamps d'un même render pass
+  peuvent partager la même valeur) · un fallback CPU écrit des **zéros francs** (pas du bruit) si
+  `MTLCounterSampleBuffer` échoue — indiscernable d'une passe réellement gratuite pour le garde `-- ` vs `0.00`
+  d'`DebugOverlaySystem` · 2 bugs MoltenVK ouverts sur exactement le patron reset+lecture double-buffered d'UI-3
+  ([#2378](https://github.com/KhronosGroup/MoltenVK/issues/2378) availability sans valeur exploitable,
+  [#2698](https://github.com/KhronosGroup/MoltenVK/issues/2698) use-after-free intermittent ~20-30% des lancements).
 - 🟠 **`SortKey` sans profondeur** → toute transparence future sera fausse (pas de tri arrière-vers-avant).
 - 🟠 **Plafond 16 bits** mesh/matériau dans la clé de tri : limite dure documentée, à faire échouer bruyamment au spawn
   plutôt qu'à dégrader le batching en silence.
@@ -671,7 +680,32 @@ GPU-free**, **`tools/FontCooker`** (patron `ShaderPrecompiler`), format **`.agfo
 VS-1, sortie déterministe).
 
 **3 jalons séquencés** : ~~**UI-1** texte à l'écran~~ ✅ **livré session 25** · ~~**UI-2** DebugOverlay + profiler
-CPU~~ ✅ **livré session 25** · **UI-3** timestamps GPU (`QueryPool`, dégradation gracieuse, abandonnable).
+CPU~~ ✅ **livré session 25** · ~~**UI-3** timestamps GPU~~ ✅ **livré session 39 — Texte & UI ENTIÈREMENT CLOS (3/3)**.
+
+*UI-3 livré* (spec `plans/2026-09-13-ui3-gpu-timestamps-design.md`, 4,15/5 après 2 tours — le 1ᵉʳ avait un vrai
+écart factuel + un vrai trou de conception, tous deux corrigés). Nouveau `QueryPool` (`Agapanthe.Graphics`,
+`VkQueryPool` timestamp, disposal différé) instrumente les 4 régions debug-label existantes (Shadow/Scene/
+Tonemap/UI) via `CommandList.WriteTimestampBegin`/`End` + `ResetQueryPool` ; détection de capacité par la queue
+graphique réellement utilisée (`timestampValidBits`, pas le feature bit global — précaution MoltenVK) ;
+`Renderer` possède le pool + lit en retour de façon non-bloquante et **par région indépendamment**
+(`GpuPassTimingsMs`, 4 champs `float?`) ; `DebugOverlaySystem` affiche la ligne par-passe + un graphe ;
+`AGAPANTHE_GPU_TIMESTAMPS=0` force le chemin dégradé pour le prouver sur du matériel qui supporte les
+timestamps. **Le seam `FrameProfiler` légué par UI-2 est fermé par découplage, pas par retrofit** : aucune ligne
+de `FrameStats`/`FrameSeries` (Engine) n'a changé — la série GPU vit entièrement côté `Renderer`/
+`DebugOverlaySystem` (Rendering/Engine.Render), cohérent avec le fait qu'un serveur headless n'a pas de GPU.
+**Double audit `csharp-lowlevel` + `graphics-3d`** (déviation assumée du duo standard, décidée dès le pré-spec
+S25) — **3 🔴 trouvés** (2 indépendamment par les deux, 1 par `graphics-3d` seul, plus sévère qu'un 🟠 initial) :
+inversion de slot (lisait le slot EN VOL au lieu du slot que la fence venait de garantir terminé — race
+possible, appariement croisé begin/end de 2 frames différentes) · `TOP_OF_PIPE` en begin (équivaut à `NONE` en
+premier scope sync2 — les 4 régions latchaient quasi simultanément, produisant des cumuls jusqu'à ~4× le vrai
+coût GPU au lieu de durées indépendantes) · lecture de queries jamais reset sur les 2 premières frames
+(`VUID-vkGetQueryPoolResults-None-09401`, violation systématique invisible seulement faute de SDK de
+validation à jour). Tous corrigés + re-vérifiés (861 tests, capture masquée byte-identique via `git stash`
+A/B, verdict visuel humain PASS sur l'overlay corrigé, les 9 captures HDR + HeadlessSim inchangés **JIT ==
+NativeAOT**, 0 leak/0 validation). `graphics-3d` a aussi documenté **4 risques MoltenVK réels pour P3-M0**
+(`stage` ignoré par MoltenVK, granularité per-encodeur-Metal sur Apple Silicon, fallback CPU à zéros francs,
+2 bugs MoltenVK ouverts sur exactement ce patron double-buffered) — versés en dette, inactionnables sans
+matériel Apple.
 
 *UI-2 livré* (double audit PASS-with-concerns ×2, aucun 🔴) : `FrameStats`/`FrameSeries` + `DebugOverlaySystem`
 (Engine) · `Sparkline` + `TextBuilder` public 0-alloc (Ui) · overlay in-view remplaçant le HUD `window.Title` **et**
@@ -680,9 +714,7 @@ son hack de cession VS-3, bascule `F3`, `AGAPANTHE_OVERLAY=0`. **Le gate 0-alloc
 (272 B/frame fantômes), puis fermé son bracket avant submit/present et **jamais** sur les frames à sortie précoce
 (resize) → « 0 B » en vert pendant une recréation de swapchain par frame. Le bracket vit maintenant dans
 `FrameOrchestrator` (`Tick` → `EndFrame()` après `DrawFrame`), exactement celui du banc.
-*Dette léguée* : **seam `FrameProfiler` reporté à UI-3** — les timestamps GPU arrivent à N+2 et casseront
-`Record(float, long)` (séries désalignées) ; le refactor appartient au jalon qui en connaîtra la forme, et
-`DebugOverlaySystem` reste sans tests pour la même raison (il dépend de l'orchestrator concret).
+~~*Dette léguée* : **seam `FrameProfiler` reporté à UI-3**~~ ✅ **soldée UI-3 (S39)**, voir ci-dessus.
 
 *UI-1 livré* (double audit PASS-with-concerns ×2, verdict humain PASS) : `tools/FontCooker` (SDF hors-ligne, pur
 managé) · `.agfont` déterministe · `Agapanthe.Ui` GPU-free · `BlendMode` + `R8Unorm` · `UiPass` + `Renderer.LoadFont`/
@@ -695,7 +727,7 @@ silencieuse > 256 glyphes.
 
 *Prérequis bas niveau découverts* : `Agapanthe.Graphics` n'a **aucun format mono-canal** (`R8Unorm` à ajouter,
 précédent `Rg16Sfloat`) et son **blending est câblé en dur à `false`** (`GraphicsPipeline.cs:208`) — ajouter
-`BlendMode` débloque aussi la dette « 2ᵉ verrou transparence ». Aucun `QueryPool` n'existe (UI-3).
+`BlendMode` débloque aussi la dette « 2ᵉ verrou transparence ». ~~Aucun `QueryPool` n'existe (UI-3).~~ ✅ livré.
 
 **Le XAML retenu reste à instruire** (spec séparée, bien plus tard) : source generator XAML→C# (la réflexion est
 hostile à NativeAOT ; précédents BAML/Avalonia/NoesisGUI), avec un v1 **brutalement restreint** — le volume de surface

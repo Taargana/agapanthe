@@ -1,4 +1,5 @@
 using Silk.NET.Vulkan;
+using VkQueryPool = Silk.NET.Vulkan.QueryPool;
 
 namespace Agapanthe.Graphics;
 
@@ -59,6 +60,18 @@ public sealed unsafe partial class GraphicsDevice
         else
         {
             KhrSynchronization2!.CmdPipelineBarrier2(cmd, info);
+        }
+    }
+
+    internal void CmdWriteTimestamp2(CommandBuffer cmd, PipelineStageFlags2 stage, VkQueryPool pool, uint query)
+    {
+        if (HasVulkan13Core)
+        {
+            _vk.CmdWriteTimestamp2(cmd, stage, pool, query);
+        }
+        else
+        {
+            KhrSynchronization2!.CmdWriteTimestamp2(cmd, stage, pool, query);
         }
     }
 

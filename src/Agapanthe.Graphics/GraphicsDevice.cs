@@ -145,6 +145,35 @@ public sealed unsafe partial class GraphicsDevice : IDisposable
     /// <summary>Name of the selected physical device.</summary>
     public string AdapterName { get; private set; } = string.Empty;
 
+    /// <summary>
+    /// Whether the selected physical device and the graphics queue family actually in use both report
+    /// GPU timestamp support (UI-3: <c>timestampPeriod &gt; 0</c> and the queue's
+    /// <c>timestampValidBits &gt; 0</c>). Never varies once the device is selected. Callers wanting to
+    /// force the unsupported path regardless of hardware (e.g. <c>AGAPANTHE_GPU_TIMESTAMPS=0</c>) do so
+    /// at their own layer (<c>Agapanthe.Rendering.Renderer</c> ANDs this with a caller-supplied flag) —
+    /// this property reflects hardware capability alone.
+    /// </summary>
+    public bool SupportsGpuTimestamps { get; private set; }
+
+    /// <summary>
+    /// Nanoseconds per tick of a GPU timestamp query (<c>VkPhysicalDeviceLimits::timestampPeriod</c>),
+    /// for <see cref="GpuTimestampMath.TryToMilliseconds"/>. Meaningless (and left at its default
+    /// <c>0</c>) when <see cref="SupportsGpuTimestamps"/> is <see langword="false"/>.
+    /// </summary>
+    public float TimestampPeriodNs { get; private set; }
+
+    /// <summary>
+    /// Number of low-order bits a GPU timestamp query actually defines
+    /// (<c>VkQueueFamilyProperties::timestampValidBits</c> of the graphics queue in use) — the Vulkan
+    /// spec leaves any higher bit UNDEFINED, so a raw 64-bit tick must be masked to this width before
+    /// use. Audit finding (csharp-lowlevel, 🟠): NVIDIA commonly reports 64 (a no-op mask), but
+    /// Intel/AMD/MoltenVK commonly report 36-40 — reading raw ticks on such hardware would mix in
+    /// undefined high bits and produce wildly wrong (and, unlike a wraparound, not reliably negative,
+    /// so not caught by <see cref="GpuTimestampMath"/>'s existing guard) deltas. Meaningless (and left
+    /// at its default <c>0</c>) when <see cref="SupportsGpuTimestamps"/> is <see langword="false"/>.
+    /// </summary>
+    public uint TimestampValidBits { get; private set; }
+
     internal Vk Api => _vk;
     internal Instance Instance => _instance;
     internal PhysicalDevice PhysicalDevice => _physicalDevice;
@@ -539,9 +568,43 @@ public sealed unsafe partial class GraphicsDevice : IDisposable
         _useVulkan13Features = best.UseVulkan13Features;
         _hasPortabilitySubset = best.HasPortabilitySubset;
         AdapterName = best.Name;
+        SupportsGpuTimestamps = DetectGpuTimestampSupport(_physicalDevice, GraphicsQueueFamily);
         Log.Info($"GraphicsDevice: selected '{best.Name}' (graphics family {best.GraphicsFamily}, " +
                  $"present family {best.PresentFamily}, 1.3 core features: {best.UseVulkan13Features}, " +
-                 $"portability subset: {best.HasPortabilitySubset}).");
+                 $"portability subset: {best.HasPortabilitySubset}, GPU timestamps: {SupportsGpuTimestamps}).");
+    }
+
+    /// <summary>
+    /// UI-3 — capability detection for GPU timestamp queries (<see cref="QueryPool"/>). Checks the
+    /// GRAPHICS QUEUE FAMILY ACTUALLY USED (<paramref name="graphicsFamily"/>), not just the blanket
+    /// <c>timestampComputeAndGraphics</c> device feature: matching the project's standing MoltenVK
+    /// caution ("check every feature at the first VUID"), some drivers report the per-queue
+    /// <c>timestampValidBits</c> as 0 even when the blanket feature reads true.
+    /// </summary>
+    private bool DetectGpuTimestampSupport(PhysicalDevice device, uint graphicsFamily)
+    {
+        _vk.GetPhysicalDeviceProperties(device, out var props);
+        if (!(props.Limits.TimestampPeriod > 0f))
+        {
+            return false;
+        }
+
+        uint familyCount = 0;
+        _vk.GetPhysicalDeviceQueueFamilyProperties(device, &familyCount, null);
+        var families = new QueueFamilyProperties[familyCount];
+        fixed (QueueFamilyProperties* p = families)
+        {
+            _vk.GetPhysicalDeviceQueueFamilyProperties(device, &familyCount, p);
+        }
+
+        if (graphicsFamily >= familyCount || families[graphicsFamily].TimestampValidBits == 0)
+        {
+            return false;
+        }
+
+        TimestampPeriodNs = props.Limits.TimestampPeriod;
+        TimestampValidBits = families[graphicsFamily].TimestampValidBits;
+        return true;
     }
 
     private bool EvaluateDevice(PhysicalDevice device, out DeviceCandidate candidate)

@@ -78,7 +78,7 @@ public static class AppHost
             swapchain = new Swapchain(device, width, height);
             camera.AspectRatio = (float)width / height;
 
-            renderer = new Renderer(device, swapchain, shaderDir);
+            renderer = new Renderer(device, swapchain, shaderDir, options.GpuTimestampsEnabled);
             // Half a stop under 1 — the default studio HDRI clips to white at exposure 1. +/- moves it at runtime;
             // a scene recipe with its own lighting model (the planet family) overrides it in Build.
             renderer.Exposure = 0.5f;

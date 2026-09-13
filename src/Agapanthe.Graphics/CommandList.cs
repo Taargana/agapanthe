@@ -285,6 +285,52 @@ public readonly unsafe struct CommandList
     public void EndRendering() => _device.CmdEndRendering(_buffer);
 
     /// <summary>
+    /// Resets <paramref name="count"/> queries starting at <paramref name="firstQuery"/> in
+    /// <paramref name="pool"/> (UI-3). Vulkan requires every query be reset before it is written again;
+    /// core 1.0 (<c>vkCmdResetQueryPool</c>), no extension needed.
+    /// </summary>
+    public void ResetQueryPool(QueryPool pool, uint firstQuery, uint count)
+    {
+        ArgumentNullException.ThrowIfNull(pool);
+        _device.Api.CmdResetQueryPool(_buffer, pool.Handle, firstQuery, count);
+    }
+
+    /// <summary>
+    /// Writes a GPU timestamp into <paramref name="pool"/> at <paramref name="query"/> at
+    /// <c>ALL_COMMANDS</c> — the "begin" half of a timed region (UI-3): latches once every command
+    /// recorded BEFORE this one has fully completed. Pair with <see cref="WriteTimestampEnd"/> at the
+    /// region's close; the pair then brackets exactly the work recorded in between, barriers included,
+    /// with no overlap against a neighbouring region. Only two fixed stages are exposed (not a general
+    /// <c>VkPipelineStageFlags2</c> parameter) — a Vulkan enum type must never cross this project's
+    /// <c>Agapanthe.Graphics</c> boundary, and no caller needs any other stage for this feature.
+    /// <para>
+    /// Audit findings (csharp-lowlevel AND graphics-3d, independently, 🔴, caught before closure): the
+    /// first draft used <c>TOP_OF_PIPE</c> here. In synchronization2 that stage in the FIRST scope of a
+    /// dependency is defined as equivalent to <c>NONE</c> — an empty scope, waiting on nothing (not a
+    /// validation error; the spec explicitly permits it, it is simply the wrong tool for a measurement).
+    /// It latches as soon as the GPU front-end has merely ISSUED the prior commands, so every region's
+    /// begin timestamp landed at effectively the same instant (frame start), and successive regions
+    /// measured CUMULATIVE totals (Scene ≈ shadow+scene, Tonemap ≈ shadow+scene+tonemap, …) instead of
+    /// each region's own duration — the overlay's summed "Total" could read up to ~4× the frame's real
+    /// GPU cost. <c>ALL_COMMANDS</c> on both ends (the modern, non-legacy spelling of what
+    /// <c>BOTTOM_OF_PIPE</c> means in a first scope) is the correct idiom for a serialized breakdown.
+    /// </para>
+    /// </summary>
+    public void WriteTimestampBegin(QueryPool pool, uint query)
+    {
+        ArgumentNullException.ThrowIfNull(pool);
+        _device.CmdWriteTimestamp2(_buffer, PipelineStageFlags2.AllCommandsBit, pool.Handle, query);
+    }
+
+    /// <summary>The "end" half of a timed region — see <see cref="WriteTimestampBegin"/>. Also written at
+    /// <c>ALL_COMMANDS</c>, once every command recorded before it (the whole region) has completed.</summary>
+    public void WriteTimestampEnd(QueryPool pool, uint query)
+    {
+        ArgumentNullException.ThrowIfNull(pool);
+        _device.CmdWriteTimestamp2(_buffer, PipelineStageFlags2.AllCommandsBit, pool.Handle, query);
+    }
+
+    /// <summary>
     /// Opens a named debug region (<c>vkCmdBeginDebugUtilsLabelEXT</c>) so RenderDoc, Nsight and the
     /// validation layers group the following commands under <paramref name="name"/>. Pair with
     /// <see cref="EndDebugLabel"/>, or prefer <see cref="PushDebugLabel"/> for a scoped <c>using</c>.

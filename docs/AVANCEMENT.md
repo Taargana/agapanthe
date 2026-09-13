@@ -912,10 +912,42 @@ Spec : [2026-07-25-vs2-spawn-runtime-newtonian-gravity-design.md](plans/2026-07-
 > app cuit tout `content/` dans son propre `obj/`) · garde `Frustum.Normalize` `1e-8` dégrade plus tôt à
 > l'échelle planétaire orthographique (requalifie la dette pré-existante, ne l'ajoute pas).
 >
-> ### ▶️ Reprise — **UI-3**, ou autre item du backlog §4quater
-> Le domaine **Contenu** et **Slice-2** sont tous deux CLOS. Prochain candidat naturel : **UI-3** (timestamps
-> GPU + seam `FrameProfiler`, dette laissée depuis UI-2) — sinon voir `BACKLOG.md` §4quater pour les autres
-> items (queries physiques, job system, netcode…).
+> ### ✅ **UI-3 CLOS (S39)** — timestamps GPU + seam `FrameProfiler` — **Texte & UI ENTIÈREMENT CLOS (3/3)**
+> Dernier des 3 jalons Texte & UI (UI-1/UI-2 clos S25). Spec `docs/plans/2026-09-13-ui3-gpu-timestamps-design.md`,
+> approuvée **4,15/5** après 2 tours (round 1 : 1 écart factuel + 1 vrai trou de conception, tous deux
+> corrigés).
+>
+> **Livré** : ferme la dette explicite d'UI-2 — les timestamps GPU arrivent ~2 frames en retard
+> (`FramesInFlight=2`) et auraient désynchronisé `FrameStats`/`FrameSeries` (append-only, 0-alloc, testées)
+> retrofit naïvement — **résolu par découplage total** : `Agapanthe.Engine`/`FrameStats` restent intouchés
+> (`git diff` vide), la série GPU vit entièrement côté `Agapanthe.Rendering`/`Agapanthe.Engine.Render`. Nouveau
+> **`QueryPool`** (`Agapanthe.Graphics`, `VkQueryPool` timestamp, disposal différé — patron `Sampler`)
+> instrumente les **4 régions debug-label existantes** (`Shadow`/`Scene`/`Tonemap`/`UI`, aucune nouvelle région)
+> via `CommandList.WriteTimestampBegin`/`End` + `ResetQueryPool`. Détection de capacité par la **queue
+> graphique réellement utilisée** (`TimestampValidBits`, pas le feature bit global — précaution MoltenVK) ;
+> `Renderer.SupportsGpuTimestamps` ANDe `GraphicsDevice.SupportsGpuTimestamps` et `HostOptions.GpuTimestampsEnabled`
+> (`AGAPANTHE_GPU_TIMESTAMPS=0`). Lecture **une fois par frame, non-bloquante, par région indépendamment**
+> dans `GpuPassTimingsMs` (4 champs `float?`) ; `DebugOverlaySystem` affiche la ligne par-passe + un graphe,
+> absence propre quand non supporté.
+>
+> **Gates** : **861 tests**, 0 warning, capture masquée **byte-identique avant/après** (`git stash` A/B,
+> `b5382ac6…`) — preuve que l'instrumentation ne touche aucun pixel — les 9 captures HDR inchangées, verdict
+> visuel humain PASS (overlay GPU actif + chemin dégradé), **JIT == NativeAOT** sur les 3 binaires, 0 leak /
+> 0 validation.
+>
+> **Double audit** `csharp-lowlevel` + `graphics-3d` (déviation assumée du duo standard, décidée au pré-spec
+> S25) — **3 🔴 trouvés et corrigés** : inversion de slot (lisait le slot en vol au lieu du slot
+> fence-garanti-terminé — race + appariement croisé possible) · `TOP_OF_PIPE` en begin (≡ `NONE` en premier
+> scope sync2 — régions cumulatives jusqu'à ~4× le vrai coût GPU) · lecture de queries jamais reset sur les
+> 2 premières frames (`VUID-vkGetQueryPoolResults-None-09401`, violation systématique). 5 findings 🟠
+> appliqués (masquage `TimestampValidBits`, gardes `QueryPool.ReadResultsNonBlocking`, suppression de 4
+> `FrameSeries` écrites-jamais-lues, total non enregistré à 0 franc, suffixe `ms` manquant). `graphics-3d` a
+> documenté 4 risques MoltenVK réels pour P3-M0 (versés au backlog, inactionnables sans matériel Apple).
+> **Verdict visuel humain : PASS** (2026-09-13).
+>
+> ### ▶️ Reprise — autre item du backlog §4quater
+> Les domaines **Contenu**, **Slice-2** et **Texte & UI** sont tous CLOS. Voir `BACKLOG.md` §4quater pour les
+> items restants (audio, queries physiques, job system, netcode…).
 >
 > ### Contexte — **Cap moteur** (réorientation S25)
 > **Vertical Slice CLOSE dans son intention** : VS-1 (S22) · VS-2 (S23) · VS-3 (S24) ont prouvé l'intégration
