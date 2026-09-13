@@ -46,7 +46,8 @@ internal sealed class ProbeDropSystem : ISystem
         var pos = _centre + new Double3(cos * spread, 0f, sin * spread);
         var spec = new ImportedEntitySpec(
             _spec.Mesh, _spec.Material, pos, _spec.RotationScale, _spec.BoundsCenter, _spec.BoundsRadius, _spec.Order,
-            _spec.Identity); // Contenu-3a: keep asset identity
+            _spec.Identity, // Contenu-3a: keep asset identity
+            _spec.Layer); // physics-queries audit finding: keep QueryLayer tag across a runtime respawn too
         _world.SpawnBodyDeferred(in spec, Vector3.Zero, inverseMass: 1f, restitution: 0.4f, radius: _radius);
         _dropped++;
     }

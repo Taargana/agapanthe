@@ -142,6 +142,23 @@ internal struct NoShadowCast
 }
 
 /// <summary>
+/// Physics-queries layer mask (optional tag): an entity carrying it is included in a
+/// <c>GameWorld.TryRaycast</c>/<c>RaycastAll</c> query only when
+/// <c>(Mask &amp; layerMask) != 0</c>. An entity WITHOUT this component is treated as
+/// <c>GameWorld.AllLayers</c> — resolved per-entity via an inline <c>Has&lt;QueryLayer&gt;()</c>
+/// check, the same shape as <see cref="NoShadowCast"/> (a single query, not a two-archetype
+/// split — no <c>WithNone&lt;T&gt;()</c> query of any kind exists in this codebase today).
+/// Authored via <c>ImportedEntitySpec.Layer</c>; added at materialization only when that field
+/// is non-null.
+/// </summary>
+[Component]
+[StructLayout(LayoutKind.Sequential)]
+internal struct QueryLayer
+{
+    public uint Mask;
+}
+
+/// <summary>
 /// The drawable's index in the persistent sorted candidate buffer (P3-M6). Assigned at each structural rebuild
 /// (<see cref="GameWorld.CollectRenderLists"/>) and STABLE between rebuilds — which is what lets a per-entity
 /// dirty patch address a fixed GPU slot without re-sorting. <c>-1</c> means "not yet assigned" (a freshly spawned

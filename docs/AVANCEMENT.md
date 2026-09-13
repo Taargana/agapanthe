@@ -945,9 +945,51 @@ Spec : [2026-07-25-vs2-spawn-runtime-newtonian-gravity-design.md](plans/2026-07-
 > documenté 4 risques MoltenVK réels pour P3-M0 (versés au backlog, inactionnables sans matériel Apple).
 > **Verdict visuel humain : PASS** (2026-09-13).
 >
+> ### ✅ **Queries physiques CLOS (S40)** — raycast + layer mask
+> Premier item §4quater après la clôture entière du domaine Texte & UI. Spec
+> `docs/plans/2026-09-14-physics-queries-raycast-design.md`, approuvée **4,2/5** après 3 tours (round 1 : un
+> précédent fabriqué pour `QueryLayer` — un split `WithNone<T>()` inexistant dans ce codebase, corrigé pour
+> citer le vrai précédent `NoShadowCast` ; round 2 : la correction elle-même avait fabriqué un
+> `ImportedEntitySpec.CastsShadow` inexistant, corrigé).
+>
+> **Livré** : `GameWorld.TryRaycast`/`RaycastAll` (nouveau `GameWorld.Queries.cs`) contre **tout drawable** via
+> le composant `Bounds` existant (pas seulement `RigidBody`) · `QueryLayer { uint Mask }` optionnel (composant
+> #14, absent ⇒ `AllLayers`, single-query + `Has<QueryLayer>()` inline) · nouvelle grille de broadphase
+> (séparée de la grille physique), reconstruite par appel, DDA sur voisinage 3×3×3 · `Ray`/`RaySphereIntersect`
+> (`Agapanthe.Core`, résolus en `double`) · `ImportedEntitySpec.Layer` (atteint `SpawnImported` **et**
+> `SpawnDeferred`, contrairement à l'ancien `castsShadow`) · authoring TOML `layer` (`.agscene` v5→v6, rejeté
+> sur `[[grid]]`/`[[cluster]]`) · `Camera.ScreenPointToRay` (perspective **et** orthographique, un premier jet
+> perspective-only trouvé et corrigé par le double audit) · démo `Key.F` (crosshair écran-centre — `IWindow`
+> n'expose aucun événement de clic, D6 réinterprété ; câblé une fois dans `AppHost`, Sandbox + TopDown).
+>
+> **Imprévu en cours de route** : ajouter le 14ᵉ composant a fait échouer 43 tests via un `Debug.Assert`
+> inconditionnel figé sur le compte v4 dans `WorldSerialization.cs` — corrigé par un bump **v4→v5** purement
+> additif, 3 hashes `HeadlessSim` re-épinglés. `CookRunner.CookerVersion` non bumpé pour le saut `.agscene`
+> v5→v6 (même classe de bug qu'un finding déjà audité en Contenu-3c-2), trouvé pendant la vérification et corrigé.
+>
+> **Gates** : **904 tests** (+45), 0 warning, 0 régression, les 9 captures pinnées re-vérifiées byte-identiques
+> par preuve A/B `git stash` (5 tombent exactement sur les hashes déjà épinglés), `HeadlessSim`/Sandbox
+> **JIT == NativeAOT** avant **et** après la passe de correctifs d'audit, 0 leak / 0 validation. **Verdict
+> visuel humain PASS** (scène `grid`, 2026-09-13) : `F` sur une entité → hit + distance plausible, `F` vers le
+> vide → « no hit ».
+>
+> **Double audit** `csharp-lowlevel` (**3,6/5**) + `engine-architect` (**4,1/5**), PASS-with-concerns tous les
+> deux, forte convergence (3 findings trouvés indépendamment par les deux). **1 🔴 trouvé-et-corrigé** :
+> `maxDistance = +Infinity` passait le garde existant et faisait boucler la marche DDA à l'infini — un appel
+> parfaitement naturel (« cast aussi loin que possible ») rendait le process infrangible ; corrigé en
+> rejetant `IsInfinity`. Findings 🟠 corrigés : coût de marche DDA non borné (désormais bornée à l'AABB des
+> cellules occupées + arrêt anticipé) · `RaycastHit.Point` narrowait en `float` (contredisait « résolu en
+> double ») · direction dégénérée non validée (NaN/nulle pouvait empoisonner le résultat ou lever une
+> exception non documentée) · tie-break non déterministe à distance égale · `RaySphereIntersect` instable au-
+> delà de ~1e8 m (réécrit, vérifié à 7,48e10 m) · bug orthographique de `ScreenPointToRay` (ci-dessus) ·
+> `EnsureStampCapacity` réallouait à chaque appel dès qu'un monde grossissait · `Layer` perdu par 2 sites de
+> copie champ-à-champ restants · `layer = 0` authoré silencieusement inatteignable, rejeté au cook. Détail
+> complet dans le spec §8 et `.absolute-work/archive/board-session40-physicsqueries.md`.
+>
 > ### ▶️ Reprise — autre item du backlog §4quater
-> Les domaines **Contenu**, **Slice-2** et **Texte & UI** sont tous CLOS. Voir `BACKLOG.md` §4quater pour les
-> items restants (audio, queries physiques, job system, netcode…).
+> Les domaines **Contenu**, **Slice-2**, **Texte & UI** et **queries physiques (raycast + layer mask)** sont
+> tous CLOS. Voir `BACKLOG.md` §4quater pour les items restants (audio, queries de formes, job system,
+> netcode…).
 >
 > ### Contexte — **Cap moteur** (réorientation S25)
 > **Vertical Slice CLOSE dans son intention** : VS-1 (S22) · VS-2 (S23) · VS-3 (S24) ont prouvé l'intégration

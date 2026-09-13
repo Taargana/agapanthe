@@ -19,7 +19,7 @@ internal static class SceneTomlReader
     [
         "model", "prefab", "position", "rotation", "scale", "casts_shadow",
         "rows", "cols", "spacing_mul", "count", "inverse_mass", "restitution", "radius",
-        "body", "velocity",
+        "body", "velocity", "layer",
     ];
     private static readonly string[] LightKeys = ["kind", "color", "intensity", "direction", "position", "range"];
     private static readonly string[] CameraKeys =
@@ -134,10 +134,28 @@ internal static class SceneTomlReader
             // [[entity]] (Compile's Grid/Cluster branches never read AuthoredItem.HasBody/Velocity — Grid always
             // passes body: null, Cluster builds its OWN SceneBody from InverseMass/Restitution/Radius). Letting
             // them parse silently on [[grid]]/[[cluster]] would violate RejectUnknownKeys' own guarantee that no
-            // authoring key is accepted and then ignored.
-            if (kind != AuthoredItemKind.Entity && (t.ContainsKey("body") || t.ContainsKey("velocity")))
+            // authoring key is accepted and then ignored. 'layer' (physics queries) is entity-only for the same
+            // reason — Compile's Grid/Cluster branches never read AuthoredItem.Layer.
+            if (kind != AuthoredItemKind.Entity && (t.ContainsKey("body") || t.ContainsKey("velocity") || t.ContainsKey("layer")))
             {
-                throw new AssetException($"'{path}': 'body'/'velocity' are only valid on [[entity]], not [[{key}]].");
+                throw new AssetException($"'{path}': 'body'/'velocity'/'layer' are only valid on [[entity]], not [[{key}]].");
+            }
+
+            var layerNum = NumOpt(t, "layer", path);
+            uint? layer = null;
+            if (layerNum is { } ln)
+            {
+                if (ln <= 0 || ln != Math.Floor(ln) || ln > uint.MaxValue)
+                {
+                    // Audit finding (csharp-lowlevel): a mask of 0 fails `(candidateMask & layerMask) != 0` for
+                    // EVERY layerMask including AllLayers (uint.MaxValue) — the entity becomes permanently
+                    // unraycastable, almost certainly not what a scene author intends. Same posture this project
+                    // already takes on other degenerate authored values (negative target_count/shot_budget, zero
+                    // light direction, zero AttractorSurfaceRadius): reject loudly at cook time.
+                    throw new AssetException($"'{path}': 'layer' must be a positive integer (0 is unreachable by any query), got {ln}.");
+                }
+
+                layer = (uint)ln;
             }
 
             yield return new AuthoredItem
@@ -158,6 +176,7 @@ internal static class SceneTomlReader
                 Radius = NumOpt(t, "radius", path) is { } rr ? (float)rr : null,
                 HasBody = BoolOpt(t, "body", path) ?? false,
                 Velocity = Vec3Opt(t, "velocity", path) ?? Vector3.Zero,
+                Layer = layer,
             };
         }
     }

@@ -26,7 +26,7 @@ public static class CookRunner
 {
     /// <summary>Bump when the <c>.agmodel</c> payload layout or the glTF decode changes — every blob then
     /// re-cooks on the next run regardless of source hashes.</summary>
-    public const string CookerVersion = "slice2"; // .agscene v5 (orthographic camera projection)
+    public const string CookerVersion = "physics-queries"; // .agscene v6 (QueryLayer's `layer` TOML key)
 
     private const string StateFileName = ".cookstate";
 

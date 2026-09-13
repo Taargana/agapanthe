@@ -19,7 +19,7 @@ public sealed class AgSceneFormatTests
             {
                 Model = new AssetKey("models/helmet.glb"), LocalMesh = 0, LocalMat = 1,
                 Position = new Double3(1, 2, 3), Rotation = Quaternion.CreateFromAxisAngle(Vector3.UnitY, 0.3f),
-                Scale = 1.5f, CastsShadow = true,
+                Scale = 1.5f, CastsShadow = true, Layer = 7u,
             },
             new SceneEntity
             {
@@ -78,12 +78,14 @@ public sealed class AgSceneFormatTests
         Assert.Equal(1.5f, e0.Scale);
         Assert.True(e0.CastsShadow);
         Assert.Null(e0.Body);
+        Assert.Equal(7u, e0.Layer);
 
         var e1 = restored.Entities[1];
         Assert.False(e1.CastsShadow);
         Assert.NotNull(e1.Body);
         Assert.Equal(0.3f, e1.Body!.Restitution);
         Assert.Equal(new Vector3(0, -1, 0), e1.Body.Velocity);
+        Assert.Null(e1.Layer); // untagged sibling — must stay untagged
 
         Assert.Equal(2, restored.Lights.Count);
         Assert.Equal(SceneLightKind.Directional, restored.Lights[0].Kind);

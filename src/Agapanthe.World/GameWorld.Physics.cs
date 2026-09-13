@@ -106,6 +106,12 @@ public sealed partial class GameWorld
             new InstanceSlot { Value = -1 }); // -1 = unassigned; the next structural rebuild sets it
         RegisterLive(globalId, entity);
         _structuralDirty = true; // a new body is a new drawable → force a persistent rebuild (P3-M6)
+
+        // Physics queries: same optional tagging as MaterialiseDrawable — a body is a drawable too.
+        if (spec.Layer is { } mask)
+        {
+            entity.Add(new QueryLayer { Mask = mask });
+        }
     }
 
     /// <summary>

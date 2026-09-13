@@ -46,6 +46,7 @@ public sealed class ComponentRegistryTests
             typeof(MeshRef), typeof(Bounds), typeof(RenderOrder), typeof(Velocity), typeof(RigidBody),
             typeof(NoShadowCast), typeof(InstanceSlot),
             typeof(AssetRef), // Contenu-3a — index 12, appended (snapshot v4). A MANAGED component.
+            typeof(QueryLayer), // Physics queries — index 13, appended.
         };
 
         Assert.True(

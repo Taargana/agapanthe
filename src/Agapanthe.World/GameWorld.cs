@@ -259,7 +259,24 @@ public sealed partial class GameWorld : IDisposable
             new InstanceSlot { Value = -1 }); // -1 = unassigned; the next structural rebuild sets it
         RegisterLive(globalId, entity);
         _structuralDirty = true; // a new drawable changes the candidate set → force a persistent rebuild (P3-M6)
+
+        // Physics queries: tag QueryLayer only when the spec carries a mask — the common case (no scene author
+        // opts in) leaves the entity untagged, resolved as AllLayers by an inline Has<QueryLayer>() check at query
+        // time (same shape as the castsShadow/NoShadowCast tag just above this method's other call site).
+        if (spec.Layer is { } mask)
+        {
+            entity.Add(new QueryLayer { Mask = mask });
+        }
+
         return entity;
+    }
+
+    /// <summary>Test/inspection accessor: the entity's <c>QueryLayer</c> mask, or <see langword="null"/> if it
+    /// carries no such tag (the <c>AllLayers</c> case). Throws if the handle names no live entity.</summary>
+    internal uint? GetQueryLayerForTest(EntityRef entity)
+    {
+        var e = Deref(entity);
+        return e.Has<QueryLayer>() ? e.Get<QueryLayer>().Mask : null;
     }
 
     // Creates a hierarchical transform node NOW (LocalTransform + the placeholder world components the propagation

@@ -70,7 +70,9 @@ public sealed class HeadlessSimSnapshotFormatTests
     // NativeAOT win-x64 publish of samples/HeadlessSim. Superseded b3fa79d8… (v4, all-None, 1842 bytes) after the
     // engine-architect finding — BuildScene's specs now carry a real AssetKey("headless/body"), so the headless
     // artifact's snapshot proves genuine asset identity. +15 bytes = the one key-table entry.
-    private const string ExpectedMd5 = "6a13dd54c1db32d35a15332bff0395e7";
+    // Re-pinned 2026-09-13 (physics queries, format v5): QueryLayer appends a 14th component; purely additive,
+    // no data-shape change for existing entities, so only the header's version/count bytes move (+1 byte).
+    private const string ExpectedMd5 = "dbe9ed9103f10f4a34708e174753721b";
     private const int ExpectedByteLength = 1857;
 
     [Fact]
@@ -153,7 +155,8 @@ public sealed class HeadlessSimSnapshotFormatTests
     // Re-derive with: dotnet run --project samples/HeadlessSim -c Debug -- --drive --ticks 600 --save <path>
     // Pinned 2026-09-09 (Contenu-3a, format v4 + audit fix). Superseded f8120d25… (v4, all-None, 210 bytes) — the
     // RunDrive body now carries AssetKey("headless/drive-body"). +21 bytes = the one key-table entry.
-    private const string ExpectedDriveMd5 = "f6053226f8c13b55589b29be103a8e66";
+    // Re-pinned 2026-09-13 (physics queries, format v5): same reasoning as ExpectedMd5 above.
+    private const string ExpectedDriveMd5 = "1c760d7f294486522f9b45ccfacc3f6e";
     private const int ExpectedDriveByteLength = 231;
 
     [Fact]
@@ -170,7 +173,8 @@ public sealed class HeadlessSimSnapshotFormatTests
     // way HeadlessSim/Program.cs RunScene does, run 600 ticks, pin the snapshot. Verified JIT == NativeAOT
     // (win-x64 publish of samples/HeadlessSim: `--scene headless-default --ticks 600 --save`) on 2026-09-09.
     // Re-derive: dotnet run --project samples/HeadlessSim -c Release -- --scene headless-default --ticks 600 --save <path>
-    private const string ExpectedCookedSceneMd5 = "8a5c0463599cd1e9cd5a585b9da7f3ca";
+    // Re-pinned 2026-09-13 (physics queries, format v5): same reasoning as ExpectedMd5 above.
+    private const string ExpectedCookedSceneMd5 = "35e39cdee482634ec7eaa82aa32c697a";
     private const int ExpectedCookedSceneByteLength = 1384;
 
     [Fact]

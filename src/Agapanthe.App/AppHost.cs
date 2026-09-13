@@ -247,6 +247,27 @@ public static class AppHost
                 case Key.F3 when debugOverlay is not null:
                     debugOverlay.Toggle();
                     break;
+                case Key.F:
+                    // Physics queries demo (D6): crosshair raycast, not a literal cursor-position pick — once the
+                    // mouse is captured (the common case, FPS-style look) it has no meaningful on-screen position,
+                    // so "what's under the cursor" is answered at screen center, matching this engine's existing
+                    // capture-on-click convention. Demo only: logs the hit, no new gameplay system.
+                    var (fbWidth, fbHeight) = window.FramebufferSize;
+                    if (fbWidth > 0 && fbHeight > 0)
+                    {
+                        var screenCenter = new System.Numerics.Vector2(fbWidth / 2f, fbHeight / 2f);
+                        var ray = camera.ScreenPointToRay(screenCenter, (uint)fbWidth, (uint)fbHeight);
+                        if (world.TryRaycast(in ray, maxDistance: 1_000_000.0, out var hit))
+                        {
+                            Log.Info($"AppHost: [raycast] hit entity {hit.Entity} at distance {hit.Distance:F2} m.");
+                        }
+                        else
+                        {
+                            Log.Info("AppHost: [raycast] no hit.");
+                        }
+                    }
+
+                    break;
             }
 
             void LogSensitivity()

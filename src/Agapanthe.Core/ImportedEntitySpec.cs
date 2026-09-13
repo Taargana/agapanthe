@@ -44,6 +44,18 @@ public readonly struct ImportedEntitySpec
     /// </summary>
     public readonly MeshRefKey Identity;
 
+    /// <summary>
+    /// Physics-queries layer mask (optional): <see langword="null"/> ⇒ the entity carries no
+    /// <c>QueryLayer</c> tag and is treated as <c>AllLayers</c> by <c>GameWorld.TryRaycast</c>/
+    /// <c>RaycastAll</c> — the common case, no scene author has to opt in. A new, broader
+    /// mechanism than the existing <c>castsShadow</c> parameter it is conceptually adjacent to:
+    /// <c>castsShadow</c> lives only on <c>GameWorld.SpawnImported</c>'s parameter list (a
+    /// parameter <c>SpawnDeferred</c> does not even have), whereas <see cref="Layer"/> lives on
+    /// the spec itself, reachable from both spawn paths since they both funnel through the same
+    /// materialization point.
+    /// </summary>
+    public readonly uint? Layer;
+
     public ImportedEntitySpec(
         MeshHandle mesh,
         MaterialHandle material,
@@ -52,7 +64,8 @@ public readonly struct ImportedEntitySpec
         Vector3 boundsCenter,
         float boundsRadius,
         uint order,
-        MeshRefKey identity = default)
+        MeshRefKey identity = default,
+        uint? layer = null)
     {
         Mesh = mesh;
         Material = material;
@@ -62,5 +75,6 @@ public readonly struct ImportedEntitySpec
         BoundsRadius = boundsRadius;
         Order = order;
         Identity = identity;
+        Layer = layer;
     }
 }

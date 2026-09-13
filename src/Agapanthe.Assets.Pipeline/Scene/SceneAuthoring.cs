@@ -28,6 +28,9 @@ internal sealed class AuthoredItem
     public bool HasBody { get; init; }
     public Vector3 Velocity { get; init; }
 
+    // Entity, physics-queries layer tag (entity-only, same restriction as HasBody/Velocity above).
+    public uint? Layer { get; init; }
+
     // Grid
     public int Rows { get; init; } = 1;
     public int Cols { get; init; } = 1;

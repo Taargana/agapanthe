@@ -55,14 +55,21 @@ public sealed partial class GameWorld
     //   - MeshRef (index 5) is no longer written at all (derived from AssetRef + the resolver, like InstanceSlot).
     //   - Save takes no identifier delegate: the entity already holds its key (from ImportedEntitySpec.Identity).
     //   A v3 file is upgraded IN PLACE on load: its index-5 bytes are read as the AssetRef identity.
+    //
+    // v5 (physics queries) appends QueryLayer (component index 13, a plain blittable uint mask) — a PURELY ADDITIVE
+    //   optional tag, unlike v3→v4's AssetRef move: no existing component changed shape or slot, so there is no
+    //   in-place data transformation to perform. A v4 file's entities simply never carry the bit at index 13 (they
+    //   predate the component entirely); reading one needs only the narrower expectedComponentCount below, not a
+    //   special-cased upgrade path the way isV3 has one.
     private static ReadOnlySpan<byte> SerializationMagic => "AGWD"u8;
-    private const uint SerializationVersion = 4;
+    private const uint SerializationVersion = 5;
 
-    // A v3 file predates AssetRef — 12 components; a v4 file has 13. Both are frozen consts: appending component
-    // #14 without a version bump must fail at the registry (the frozen-order test), not by rejecting every genuine
-    // v4 file at load. The static check below ties V4ComponentCount to the live registry so they cannot drift.
+    // Each prior version's component count is a frozen const — appending a component without a version bump must
+    // fail at the registry (the frozen-order test), not by rejecting every genuine older file at load. The static
+    // check below ties V5ComponentCount (the CURRENT format) to the live registry so they cannot drift.
     private const uint V3ComponentCount = 12;
     private const uint V4ComponentCount = 13;
+    private const uint V5ComponentCount = 14;
 
     // ORDINAL — culture-independent — so the key table's byte layout is stable across machines (Save(Load(x)) == x).
     private static readonly IComparer<AssetKey> KeyOrdinal =
@@ -336,7 +343,7 @@ public sealed partial class GameWorld
         }
 
         var version = ReadU32(stream);
-        if (version is not (3 or 4))
+        if (version is not (3 or 4 or 5))
         {
             throw new WorldSerializationException(version switch
             {
@@ -345,16 +352,23 @@ public sealed partial class GameWorld
                 2 => "Snapshot is format v2, which predates stable asset identity (Contenu-1): its MeshRefs are raw " +
                      "process-local handles with no key table. There is no automatic upgrade — resave it with this " +
                      "build first, from wherever it was last loadable.",
-                _ => $"Unsupported snapshot version {version} (this build reads versions 3 and 4).",
+                _ => $"Unsupported snapshot version {version} (this build reads versions 3, 4 and 5).",
             });
         }
 
         // v4 (Contenu-3a) appends AssetRef → componentCount 13; a v3 file predates it → 12. The v3 body is read
-        // as-is except its MeshRef-slot bytes are materialised as the AssetRef identity (in-place upgrade).
+        // as-is except its MeshRef-slot bytes are materialised as the AssetRef identity (in-place upgrade). v5
+        // (physics queries) appends QueryLayer → componentCount 14 — purely additive, no upgrade needed for a v4
+        // file beyond the narrower expected count (its entities simply never carry the new bit).
         var isV3 = version == 3;
-        Debug.Assert(V4ComponentCount == (uint)ComponentRegistry.All.Count,
-            "V4ComponentCount is out of step with ComponentRegistry.All — bump SerializationVersion.");
-        var expectedComponentCount = isV3 ? V3ComponentCount : V4ComponentCount;
+        Debug.Assert(V5ComponentCount == (uint)ComponentRegistry.All.Count,
+            "V5ComponentCount is out of step with ComponentRegistry.All — bump SerializationVersion.");
+        var expectedComponentCount = version switch
+        {
+            3 => V3ComponentCount,
+            4 => V4ComponentCount,
+            _ => V5ComponentCount,
+        };
         var componentCount = ReadU32(stream);
         if (componentCount != expectedComponentCount)
         {
@@ -621,6 +635,7 @@ public sealed partial class GameWorld
         10 => e.Has<NoShadowCast>(),
         11 => e.Has<InstanceSlot>(),
         12 => e.Has<AssetRef>(),
+        13 => e.Has<QueryLayer>(),
         _ => throw new WorldSerializationException($"No component at registry index {index}."),
     };
 
@@ -641,6 +656,7 @@ public sealed partial class GameWorld
             case 10: WriteBlittable(s, e.Get<NoShadowCast>()); break;
             // index 11 (InstanceSlot) is never written (excluded by the caller).
             // index 12 (AssetRef) is written by WriteAssetRef (key table index + local indices), never here.
+            case 13: WriteBlittable(s, e.Get<QueryLayer>()); break;
             default: throw new WorldSerializationException($"No serializer for registry index {index}.");
         }
     }
@@ -663,6 +679,7 @@ public sealed partial class GameWorld
             case 10: e.Add(ReadBlittable<NoShadowCast>(s)); break;
             // index 11 (InstanceSlot) is never in the stream (excluded by the caller).
             // index 12 (AssetRef) is handled by the caller (ReadDrawableIdentity — AssetRef + derived MeshRef), never here.
+            case 13: e.Add(ReadBlittable<QueryLayer>(s)); break;
             default: throw new WorldSerializationException($"No deserializer for registry index {index}.");
         }
     }

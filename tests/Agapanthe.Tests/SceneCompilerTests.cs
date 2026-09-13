@@ -421,6 +421,28 @@ public sealed class SceneCompilerTests
     }
 
     [Fact]
+    public void Entity_WithLayer_ProducesTaggedSceneEntity()
+    {
+        var scene = new AuthoredScene { Name = "x" };
+        scene.Items.Add(new AuthoredItem { Kind = AuthoredItemKind.Entity, Model = "models/x.glb", Layer = 7u });
+
+        var def = SceneCompiler.Compile(scene, Loader("models/x.glb"), _ => throw new Xunit.Sdk.XunitException("no prefab"));
+
+        Assert.Equal(7u, Assert.Single(def.Entities).Layer);
+    }
+
+    [Fact]
+    public void Entity_WithoutLayer_IsUntagged()
+    {
+        var scene = new AuthoredScene { Name = "x" };
+        scene.Items.Add(new AuthoredItem { Kind = AuthoredItemKind.Entity, Model = "models/x.glb" });
+
+        var def = SceneCompiler.Compile(scene, Loader("models/x.glb"), _ => throw new Xunit.Sdk.XunitException("no prefab"));
+
+        Assert.Null(Assert.Single(def.Entities).Layer);
+    }
+
+    [Fact]
     public void ToSystem_DriveControl_ResolvesControlledEntity_NoProbeModelLoadNeeded()
     {
         var scene = new AuthoredScene { Name = "x" };

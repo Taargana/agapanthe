@@ -30,11 +30,11 @@ public sealed class WorldSerializationV3Tests
     // --- Version -----------------------------------------------------------------------------------------------
 
     [Fact]
-    public void Save_WritesVersion4()
+    public void Save_WritesVersion5()
     {
         using var world = new GameWorld();
         var bytes = Save(world);
-        Assert.Equal(4u, System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(bytes.AsSpan(4, 4)));
+        Assert.Equal(5u, System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(bytes.AsSpan(4, 4)));
     }
 
     [Fact]
@@ -525,7 +525,7 @@ public sealed class WorldSerializationV3Tests
     // --- Contenu-3a: v3 → v4 in-place upgrade -----------------------------------------------------------------
 
     [Fact]
-    public void Load_UpgradesV3Fixture_ToV4_PreservingAssetIdentity()
+    public void Load_UpgradesV3Fixture_ToCurrentVersion_PreservingAssetIdentity()
     {
         var v3 = File.ReadAllBytes(Path.Combine(AppContext.BaseDirectory, "Fixtures", "world-v3.save"));
         Assert.Equal(3u, System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(v3.AsSpan(4, 4)));
@@ -541,8 +541,8 @@ public sealed class WorldSerializationV3Tests
         Assert.Equal(4, result.EntityCount); // drawable + body + root node + child
 
         var reSaved = Save(world);
-        Assert.Equal(4u, System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(reSaved.AsSpan(4, 4)));
-        Assert.Equal(13u, System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(reSaved.AsSpan(8, 4)));
+        Assert.Equal(5u, System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(reSaved.AsSpan(4, 4)));
+        Assert.Equal(14u, System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(reSaved.AsSpan(8, 4)));
         Assert.Equal(reSaved, Save(world)); // stable
 
         // the "models/helmet" key survived the upgrade into the v4 table

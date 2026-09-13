@@ -117,7 +117,8 @@ internal sealed class LandingChallengeSystem : ISystem
         var spawn = _attractorCenter + (n * (_surfaceRadius + _dropHeight));
         var spec = new ImportedEntitySpec(
             _probeSpec.Mesh, _probeSpec.Material, spawn, _probeSpec.RotationScale,
-            _probeSpec.BoundsCenter, _probeSpec.BoundsRadius, _probeSpec.Order, _probeSpec.Identity); // Contenu-3a: identity
+            _probeSpec.BoundsCenter, _probeSpec.BoundsRadius, _probeSpec.Order, _probeSpec.Identity, // Contenu-3a: identity
+            _probeSpec.Layer); // physics-queries audit finding: keep QueryLayer tag across a runtime respawn too
         _world.SpawnBodyDeferred(in spec, Vector3.Zero, inverseMass: 1f, restitution: 0.4f, radius: _probeRadius);
         _shotsIssued++;
     }

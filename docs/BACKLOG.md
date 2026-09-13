@@ -614,9 +614,16 @@ pas fixe = source de vérité unique (prérequis netcode) — voir §Physique.
   ×3 (chaque app cuit tout `content/` dans son propre `obj/`, à grouper avec la dette d'extraction des targets
   de cook ci-dessous) · garde `Frustum.Normalize` `1e-8` dégrade plus tôt à l'échelle planétaire orthographique
   (requalifie la dette pré-existante §2 ci-dessous, ne l'ajoute pas).
-- **Texte & UI** (§ ci-dessous), audio, **queries physiques** (raycast/formes/layers — aujourd'hui on ne peut même pas
-  demander « qu'y a-t-il sous le curseur ? »), **job system** (tout est mono-thread, `AssertOwnerThread` partout =
-  plafond dur), transparence triée.
+- ~~**Texte & UI**~~ ✅ **CLOS (3/3, S39)** — voir plus bas.
+- ~~**Queries physiques — raycast + layer mask**~~ ✅ **CLOS (S40)** — `GameWorld.TryRaycast`/`RaycastAll` contre
+  tout drawable (composant `Bounds` existant, pas seulement les `RigidBody`), `QueryLayer` optionnel (masque,
+  absent ⇒ `AllLayers`), authoring TOML `layer` (`.agscene` v5→v6), `Camera.ScreenPointToRay` (perspective **et**
+  orthographique — la déviation initiale à un seul cône perspective a été trouvée et corrigée par le double
+  audit) ; démo `Key.F` (crosshair écran-centre — `IWindow` n'expose aucun événement de clic, D6 réinterprété).
+  Spec `docs/plans/2026-09-14-physics-queries-raycast-design.md` §8. **Restent hors scope** (voir item suivant) :
+  queries de formes (sphère/boîte), raycast mesh-accurate, broadphase persistée.
+- Audio, **queries de formes** (sphere/box overlap — scindées des queries physiques, D1), **job system** (tout
+  est mono-thread, `AssertOwnerThread` partout = plafond dur), transparence triée.
 - **Netcode réel** : transport, réplication delta, prediction/reconciliation.
 
 ### Dette `Agapanthe.App` (S30) — à corriger, par échéance

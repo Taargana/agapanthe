@@ -39,7 +39,7 @@ internal static class SceneCompiler
                         ? new SceneBody { Velocity = item.Velocity, InverseMass = item.InverseMass, Restitution = item.Restitution, Radius = item.Radius ?? 1f }
                         : null;
                     var beforeCount = entities.Count;
-                    Place(entities, members, item.Position, item.Rotation, item.Scale, item.CastsShadow, entityBody, loadModel);
+                    Place(entities, members, item.Position, item.Rotation, item.Scale, item.CastsShadow, entityBody, item.Layer, loadModel);
 
                     // Audit finding (3c-3, both csharp-lowlevel and engine-architect, 🟠): `body = true` reads as
                     // "this entity is ONE body" — but Place emits one SceneEntity per (prefab member × mesh), and
@@ -133,7 +133,7 @@ internal static class SceneCompiler
     private static void Place(
         List<SceneEntity> sink, List<Member> members,
         Double3 position, Quaternion rotation, float scale, bool castsShadowOverride,
-        SceneBody? body, Func<AssetKey, ModelAsset> loadModel)
+        SceneBody? body, uint? layer, Func<AssetKey, ModelAsset> loadModel)
     {
         // Contenu-3b audit (engine-architect F3): the instance's rotation/scale must carry the prefab member's
         // LOCAL OFFSET too, not just its own local rotation/scale — otherwise a rotated multi-part prefab instance
@@ -165,6 +165,7 @@ internal static class SceneCompiler
                     Scale = scl,
                     CastsShadow = member.CastsShadow && castsShadowOverride,
                     Body = body,
+                    Layer = layer,
                 });
             }
         }
@@ -184,7 +185,7 @@ internal static class SceneCompiler
             for (var c = 0; c < cols; c++)
             {
                 var offset = new Double3((c - halfC) * spacing, 0, (r - halfR) * spacing);
-                Place(sink, members, item.Position + offset, item.Rotation, item.Scale, item.CastsShadow, body: null, loadModel);
+                Place(sink, members, item.Position + offset, item.Rotation, item.Scale, item.CastsShadow, body: null, layer: null, loadModel);
             }
         }
     }
@@ -233,7 +234,7 @@ internal static class SceneCompiler
                 Restitution = item.Restitution,
                 Radius = radius,
             };
-            Place(sink, members, item.Position + offset, item.Rotation, item.Scale, item.CastsShadow, body, loadModel);
+            Place(sink, members, item.Position + offset, item.Rotation, item.Scale, item.CastsShadow, body, layer: null, loadModel);
         }
 
         static uint Hash(int i)

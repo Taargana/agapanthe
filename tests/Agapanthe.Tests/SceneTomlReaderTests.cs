@@ -718,4 +718,146 @@ public sealed class SceneTomlReaderTests
             File.Delete(path);
         }
     }
+
+    // Physics queries — `layer` on [[entity]] (mirrors `body`/`velocity`'s entity-only restriction).
+
+    [Fact]
+    public void ReadScene_EntityWithLayer_Parses()
+    {
+        var path = TempToml("""
+            name = "x"
+            [[entity]]
+            model = "a"
+            layer = 7
+            """);
+        try
+        {
+            var s = SceneTomlReader.ReadScene(path);
+            var item = Assert.Single(s.Items);
+            Assert.Equal(7u, item.Layer);
+        }
+        finally
+        {
+            File.Delete(path);
+        }
+    }
+
+    [Fact]
+    public void ReadScene_EntityWithoutLayer_IsNull()
+    {
+        var path = TempToml("""
+            name = "x"
+            [[entity]]
+            model = "a"
+            """);
+        try
+        {
+            var s = SceneTomlReader.ReadScene(path);
+            var item = Assert.Single(s.Items);
+            Assert.Null(item.Layer);
+        }
+        finally
+        {
+            File.Delete(path);
+        }
+    }
+
+    [Fact]
+    public void ReadScene_NegativeLayer_Throws()
+    {
+        var path = TempToml("""
+            name = "x"
+            [[entity]]
+            model = "a"
+            layer = -1
+            """);
+        try
+        {
+            Assert.Throws<AssetException>(() => SceneTomlReader.ReadScene(path));
+        }
+        finally
+        {
+            File.Delete(path);
+        }
+    }
+
+    // Audit finding (csharp-lowlevel): layer = 0 is degenerate — QueryLayer.Mask = 0 fails every layerMask
+    // (including AllLayers), so the entity becomes permanently unraycastable. Reject at cook time.
+    [Fact]
+    public void ReadScene_ZeroLayer_Throws()
+    {
+        var path = TempToml("""
+            name = "x"
+            [[entity]]
+            model = "a"
+            layer = 0
+            """);
+        try
+        {
+            var ex = Assert.Throws<AssetException>(() => SceneTomlReader.ReadScene(path));
+            Assert.Contains("layer", ex.Message, StringComparison.Ordinal);
+        }
+        finally
+        {
+            File.Delete(path);
+        }
+    }
+
+    [Fact]
+    public void ReadScene_NonIntegerLayer_Throws()
+    {
+        var path = TempToml("""
+            name = "x"
+            [[entity]]
+            model = "a"
+            layer = 1.5
+            """);
+        try
+        {
+            Assert.Throws<AssetException>(() => SceneTomlReader.ReadScene(path));
+        }
+        finally
+        {
+            File.Delete(path);
+        }
+    }
+
+    [Fact]
+    public void ReadScene_LayerOnGrid_Throws()
+    {
+        var path = TempToml("""
+            name = "x"
+            [[grid]]
+            model = "a"
+            layer = 3
+            """);
+        try
+        {
+            Assert.Throws<AssetException>(() => SceneTomlReader.ReadScene(path));
+        }
+        finally
+        {
+            File.Delete(path);
+        }
+    }
+
+    [Fact]
+    public void ReadScene_LayerOnCluster_Throws()
+    {
+        var path = TempToml("""
+            name = "x"
+            [[cluster]]
+            model = "a"
+            count = 4
+            layer = 3
+            """);
+        try
+        {
+            Assert.Throws<AssetException>(() => SceneTomlReader.ReadScene(path));
+        }
+        finally
+        {
+            File.Delete(path);
+        }
+    }
 }

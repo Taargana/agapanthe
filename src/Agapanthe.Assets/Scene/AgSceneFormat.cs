@@ -23,15 +23,17 @@ namespace Agapanthe.Assets.Scene;
 /// rather than an always-meaningful one (`ProbeModel` on <see cref="SceneSystem"/> defaults to
 /// <see cref="AssetKey.None"/>, key index 0). v5 (Slice-2) adds <see cref="CameraProjection"/>/`orthoWidth`/
 /// `orthoHeight` to the <c>[fixed]</c> camera variant, following the exact same always-serialized convention
-/// `moveSpeed`/`shadowDistance` established in v2. This codebase's precedent for growing a cooked format is a
-/// version bump + drop the old reader entirely (see <c>.agmodel</c> v1→v2) — v1/v2/v3/v4 throw
+/// `moveSpeed`/`shadowDistance` established in v2. v6 (physics queries) adds an optional per-entity layer mask
+/// (<see cref="SceneEntity.Layer"/>) — a flag bit + trailing u32, present only when the entity is tagged, so an
+/// untagged entity (the common case) costs nothing extra. This codebase's precedent for growing a cooked format is a
+/// version bump + drop the old reader entirely (see <c>.agmodel</c> v1→v2) — v1/v2/v3/v4/v5 throw
 /// <see cref="AgSceneException"/> naming a re-cook, not an in-place upgrade.
 /// </para>
 /// </summary>
 public static class AgSceneFormat
 {
     private static ReadOnlySpan<byte> Magic => "AGSC"u8;
-    public const uint Version = 5;
+    public const uint Version = 6;
     private const int ContainerHeaderBytes = 4 + 4 + 4;
     private const long MaxPayloadBytes = 1L << 26; // 64 MiB — a 100×100 grid is ~400 KB before deflate
 
@@ -60,6 +62,8 @@ public static class AgSceneFormat
                 3 => "The .agscene is format v3, which predates the DriveControl scene system (Contenu-3c-3). "
                      + "There is no in-place upgrade — re-run the asset cook.",
                 4 => "The .agscene is format v4, which predates the orthographic camera projection (Slice-2). "
+                     + "There is no in-place upgrade — re-run the asset cook.",
+                5 => "The .agscene is format v5, which predates the physics-queries per-entity layer mask. "
                      + "There is no in-place upgrade — re-run the asset cook.",
                 _ => $"Unsupported .agscene version {version} (this build reads version {Version}).",
             });
@@ -173,6 +177,8 @@ public static class AgSceneFormat
                 };
             }
 
+            uint? layer = (flags & 0b100) != 0 ? r.ReadU32() : null;
+
             entities[e] = new SceneEntity
             {
                 Model = Key(keyIdx),
@@ -183,6 +189,7 @@ public static class AgSceneFormat
                 Scale = scale,
                 CastsShadow = (flags & 0b01) != 0,
                 Body = body,
+                Layer = layer,
             };
         }
 
@@ -378,6 +385,7 @@ public static class AgSceneFormat
             byte flags = 0;
             if (e.CastsShadow) flags |= 0b01;
             if (e.Body is not null) flags |= 0b10;
+            if (e.Layer is not null) flags |= 0b100;
             ms.WriteByte(flags);
             if (e.Body is { } b)
             {
@@ -385,6 +393,11 @@ public static class AgSceneFormat
                 WriteF32(ms, b.Restitution);
                 WriteF32(ms, b.Radius);
                 WriteVector3(ms, b.Velocity);
+            }
+
+            if (e.Layer is { } layer)
+            {
+                WriteU32(ms, layer);
             }
         }
 

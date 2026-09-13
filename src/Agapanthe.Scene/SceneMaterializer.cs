@@ -114,7 +114,8 @@ public static class SceneMaterializer
                 mesh.BoundsCenter,
                 mesh.BoundsRadius,
                 order++,
-                new MeshRefKey(entity.Model, entity.LocalMesh, entity.LocalMat));
+                new MeshRefKey(entity.Model, entity.LocalMesh, entity.LocalMat),
+                layer: entity.Layer);
 
             if (!spawnEntities)
             {

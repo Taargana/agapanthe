@@ -40,4 +40,8 @@ public readonly struct EntityRef : IEquatable<EntityRef>
     public static bool operator ==(EntityRef a, EntityRef b) => a.Equals(b);
 
     public static bool operator !=(EntityRef a, EntityRef b) => !a.Equals(b);
+
+    /// <summary>Debug/log-friendly rendering — <c>Id</c> is <c>internal</c>, so this is the only way an outside
+    /// caller (e.g. a host logging a raycast hit) can name the entity at all.</summary>
+    public override string ToString() => IsNone ? "EntityRef(none)" : $"EntityRef({Id})";
 }

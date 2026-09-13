@@ -194,4 +194,26 @@ public sealed class WorldSerializationTests
         using var ms = new MemoryStream(bytes);
         Assert.Throws<WorldSerializationException>(() => target.Load(ms));
     }
+
+    // Physics queries: QueryLayer round-trip — a dedicated small world, not BuildPopulatedWorld (adding a tagged
+    // entity there would change every other test's byte-identical expectations for no reason).
+    [Fact]
+    public void RoundTrip_PreservesQueryLayerMask()
+    {
+        using var original = new GameWorld();
+        original.SpawnImported(new ImportedEntitySpec(
+            DrawMesh, DrawMaterial, new Double3(1, 2, 3), Matrix4x4.Identity,
+            new Vector3(0.1f, 0.2f, 0.3f), 2.5f, order: 0, new MeshRefKey(DrawKey, 0, 0), layer: 7u));
+        original.SpawnImported(Drawable(new Double3(4, 5, 6), 1)); // untagged sibling — must stay untagged
+
+        var bytes = Save(original);
+        using var restored = Load(bytes);
+
+        // Entities round-trip in GlobalId order (1, 2 here); the tagged one is GlobalId 1.
+        Assert.Equal(7u, restored.GetQueryLayerForTest(new EntityRef(1)));
+        Assert.Null(restored.GetQueryLayerForTest(new EntityRef(2)));
+
+        // Byte-identical re-save (same gate every other round-trip test in this file uses).
+        Assert.Equal(bytes, Save(restored));
+    }
 }

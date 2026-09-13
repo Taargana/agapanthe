@@ -156,4 +156,55 @@ public sealed class Camera
         var view = MathHelpers.LookAt(eyeRelative, eyeRelative + Forward, Vector3.UnitY);
         return new RenderView(origin, eyeRelative, in view, ProjectionMatrix, FovY, AspectRatio, Near, Far);
     }
+
+    /// <summary>
+    /// Physics queries (spec §3.3): builds a world-space <see cref="Ray"/> through a screen-space pixel, using
+    /// this camera's own projection basis (<see cref="FovY"/>/<see cref="AspectRatio"/> for <see
+    /// cref="CameraProjection.Perspective"/>, <see cref="OrthoWidth"/>/<see cref="OrthoHeight"/> for <see
+    /// cref="CameraProjection.Orthographic"/>) — <paramref name="viewportWidth"/>/<paramref name="viewportHeight"/>
+    /// are used ONLY to map the pixel into normalized device coordinates, never to re-derive the projection.
+    /// <b>Caller contract</b> (documented, not validated — matches this project's precedent for caller contracts
+    /// elsewhere): pass the same viewport dimensions this camera's <see cref="AspectRatio"/> was computed from, or
+    /// the ray will be skewed.
+    /// <para>
+    /// <b>Perspective</b>: the ray's direction is built directly from the camera's own basis (<see cref="Right"/>/
+    /// <see cref="Up"/>/<see cref="Forward"/>) rather than by inverting <see cref="ProjectionMatrix"/> —
+    /// algebraically equivalent for a symmetric perspective frustum, and it sidesteps a matrix inversion entirely.
+    /// One origin (the eye) for every screen point; direction varies (converging cone).
+    /// </para>
+    /// <para>
+    /// <b>Orthographic</b> (audit finding, physics-queries: the perspective-only basis construction above produces
+    /// a nonsensical converging cone for an orthographic camera — TopDown, this engine's orthographic app, would
+    /// have silently gotten wrong rays): direction is <see cref="Forward"/> for every screen point (parallel rays,
+    /// no foreshortening — the entire point of Slice-2's orthographic projection); the per-pixel offset instead
+    /// moves the ORIGIN, along <see cref="Right"/>/<see cref="Up"/> scaled by half the ortho view extents.
+    /// </para>
+    /// <para>
+    /// Either way, the origin is widened back to <see cref="Double3"/> world space via <see cref="CreateView"/>'s
+    /// <see cref="RenderView.Origin"/> (the same "narrow, then widen" pattern every other camera-relative
+    /// computation in this engine uses).
+    /// </para>
+    /// </summary>
+    public Ray ScreenPointToRay(Vector2 screenPoint, uint viewportWidth, uint viewportHeight)
+    {
+        var ndcXRaw = (screenPoint.X / viewportWidth * 2f) - 1f;
+        var ndcYRaw = 1f - (screenPoint.Y / viewportHeight * 2f); // screen Y is down, world Y is up
+
+        var view = CreateView();
+        var eye = view.Origin + new Double3(view.EyeRelative);
+
+        if (Projection == CameraProjection.Orthographic)
+        {
+            var halfWidth = OrthoWidth / 2f;
+            var halfHeight = ResolveOrthoHeight() / 2f;
+            var offset = (ndcXRaw * halfWidth * Right) + (ndcYRaw * halfHeight * Up);
+            return new Ray(eye + new Double3(offset), Forward);
+        }
+
+        var halfFovY = MathF.Tan(FovY / 2f);
+        var ndcX = ndcXRaw * AspectRatio * halfFovY;
+        var ndcY = ndcYRaw * halfFovY;
+        var direction = Vector3.Normalize((ndcX * Right) + (ndcY * Up) + Forward);
+        return new Ray(eye, direction);
+    }
 }

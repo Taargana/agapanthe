@@ -77,6 +77,7 @@ public static class ComponentRegistry
             Root<NoShadowCast>();
             Root<InstanceSlot>();
             Root<AssetRef>(); // Contenu-3a — index 12, appended; a MANAGED component (carries an AssetKey string)
+            Root<QueryLayer>(); // Physics queries — index 13, appended
 
             _initialized = true;
         }

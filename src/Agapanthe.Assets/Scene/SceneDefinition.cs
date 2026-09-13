@@ -39,6 +39,11 @@ public sealed record SceneEntity
     public float Scale { get; init; } = 1f;
     public bool CastsShadow { get; init; } = true;
     public SceneBody? Body { get; init; }
+
+    /// <summary>Physics-queries layer mask (optional) — threaded verbatim into
+    /// <c>ImportedEntitySpec.Layer</c> at materialisation. <see langword="null"/> (the default) means untagged
+    /// (<c>GameWorld.AllLayers</c>).</summary>
+    public uint? Layer { get; init; }
 }
 
 public sealed record SceneBody
