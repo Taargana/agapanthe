@@ -63,10 +63,19 @@ public sealed record SceneLight
 
 public enum SceneCameraMode : byte { FrameBounds = 0, Fixed = 1 }
 
+/// <summary>Slice-2 — which projection the camera uses. Its own GPU-free copy mirroring
+/// <c>Agapanthe.Rendering.CameraProjection</c> (this assembly cannot reference Rendering) — same pattern as
+/// every other closed cooked-scene enum. <see cref="Perspective"/> is the default; every scene before
+/// Slice-2 is byte-identical.</summary>
+public enum CameraProjection : byte { Perspective = 0, Orthographic = 1 }
+
 /// <summary>Camera setup. <see cref="SceneCameraMode.Fixed"/> is used starting Contenu-3c: the 3 planet camera
 /// framers' fully-deterministic eye/yaw/pitch/fov/near/far are baked at cook time into a fixed pose, with
 /// <see cref="MoveSpeed"/>/<see cref="ShadowDistance"/> (Fixed-only; 0 = <see cref="SceneCameraMode.FrameBounds"/>
-/// keeps deriving them dynamically from the scene's bounds, as before).</summary>
+/// keeps deriving them dynamically from the scene's bounds, as before). <see cref="Projection"/>/
+/// <see cref="OrthoWidth"/>/<see cref="OrthoHeight"/> (Slice-2, Fixed-only, same always-serialized convention)
+/// let a Fixed camera be orthographic instead of perspective — <c>Agapanthe.App.SceneCameraApplier</c>
+/// (Contenu-3b) copies them onto the live <c>Camera</c>.</summary>
 public sealed record SceneCamera
 {
     public required SceneCameraMode Mode { get; init; }
@@ -81,6 +90,9 @@ public sealed record SceneCamera
     public float Far { get; init; }
     public float MoveSpeed { get; init; }         // Fixed only, Contenu-3c
     public float ShadowDistance { get; init; }    // Fixed only, Contenu-3c
+    public CameraProjection Projection { get; init; } // Fixed only, Slice-2
+    public float OrthoWidth { get; init; }            // Fixed only, Slice-2
+    public float OrthoHeight { get; init; }           // Fixed only, Slice-2
 }
 
 /// <summary><see cref="ProceduralSky"/>/<see cref="Black"/> (Contenu-3c) carry no payload — the client derives

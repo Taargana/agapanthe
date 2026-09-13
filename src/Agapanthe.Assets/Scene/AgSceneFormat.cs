@@ -21,15 +21,17 @@ namespace Agapanthe.Assets.Scene;
 /// kind that spawns nothing, so the `[[system]]` record's probe fields (`probeModelKeyIdx`/`probeLocalMesh`/
 /// `probeLocalMat`/`probeRadius`) are now written/read as a fixed-but-possibly-sentinel head for every kind
 /// rather than an always-meaningful one (`ProbeModel` on <see cref="SceneSystem"/> defaults to
-/// <see cref="AssetKey.None"/>, key index 0). This codebase's precedent for growing a cooked format is a version
-/// bump + drop the old reader entirely (see <c>.agmodel</c> v1→v2) — v1/v2/v3 throw <see cref="AgSceneException"/>
-/// naming a re-cook, not an in-place upgrade.
+/// <see cref="AssetKey.None"/>, key index 0). v5 (Slice-2) adds <see cref="CameraProjection"/>/`orthoWidth`/
+/// `orthoHeight` to the <c>[fixed]</c> camera variant, following the exact same always-serialized convention
+/// `moveSpeed`/`shadowDistance` established in v2. This codebase's precedent for growing a cooked format is a
+/// version bump + drop the old reader entirely (see <c>.agmodel</c> v1→v2) — v1/v2/v3/v4 throw
+/// <see cref="AgSceneException"/> naming a re-cook, not an in-place upgrade.
 /// </para>
 /// </summary>
 public static class AgSceneFormat
 {
     private static ReadOnlySpan<byte> Magic => "AGSC"u8;
-    public const uint Version = 4;
+    public const uint Version = 5;
     private const int ContainerHeaderBytes = 4 + 4 + 4;
     private const long MaxPayloadBytes = 1L << 26; // 64 MiB — a 100×100 grid is ~400 KB before deflate
 
@@ -56,6 +58,8 @@ public static class AgSceneFormat
                 2 => "The .agscene is format v2, which predates the LandingChallenge scene system (Contenu-3c-2). "
                      + "There is no in-place upgrade — re-run the asset cook.",
                 3 => "The .agscene is format v3, which predates the DriveControl scene system (Contenu-3c-3). "
+                     + "There is no in-place upgrade — re-run the asset cook.",
+                4 => "The .agscene is format v4, which predates the orthographic camera projection (Slice-2). "
                      + "There is no in-place upgrade — re-run the asset cook.",
                 _ => $"Unsupported .agscene version {version} (this build reads version {Version}).",
             });
@@ -220,9 +224,31 @@ public static class AgSceneFormat
                 Mode = camMode, FovY = fovY, FreeFly = freeFly,
                 Position = r.ReadDouble3(), Yaw = r.ReadF32(), Pitch = r.ReadF32(), Near = r.ReadF32(), Far = r.ReadF32(),
                 MoveSpeed = r.ReadF32(), ShadowDistance = r.ReadF32(), // v2 (Contenu-3c)
+                Projection = ParseProjection(r.ReadByte()), OrthoWidth = r.ReadF32(), OrthoHeight = r.ReadF32(), // v5 (Slice-2)
             },
             _ => throw new AgSceneException($".agscene camera has unknown mode {(byte)camMode}."),
         };
+
+        static CameraProjection ParseProjection(byte b) => b switch
+        {
+            0 => CameraProjection.Perspective,
+            1 => CameraProjection.Orthographic,
+            _ => throw new AgSceneException($".agscene camera has unknown projection {b}."),
+        };
+
+        // Audit finding (Slice-2, csharp-lowlevel): SceneCompiler validates OrthoWidth/OrthoHeight at cook time,
+        // but that is not a guarantee against a forged/corrupted blob — without this, Orthographic + width<=0
+        // reaches CreateOrthographic(0, …) at runtime and uploads a NaN/Inf projection matrix with no
+        // validation-layer message. OrthoHeight==0 is the valid "derive from aspect ratio" sentinel (Camera);
+        // only a negative/non-finite height is rejected.
+        if (camera.Mode == SceneCameraMode.Fixed && camera.Projection == CameraProjection.Orthographic
+            && (!float.IsFinite(camera.OrthoWidth) || camera.OrthoWidth <= 0f
+                || !float.IsFinite(camera.OrthoHeight) || camera.OrthoHeight < 0f))
+        {
+            throw new AgSceneException(
+                $".agscene camera projection=orthographic has invalid ortho_width/ortho_height "
+                + $"({camera.OrthoWidth}/{camera.OrthoHeight}).");
+        }
 
         var envMode = (SceneEnvironmentMode)r.ReadByte();
         var environment = envMode switch
@@ -398,6 +424,9 @@ public static class AgSceneFormat
             WriteF32(ms, def.Camera.Far);
             WriteF32(ms, def.Camera.MoveSpeed);       // v2 (Contenu-3c)
             WriteF32(ms, def.Camera.ShadowDistance);  // v2 (Contenu-3c)
+            ms.WriteByte((byte)def.Camera.Projection); // v5 (Slice-2)
+            WriteF32(ms, def.Camera.OrthoWidth);
+            WriteF32(ms, def.Camera.OrthoHeight);
         }
 
         ms.WriteByte((byte)def.Environment.Mode);

@@ -7,7 +7,7 @@ using Agapanthe.Scene;
 using Agapanthe.World;
 using Silk.NET.Input;
 
-namespace Sandbox;
+namespace Agapanthe.Platform.App.Systems;
 
 /// <summary>
 /// Contenu-3c-3 — the <see cref="ISceneSystemFactory"/> for <see cref="SceneSystemKind.DriveControl"/>: resolves
@@ -17,19 +17,23 @@ namespace Sandbox;
 /// separately rejects the runtime <c>AGAPANTHE_LOAD</c> combination it can't see — so this index should always
 /// name a spawned entity by the time this runs), then wires exactly the declarative
 /// <see cref="InputMap"/>/<see cref="SimulationHost.SampleInput"/>/<see cref="SimulationHost.ApplyCommand"/>
-/// steering <c>DriveSceneRecipe</c> used to wire by hand: a continuous WASD/Space/C axis-vector move and an
-/// <c>X</c>-key brake edge, scaled by <see cref="SceneSystem.MoveSpeed"/> (was the hardcoded
-/// <c>DriveMoveSpeed</c> constant).
+/// steering the pre-Contenu-3c-3 <c>DriveSceneRecipe</c> used to wire by hand: a continuous WASD/Space/C
+/// axis-vector move and an <c>X</c>-key brake edge, scaled by <see cref="SceneSystem.MoveSpeed"/>.
 /// <para>
-/// The factory itself is stateless (registered once, for the process lifetime, in <c>SandboxGame.SceneSystems</c>
-/// — the same registry-entry contract <c>ProbeDropSystemFactory</c>/<c>LandingChallengeSystemFactory</c> hold)
-/// — the brake-edge latch and the <c>KeyPressed</c> subscription both live on the returned
-/// <see cref="DriveControlSystem"/> instance instead of a factory field (audit finding, 3c-3: a factory field
-/// would accumulate a new subscription and leak stale latched state across a hypothetical future <c>Create</c>
-/// call on the same instance, e.g. an in-process scene reload).
+/// The factory itself is stateless (one instance is safely shared by every scene load — the same
+/// registry-entry contract <c>ProbeDropSystemFactory</c>/<c>LandingChallengeSystemFactory</c> hold) — the
+/// brake-edge latch and the <c>KeyPressed</c> subscription both live on the returned
+/// <see cref="DriveControlSystem"/> instance instead of a factory field (audit finding, Contenu-3c-3: a
+/// factory field would accumulate a new subscription and leak stale latched state across a hypothetical
+/// future <c>Create</c> call on the same instance, e.g. an in-process scene reload).
+/// </para>
+/// <para>
+/// Slice-2: moved here from <c>samples/Sandbox/Systems</c> (made <c>public</c>, was <c>internal</c>) so a
+/// second windowed app (<c>samples/TopDown</c>) can register the same <see cref="SceneSystemKind.DriveControl"/>
+/// factory instead of duplicating it — no behavior change, only visibility and namespace.
 /// </para>
 /// </summary>
-internal sealed class DriveControlSystemFactory : ISceneSystemFactory
+public sealed class DriveControlSystemFactory : ISceneSystemFactory
 {
     private const byte DriveMoveCommandKind = 2;
     private const byte DriveBrakeCommandKind = 3;
@@ -103,10 +107,11 @@ internal sealed class DriveControlSystemFactory : ISceneSystemFactory
     }
 
     // All the actual work happens through the InputMap/SampleInput/ApplyCommand callbacks wired above (driven by
-    // SimulationHost's own input phase) and the KeyPressed brake-edge subscription — DriveSceneRecipe never
-    // needed a per-tick ISystem either; Execute is a no-op that exists only to satisfy ISceneSystemFactory.
-    // Create's return contract and give SceneRecipe something to sim.AddSystem. PendingBrake lives here (not on
-    // the factory) so each Create call gets its own latch, tied to the KeyPressed subscription this same call adds.
+    // SimulationHost's own input phase) and the KeyPressed brake-edge subscription — the pre-3c-3 hand-coded
+    // recipe never needed a per-tick ISystem either; Execute is a no-op that exists only to satisfy
+    // ISceneSystemFactory.Create's return contract and give SceneRecipe something to sim.AddSystem. PendingBrake
+    // lives here (not on the factory) so each Create call gets its own latch, tied to the KeyPressed subscription
+    // that same call adds.
     private sealed class DriveControlSystem : ISystem
     {
         public ulong PendingBrake;

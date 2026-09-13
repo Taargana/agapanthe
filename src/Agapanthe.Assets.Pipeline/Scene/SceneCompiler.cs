@@ -285,18 +285,65 @@ internal static class SceneCompiler
 
     private static SceneCamera ToCamera(AuthoredCamera c) => c.Mode.ToLowerInvariant() switch
     {
-        "frame-bounds" => new SceneCamera
+        "frame-bounds" => BuildFrameBoundsCamera(c),
+        "fixed" => BuildFixedCamera(c),
+        _ => throw new AssetException($"unknown camera mode '{c.Mode}' (frame-bounds|fixed)."),
+    };
+
+    private static SceneCamera BuildFrameBoundsCamera(AuthoredCamera c)
+    {
+        // Audit finding (Slice-2, both csharp-lowlevel and engine-architect): `projection`/`ortho_width`/
+        // `ortho_height` are Fixed-only fields (like MoveSpeed/ShadowDistance) but SceneTomlReader accepts
+        // them on any [camera] block, and this arm used to just drop them on the floor — the same
+        // silently-ignored-key class of bug Contenu-3c-3 closed for `body`/`velocity` leaking onto
+        // [[grid]]/[[cluster]]. Validate (not just ignore) so a typo'd or misplaced projection is a cook
+        // error, not a silent perspective fallback.
+        if (ToProjection(c.Projection) != CameraProjection.Perspective || c.OrthoWidth != 0f || c.OrthoHeight != 0f)
+        {
+            throw new AssetException(
+                "camera mode=frame-bounds does not support 'projection'/'ortho_width'/'ortho_height' — those "
+                + "are Fixed-only fields.");
+        }
+
+        return new SceneCamera
         {
             Mode = SceneCameraMode.FrameBounds, FovY = c.FovY, FreeFly = c.FreeFly,
             ViewDir = c.ViewDir, DistanceMul = (float)c.DistanceMul,
-        },
-        "fixed" => new SceneCamera
+        };
+    }
+
+    private static SceneCamera BuildFixedCamera(AuthoredCamera c)
+    {
+        var projection = ToProjection(c.Projection);
+
+        // Slice-2: an orthographic Fixed camera with a non-positive width would build a degenerate (or
+        // divide-by-zero) projection matrix at runtime — reject at cook time rather than at first frame.
+        // ortho_height=0 is a valid sentinel (audit finding, Slice-2, both csharp-lowlevel and engine-architect):
+        // it means "derive from ortho_width / the runtime AspectRatio", the fix for orthographic having no
+        // automatic aspect correction on window resize the way perspective's FovY+AspectRatio gets for free —
+        // only a negative/non-finite height is rejected.
+        if (projection == CameraProjection.Orthographic
+            && (!float.IsFinite(c.OrthoWidth) || c.OrthoWidth <= 0f || !float.IsFinite(c.OrthoHeight) || c.OrthoHeight < 0f))
+        {
+            throw new AssetException(
+                $"camera projection=orthographic requires a positive finite 'ortho_width' and a non-negative "
+                + $"finite 'ortho_height' (0 = derive from aspect ratio), got {c.OrthoWidth}/{c.OrthoHeight}.");
+        }
+
+        return new SceneCamera
         {
             Mode = SceneCameraMode.Fixed, FovY = c.FovY, FreeFly = c.FreeFly,
             Position = c.Position, Yaw = c.Yaw, Pitch = c.Pitch, Near = c.Near, Far = c.Far,
             MoveSpeed = c.MoveSpeed, ShadowDistance = c.ShadowDistance,
-        },
-        _ => throw new AssetException($"unknown camera mode '{c.Mode}' (frame-bounds|fixed)."),
+            Projection = projection, OrthoWidth = c.OrthoWidth, OrthoHeight = c.OrthoHeight,
+        };
+    }
+
+    private static CameraProjection ToProjection(string p) => p.ToLowerInvariant() switch
+    {
+        "perspective" => CameraProjection.Perspective,
+        "orthographic" => CameraProjection.Orthographic,
+        _ => throw new AssetException($"unknown camera projection '{p}' (perspective|orthographic)."),
     };
 
     // Contenu-3c: hdri/procedural_sky/black are already validated mutually-exclusive by SceneTomlReader.

@@ -64,6 +64,9 @@ internal sealed class AuthoredCamera
     public float Far { get; init; }
     public float MoveSpeed { get; init; }        // Fixed only, Contenu-3c
     public float ShadowDistance { get; init; }   // Fixed only, Contenu-3c
+    public string Projection { get; init; } = "perspective"; // | "orthographic" — Fixed only, Slice-2
+    public float OrthoWidth { get; init; }       // Fixed only, Slice-2
+    public float OrthoHeight { get; init; }      // Fixed only, Slice-2
 }
 
 internal sealed class AuthoredEnvironment

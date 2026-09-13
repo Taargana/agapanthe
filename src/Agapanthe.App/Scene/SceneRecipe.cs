@@ -56,7 +56,7 @@ public sealed class SceneRecipe : ISceneRecipe
         if (result.Physics is { } ps)
         {
             sim.AddSystem(Stage.Simulation, new PhysicsSystem(sim.World, in ps));
-            Log.Info($"Sandbox: [scene '{Name}'] physics — gravity {ps.Gravity}, ground y={ps.GroundY:F2}.");
+            Log.Info($"AppHost: [scene '{Name}'] physics — gravity {ps.Gravity}, ground y={ps.GroundY:F2}.");
         }
 
         if (loadPath is { Length: > 0 })
@@ -68,7 +68,7 @@ public sealed class SceneRecipe : ISceneRecipe
             sim.RequestRestore(rp, SnapshotAllocatorPolicy.AdoptFromHeader);
         }
 
-        Log.Info($"Sandbox: [scene '{Name}'] {sim.World.LiveEntityCount} entities from cooked data.");
+        Log.Info($"AppHost: [scene '{Name}'] {sim.World.LiveEntityCount} entities from cooked data.");
 
         // Contenu-3c: scene systems are a client-only concept (window/camera-coupled) — a headless build must
         // never silently run a partial simulation for a scene that declares one (HeadlessSim's RunScene refuses

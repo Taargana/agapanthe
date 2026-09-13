@@ -863,10 +863,59 @@ Spec : [2026-07-25-vs2-spawn-runtime-newtonian-gravity-design.md](plans/2026-07-
 > procédural réel (Contenu-2b) · nom d'entité→`GlobalId` (D8) · validation `ProbeRadius`/`Every` · scripts de
 > dérivation non committés. **Verdict visuel humain : PASS** (2026-09-12).
 >
-> ### ▶️ Reprise — **2ᵉ slice dissemblable**, ou **UI-3**
-> Le domaine **Contenu est ENTIÈREMENT CLOS**. Alternatives pour la suite : **2ᵉ slice dissemblable** (top-down,
-> prouve l'intégration sur un axe différent du gameplay planétaire) · **UI-3** (timestamps GPU + seam
-> `FrameProfiler`, dette laissée depuis UI-2).
+> ### ✅ **Slice-2 CLOS (S38)** — 2ᵉ slice dissemblable : `samples/TopDown`, caméra orthographique réelle, `Agapanthe.Platform.App` partagé
+> Spec `docs/plans/2026-09-12-slice2-topdown-design.md`, approuvée **4,3/5** (revue scorée séparée, 8/8
+> affirmations factuelles vérifiées contre le code réel ; 1 vrai écart de Consistency trouvé et corrigé dans le
+> spec avant décomposition). Le test de généralité le moins cher du backlog §4quater : une 2ᵉ app délibérément
+> dissemblable (`samples/TopDown`, caméra orthographique fixe overhead sur un diorama plat) pour révéler ce qui
+> était silencieusement câblé en dur pour la forme planétaire/perspective de VS-1/2/3 et tout Contenu-3c.
+>
+> **Livré** : `Camera` gagne une **vraie** projection orthographique (`CameraProjection.Perspective`/
+> `Orthographic`, `MathHelpers.OrthographicVulkanReversed` — dérivation reversed-Z distincte de la perspective
+> car `w=1` constant en orthographique contre `w=z_view` en perspective, prouvée par TDD : la 1ʳᵉ tentative a
+> copié la formule perspective, le test l'a attrapée immédiatement). `.agscene` v4→v5 : `SceneCamera.Fixed`
+> gagne `Projection`/`OrthoWidth`/`OrthoHeight`. `EngineWindowAdapter` + `DriveControlSystemFactory` extraits de
+> Sandbox-`internal` vers un nouveau projet partagé **`src/Agapanthe.Platform.App`** — Sandbox et TopDown
+> référencent désormais les mêmes classes, zéro duplication (vérifié par un déplacement pur : les 8 captures
+> Sandbox restent byte-identiques). Ombres CSM explicitement hors scope (`ShadowFit` suppose un cône
+> perspective, faux pour une boîte orthographique) — `topdown.toml` a `casts_shadow = false` sur ses 4 entités.
+> Caméra fixe overhead, réutilise `DriveControlSystemFactory` tel quel (pas de nouveau système caméra-suit-body).
+>
+> **2 vrais bugs de généralité trouvés en testant live, pas en relisant le code** : `SceneRecipe.cs` (code
+> partagé `Agapanthe.App`, utilisé par toute app) avait `"Sandbox: "` codé en dur dans 2 lignes de log — corrigé
+> en `"AppHost: "`. Le puck de `topdown.toml` n'avait pas `casts_shadow = false` explicite (défaut `true`,
+> violait D3 silencieusement) — corrigé.
+>
+> **Gates** : **854 tests**, 0 warning, capture `topdown` pinned + **verdict visuel humain PASS** (`31ea748d…` —
+> 3 sphères de même rayon rendent en cercles de même taille apparente quelle que soit leur profondeur x/z,
+> preuve qu'il n'y a aucun raccourcissement en perspective), les 8 captures Sandbox re-vérifiées inchangées,
+> `HeadlessSim --scene topdown` → exit 1 confirmé (D9, nomme `DriveControl`), les 3 binaires (Sandbox/TopDown/
+> HeadlessSim) **JIT == NativeAOT** sur toute capture/snapshot, 0 leak / 0 validation partout.
+>
+> **Double audit** : `csharp-lowlevel` **4,3/5** + `engine-architect` **4,2/5**, PASS-with-concerns, **aucun 🔴**
+> — les deux ont vérifié indépendamment et symboliquement la dérivation reversed-Z orthographique (correcte) et
+> le déplacement `Agapanthe.Platform.App` (byte-identique, diff `HEAD` ne montre que namespace/visibilité). **4
+> findings trouvés par les deux et corrigés** : `projection`/`ortho_*` silencieusement ignorés sur une caméra
+> `frame-bounds` (même classe de bug que le `body`/`velocity` fuyant sur `[[grid]]`/`[[cluster]]` fermé en
+> 3c-3) · `Agapanthe.Platform.App` sans entrée d'allowlist statique (`EngineIsHeadlessTests`) alors que sa
+> raison d'être est d'être le seul point de rencontre Platform+App · 2 commentaires périmés nommant le
+> `samples/Sandbox/EngineWindowAdapter` supprimé · l'orthographique n'a aucune correction d'aspect ratio
+> automatique (la perspective l'a gratuitement via `FovY`+`AspectRatio`) — `OrthoHeight = 0` devient la
+> sentinelle « dérive de `OrthoWidth`/`AspectRatio` » (convention `MoveSpeed`/`ShadowDistance`), le hack manuel
+> `ortho_height = 22.5` du TOML disparaît. **1 finding csharp-lowlevel** : `OrthoWidth`/`OrthoHeight` validés au
+> cook seulement, pas au read `.agscene` ni dans `Camera` — un blob forgé ou un `new Camera` nu pouvait produire
+> une matrice NaN/Inf sans message de validation ; gardes symétriques ajoutées. **Dette versée au backlog**
+> (assumée, pas un manque) : le garde-fou D3 (ombres) ne repose que sur une convention TOML sans filet de code
+> · `DriveControl` est maintenant 2 scènes/2 apps refusées par `HeadlessSim` — signal de conception pour le
+> netcode, pas un bug · exposition HDR câblée en dur pour le studio HDRI du Sandbox, aucun champ `.agscene` ·
+> `skybox.vert`/`FreeCameraController` faux en orthographique (mineur, non exercé) · coût de build ×3 (chaque
+> app cuit tout `content/` dans son propre `obj/`) · garde `Frustum.Normalize` `1e-8` dégrade plus tôt à
+> l'échelle planétaire orthographique (requalifie la dette pré-existante, ne l'ajoute pas).
+>
+> ### ▶️ Reprise — **UI-3**, ou autre item du backlog §4quater
+> Le domaine **Contenu** et **Slice-2** sont tous deux CLOS. Prochain candidat naturel : **UI-3** (timestamps
+> GPU + seam `FrameProfiler`, dette laissée depuis UI-2) — sinon voir `BACKLOG.md` §4quater pour les autres
+> items (queries physiques, job system, netcode…).
 >
 > ### Contexte — **Cap moteur** (réorientation S25)
 > **Vertical Slice CLOSE dans son intention** : VS-1 (S22) · VS-2 (S23) · VS-3 (S24) ont prouvé l'intégration

@@ -3,6 +3,11 @@ using Agapanthe.Core;
 
 namespace Agapanthe.Rendering;
 
+/// <summary>Slice-2 — which projection <see cref="Camera.ProjectionMatrix"/> builds. <see cref="Perspective"/>
+/// is the default, byte-identical to every scene before Slice-2. <see cref="Orthographic"/> is the top-down
+/// app's generality test — parallel rays, no foreshortening.</summary>
+public enum CameraProjection { Perspective, Orthographic }
+
 /// <summary>
 /// Free 3D camera. Orientation is stored as yaw/pitch (radians) and turned into a
 /// view matrix on demand.
@@ -51,6 +56,20 @@ public sealed class Camera
     /// <summary>Viewport aspect ratio (width / height).</summary>
     public float AspectRatio { get; set; } = 16f / 9f;
 
+    /// <summary>Slice-2 — which projection <see cref="ProjectionMatrix"/> builds. Default <see cref="CameraProjection.Perspective"/>
+    /// keeps every pre-Slice-2 scene byte-identical.</summary>
+    public CameraProjection Projection { get; set; } = CameraProjection.Perspective;
+
+    /// <summary>Orthographic view width, in world units. Meaningless when <see cref="Projection"/> is <see cref="CameraProjection.Perspective"/>.</summary>
+    public float OrthoWidth { get; set; }
+
+    /// <summary>Orthographic view height, in world units, or <c>0</c> to derive it from <see cref="OrthoWidth"/>
+    /// and <see cref="AspectRatio"/> (audit finding, Slice-2: unlike perspective's FovY+AspectRatio, a fixed
+    /// orthographic height does not auto-correct on window resize — this sentinel, matching the
+    /// <c>MoveSpeed</c>/<c>ShadowDistance</c> "0 = dynamic" convention, is the fix). Meaningless when
+    /// <see cref="Projection"/> is <see cref="CameraProjection.Perspective"/>.</summary>
+    public float OrthoHeight { get; set; }
+
     /// <summary>Unit forward vector derived from yaw/pitch. <c>(0,0,-1)</c> when both are 0.</summary>
     public Vector3 Forward
     {
@@ -70,10 +89,51 @@ public sealed class Camera
     /// <summary>Unit up vector of the camera basis, <c>cross(right, forward)</c>.</summary>
     public Vector3 Up => Vector3.Cross(Right, Forward);
 
-    /// <summary>Vulkan reversed-Z perspective projection (P3-M8): Y flipped, near→1 / far→0. Paired with the D32
-    /// float depth target cleared to 0 and the camera passes' <c>GreaterOrEqual</c> test, it spreads depth precision
-    /// across a planetary near/far range without z-fighting. The shadow pass keeps standard depth (see ShadowFit).</summary>
-    public Matrix4x4 ProjectionMatrix => MathHelpers.PerspectiveVulkanReversed(FovY, AspectRatio, Near, Far);
+    /// <summary>Vulkan reversed-Z projection (P3-M8, Slice-2): Y flipped, near→1 / far→0 regardless of
+    /// <see cref="Projection"/>. Paired with the D32 float depth target cleared to 0 and the camera passes'
+    /// <c>GreaterOrEqual</c> test, it spreads depth precision across a planetary near/far range without
+    /// z-fighting (perspective) or simply keeps near/far ordering correct under that fixed compare op
+    /// (orthographic). The shadow pass keeps standard depth (see ShadowFit).</summary>
+    public Matrix4x4 ProjectionMatrix => Projection switch
+    {
+        CameraProjection.Perspective => MathHelpers.PerspectiveVulkanReversed(FovY, AspectRatio, Near, Far),
+        CameraProjection.Orthographic => MathHelpers.OrthographicVulkanReversed(
+            OrthoWidth, ResolveOrthoHeight(), Near, Far),
+        _ => throw new InvalidOperationException($"unknown projection {Projection}"),
+    };
+
+    // Audit finding (Slice-2, csharp-lowlevel): OrthoWidth/OrthoHeight are cook-time validated (SceneCompiler)
+    // but Camera is public Rendering surface usable outside a cooked scene — a caller leaving OrthoWidth/
+    // OrthoHeight at their 0 default would otherwise reach CreateOrthographic(0, …) and upload a NaN/Inf
+    // matrix with no validation-layer message. Guard here, once, on the same footing as the cook-time reject.
+    private float ResolveOrthoHeight()
+    {
+        if (!float.IsFinite(OrthoWidth) || OrthoWidth <= 0f)
+        {
+            throw new InvalidOperationException(
+                $"orthographic projection requires a positive finite OrthoWidth, got {OrthoWidth}.");
+        }
+
+        if (OrthoHeight == 0f)
+        {
+            if (!float.IsFinite(AspectRatio) || AspectRatio <= 0f)
+            {
+                throw new InvalidOperationException(
+                    $"orthographic projection with OrthoHeight=0 (derive-from-aspect) requires a positive "
+                    + $"finite AspectRatio, got {AspectRatio}.");
+            }
+
+            return OrthoWidth / AspectRatio;
+        }
+
+        if (!float.IsFinite(OrthoHeight) || OrthoHeight < 0f)
+        {
+            throw new InvalidOperationException(
+                $"orthographic projection requires a non-negative finite OrthoHeight, got {OrthoHeight}.");
+        }
+
+        return OrthoHeight;
+    }
 
     /// <summary>
     /// The frame's <see cref="RenderView"/> (M4): the camera-relative origin is this camera's position

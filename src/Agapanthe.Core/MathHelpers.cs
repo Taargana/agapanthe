@@ -59,6 +59,31 @@ public static class MathHelpers
         return m;
     }
 
+    /// <summary>
+    /// Reversed-Z orthographic for Vulkan (Slice-2): like <see cref="OrthographicVulkan"/> but the near plane
+    /// maps to NDC z = 1 and the far plane to z = 0 — matching the engine's pipeline-wide reversed-Z convention
+    /// (<c>ClearDepth = 0f</c> + a <c>GreaterOrEqual</c> depth test, hardcoded for every camera pass). A
+    /// *standard*-depth orthographic matrix under that fixed compare op would silently invert near/far depth
+    /// ordering: a real correctness bug, not one a validation layer would ever surface.
+    /// <para>
+    /// Same idea as <see cref="PerspectiveVulkanReversed"/> (the clip-space transform <c>z → w − z</c>) but a
+    /// <b>different concrete matrix edit</b>, because orthographic's homogeneous <c>w</c> is a constant <c>1</c>
+    /// (<c>M44 = 1</c>, no perspective divide) rather than perspective's <c>w = view z</c> (<c>M44 = 0</c>,
+    /// <c>M34 = 1</c>). With <c>colW = (0,0,0,1)</c> here, <c>colZ' = colW − colZ</c> gives <c>M33' = −M33</c>,
+    /// <c>M43' = 1 − M43</c> — NOT the perspective formula's <c>M33' = −1−M33, M43' = −M43</c>. An earlier draft
+    /// of this method copy-pasted the perspective formula by mistake; <c>OrthographicReversedZProjectionTests</c>
+    /// caught it immediately (near mapped to 0.1, not 1) — exactly why this is proved by test, not asserted from
+    /// hand-derivation.
+    /// </para>
+    /// </summary>
+    public static Matrix4x4 OrthographicVulkanReversed(float width, float height, float near, float far)
+    {
+        var m = OrthographicVulkan(width, height, near, far);
+        m.M33 = -m.M33;
+        m.M43 = 1f - m.M43;
+        return m;
+    }
+
     /// <summary>Right-handed look-at view matrix (System.Numerics convention).</summary>
     public static Matrix4x4 LookAt(Vector3 eye, Vector3 target, Vector3 up)
         => Matrix4x4.CreateLookAt(eye, target, up);

@@ -56,13 +56,22 @@ public sealed class EngineIsHeadlessTests
         "Agapanthe.Core", "Agapanthe.Engine", "Agapanthe.Scene", "Agapanthe.World")]
     // Agapanthe.App milestone: the composition-root layer may reference the whole engine — EXCEPT Agapanthe.Platform.
     // App→Platform would drag Rendering/Graphics/Silk.NET.Vulkan transitively into Platform, a Vulkan-free leaf;
-    // the concrete window is adapted in the application (samples/Sandbox/EngineWindowAdapter), not named here. The
-    // MSBuild cycle only catches half of this (a re-added ProjectReference the compiler elides stays green until
-    // first use) — the same one-commit blind spot MP-0a's static allowlist exists to close.
+    // the concrete window is adapted in Agapanthe.Platform.App (EngineWindowAdapter, moved there in Slice-2 — it
+    // used to live in samples/Sandbox), not named here. The MSBuild cycle only catches half of this (a re-added
+    // ProjectReference the compiler elides stays green until first use) — the same one-commit blind spot MP-0a's
+    // static allowlist exists to close.
     [InlineData(
         "src/Agapanthe.App/Agapanthe.App.csproj",
         "Agapanthe.Assets", "Agapanthe.Core", "Agapanthe.Engine", "Agapanthe.Engine.Render",
         "Agapanthe.Graphics", "Agapanthe.Rendering", "Agapanthe.Scene", "Agapanthe.Ui", "Agapanthe.World")]
+    // Slice-2 (audit finding, both csharp-lowlevel and engine-architect): the one project a Platform reference AND
+    // an App reference can meet without pulling Vulkan into App itself — its entire reason to exist is being that
+    // single meeting point, so it needs the same static gate every other structural project got at its own
+    // milestone (Agapanthe.Scene at Contenu-3b, Agapanthe.App at S30).
+    [InlineData(
+        "src/Agapanthe.Platform.App/Agapanthe.Platform.App.csproj",
+        "Agapanthe.App", "Agapanthe.Assets", "Agapanthe.Core", "Agapanthe.Engine",
+        "Agapanthe.Platform", "Agapanthe.Scene", "Agapanthe.World")]
     public void ProjectFile_ReferencesExactlyTheAllowedProjects(string relativePath, params string[] allowed)
     {
         var csproj = Path.Combine(RepositoryRoot(), relativePath.Replace('/', Path.DirectorySeparatorChar));

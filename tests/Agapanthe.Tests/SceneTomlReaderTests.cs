@@ -553,6 +553,57 @@ public sealed class SceneTomlReaderTests
         }
     }
 
+    [Fact]
+    public void ReadScene_ParsesOrthographicProjection()
+    {
+        var path = TempToml("""
+            name = "x"
+            [[entity]]
+            model = "a"
+            [camera]
+            mode = "fixed"
+            position = [0.0, 50.0, 0.0]
+            pitch = -1.5708
+            fov_y = 60.0
+            projection = "orthographic"
+            ortho_width = 40.0
+            ortho_height = 30.0
+            """);
+        try
+        {
+            var s = SceneTomlReader.ReadScene(path);
+            Assert.Equal("orthographic", s.Camera.Projection);
+            Assert.Equal(40.0f, s.Camera.OrthoWidth);
+            Assert.Equal(30.0f, s.Camera.OrthoHeight);
+        }
+        finally
+        {
+            File.Delete(path);
+        }
+    }
+
+    [Fact]
+    public void ReadScene_CameraProjectionDefaultsToPerspective()
+    {
+        var path = TempToml("""
+            name = "x"
+            [[entity]]
+            model = "a"
+            [camera]
+            mode = "fixed"
+            position = [0.0, 0.0, 10.0]
+            """);
+        try
+        {
+            var s = SceneTomlReader.ReadScene(path);
+            Assert.Equal("perspective", s.Camera.Projection);
+        }
+        finally
+        {
+            File.Delete(path);
+        }
+    }
+
     [Theory]
     [InlineData("procedural_sky = true")]
     [InlineData("black = true")]

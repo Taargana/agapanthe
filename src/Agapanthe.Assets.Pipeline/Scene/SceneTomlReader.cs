@@ -25,7 +25,7 @@ internal static class SceneTomlReader
     private static readonly string[] CameraKeys =
     [
         "mode", "fov_y", "free_fly", "view_dir", "distance_mul", "position", "yaw", "pitch", "near", "far",
-        "move_speed", "shadow_distance",
+        "move_speed", "shadow_distance", "projection", "ortho_width", "ortho_height",
     ];
     private static readonly string[] EnvironmentKeys = ["hdri", "procedural_sky", "black"];
     private static readonly string[] PhysicsKeys = ["gravity", "ground_y", "mu", "attractor_center", "surface_radius"];
@@ -297,6 +297,9 @@ internal static class SceneTomlReader
             Far = (float)(NumOpt(t, "far", path) ?? 0.0),
             MoveSpeed = (float)(NumOpt(t, "move_speed", path) ?? 0.0),
             ShadowDistance = (float)(NumOpt(t, "shadow_distance", path) ?? 0.0),
+            Projection = Str(t, "projection", path) ?? "perspective",
+            OrthoWidth = (float)(NumOpt(t, "ortho_width", path) ?? 0.0),
+            OrthoHeight = (float)(NumOpt(t, "ortho_height", path) ?? 0.0),
         };
     }
 

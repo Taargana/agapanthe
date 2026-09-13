@@ -1,5 +1,6 @@
 using Agapanthe.App;
 using Agapanthe.Platform;
+using Agapanthe.Platform.App;
 using Sandbox;
 
 // Sandbox — the engine's reference application and integration test bed.

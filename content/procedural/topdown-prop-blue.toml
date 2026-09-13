@@ -1,0 +1,9 @@
+# Slice-2 — a small static prop for the topdown diorama (visually distinct from the orange puck).
+generator = "uv_sphere"
+radius = 2.0
+segments = 24
+rings = 12
+base_color = [0.15, 0.35, 0.95, 1.0]
+metallic = 0.1
+roughness = 0.5
+name = "TopDownPropBlue"

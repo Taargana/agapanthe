@@ -4,15 +4,19 @@ using Agapanthe.Platform;
 using Silk.NET.Core.Contexts;
 using Silk.NET.Input;
 
-namespace Sandbox;
+namespace Agapanthe.Platform.App;
 
 /// <summary>
 /// Adapts the concrete <see cref="EngineWindow"/> (GLFW/Silk, in <c>Agapanthe.Platform</c>) to
 /// <see cref="IWindow"/> (in <c>Agapanthe.App</c>). It lives here — not in either project — because it is the one
 /// place both are referenced; this keeps <c>Agapanthe.App</c> free of a <c>Platform</c> reference, so
 /// <c>Platform</c> stays a Vulkan-free leaf. Pure forwarding, no behaviour.
+/// <para>
+/// Slice-2: moved here from <c>samples/Sandbox</c> (made <c>public</c>, was <c>internal</c>) so a second
+/// windowed app (<c>samples/TopDown</c>) does not have to duplicate it — the whole point of this project.
+/// </para>
 /// </summary>
-internal sealed class EngineWindowAdapter(EngineWindow inner) : IWindow
+public sealed class EngineWindowAdapter(EngineWindow inner) : IWindow
 {
     public event Action? Loaded
     {

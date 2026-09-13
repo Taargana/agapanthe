@@ -570,4 +570,97 @@ public sealed class SceneCompilerTests
 
         Assert.Equal(new Double3(1000, 0, 0), def.WorldOrigin);
     }
+
+    [Fact]
+    public void ToCamera_Fixed_Orthographic_CompilesProjectionAndDimensions()
+    {
+        var scene = new AuthoredScene
+        {
+            Name = "x",
+            Camera = new AuthoredCamera
+            {
+                Mode = "fixed", Position = new Double3(0, 50, 0), Pitch = -1.5708f, FovY = 60f,
+                Projection = "orthographic", OrthoWidth = 40f, OrthoHeight = 30f,
+            },
+        };
+        scene.Items.Add(new AuthoredItem { Kind = AuthoredItemKind.Entity, Model = "models/x.glb" });
+
+        var def = SceneCompiler.Compile(scene, Loader("models/x.glb"), _ => throw new Xunit.Sdk.XunitException("no prefab"));
+
+        Assert.Equal(SceneCameraMode.Fixed, def.Camera.Mode);
+        Assert.Equal(CameraProjection.Orthographic, def.Camera.Projection);
+        Assert.Equal(40f, def.Camera.OrthoWidth);
+        Assert.Equal(30f, def.Camera.OrthoHeight);
+    }
+
+    [Fact]
+    public void ToCamera_Fixed_DefaultProjection_IsPerspective()
+    {
+        var scene = new AuthoredScene { Name = "x", Camera = new AuthoredCamera { Mode = "fixed", Position = new Double3(0, 0, 10) } };
+        scene.Items.Add(new AuthoredItem { Kind = AuthoredItemKind.Entity, Model = "models/x.glb" });
+
+        var def = SceneCompiler.Compile(scene, Loader("models/x.glb"), _ => throw new Xunit.Sdk.XunitException("no prefab"));
+
+        Assert.Equal(CameraProjection.Perspective, def.Camera.Projection);
+    }
+
+    [Fact]
+    public void ToCamera_UnknownProjection_Throws()
+    {
+        var scene = new AuthoredScene { Name = "x", Camera = new AuthoredCamera { Mode = "fixed", Projection = "isometric" } };
+        scene.Items.Add(new AuthoredItem { Kind = AuthoredItemKind.Entity, Model = "models/x.glb" });
+
+        Assert.Throws<AssetException>(() => SceneCompiler.Compile(
+            scene, Loader("models/x.glb"), _ => throw new Xunit.Sdk.XunitException("no prefab")));
+    }
+
+    [Theory]
+    [InlineData(0f, 30f)]
+    [InlineData(-1f, 30f)]
+    [InlineData(40f, -1f)]
+    public void ToCamera_Orthographic_InvalidDimensions_Throws(float width, float height)
+    {
+        var scene = new AuthoredScene
+        {
+            Name = "x",
+            Camera = new AuthoredCamera { Mode = "fixed", Projection = "orthographic", OrthoWidth = width, OrthoHeight = height },
+        };
+        scene.Items.Add(new AuthoredItem { Kind = AuthoredItemKind.Entity, Model = "models/x.glb" });
+
+        Assert.Throws<AssetException>(() => SceneCompiler.Compile(
+            scene, Loader("models/x.glb"), _ => throw new Xunit.Sdk.XunitException("no prefab")));
+    }
+
+    [Fact]
+    public void ToCamera_Orthographic_ZeroHeight_IsAValidDeriveFromAspectSentinel()
+    {
+        // Audit finding (Slice-2, both csharp-lowlevel and engine-architect): ortho_height=0 means "derive from
+        // ortho_width / the runtime aspect ratio" (Camera.ResolveOrthoHeight) — it must compile, not throw.
+        var scene = new AuthoredScene
+        {
+            Name = "x",
+            Camera = new AuthoredCamera { Mode = "fixed", Projection = "orthographic", OrthoWidth = 40f, OrthoHeight = 0f },
+        };
+        scene.Items.Add(new AuthoredItem { Kind = AuthoredItemKind.Entity, Model = "models/x.glb" });
+
+        var def = SceneCompiler.Compile(scene, Loader("models/x.glb"), _ => throw new Xunit.Sdk.XunitException("no prefab"));
+
+        Assert.Equal(0f, def.Camera.OrthoHeight);
+    }
+
+    [Fact]
+    public void ToCamera_FrameBounds_RejectsNonDefaultProjectionFields()
+    {
+        // Audit finding (Slice-2, both csharp-lowlevel and engine-architect): projection/ortho_width/ortho_height
+        // are Fixed-only fields — frame-bounds used to silently drop them instead of rejecting.
+        var scene = new AuthoredScene
+        {
+            Name = "x",
+            Camera = new AuthoredCamera { Mode = "frame-bounds", Projection = "orthographic" },
+        };
+        scene.Items.Add(new AuthoredItem { Kind = AuthoredItemKind.Entity, Model = "models/x.glb" });
+
+        Assert.Throws<AssetException>(() => SceneCompiler.Compile(
+            scene, Loader("models/x.glb"), _ => throw new Xunit.Sdk.XunitException("no prefab")));
+    }
 }

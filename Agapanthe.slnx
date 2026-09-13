@@ -2,6 +2,7 @@
   <Folder Name="/samples/">
     <Project Path="samples/HeadlessSim/HeadlessSim.csproj" />
     <Project Path="samples/Sandbox/Sandbox.csproj" />
+    <Project Path="samples/TopDown/TopDown.csproj" />
   </Folder>
   <Folder Name="/src/">
     <Project Path="src/Agapanthe.App/Agapanthe.App.csproj" />
@@ -12,6 +13,7 @@
     <Project Path="src/Agapanthe.Engine.Render/Agapanthe.Engine.Render.csproj" />
     <Project Path="src/Agapanthe.Graphics/Agapanthe.Graphics.csproj" />
     <Project Path="src/Agapanthe.Platform/Agapanthe.Platform.csproj" />
+    <Project Path="src/Agapanthe.Platform.App/Agapanthe.Platform.App.csproj" />
     <Project Path="src/Agapanthe.Rendering/Agapanthe.Rendering.csproj" />
     <Project Path="src/Agapanthe.Scene/Agapanthe.Scene.csproj" />
     <Project Path="src/Agapanthe.Ui/Agapanthe.Ui.csproj" />

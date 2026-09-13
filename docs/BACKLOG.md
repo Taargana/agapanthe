@@ -483,8 +483,13 @@ pas fixe = source de vérité unique (prérequis netcode) — voir §Physique.
     (`AssetKind.Environment` déjà réservé, `AssetCatalog.LoadEnvironment`, `.agenv`) ; **décodeur RGBE maison** (~60 l)
     pour migrer `HdrImageLoader` dans `Pipeline` et sortir `StbImageSharp` du runtime — même geste que faire entrer
     l'HDR dans le manifest. `HostOptions.VerifyContentHashes` (le `contentHash[32]` du manifest est écrit/shippé,
-    pas encore lu). Extraction des ~170 l de targets de cook de `Sandbox.csproj` → `build/Agapanthe.Cook.targets`
-    (à l'app n°2, même déclencheur que la dette `EngineWindowAdapter`).
+    pas encore lu). Extraction des ~170 l de targets shader-precompile/font-cook de `Sandbox.csproj` →
+    un `.targets` partagé — **l'app n°2 est arrivée (Slice-2, S38) et la décision a été de dupliquer, pas
+    d'extraire** (D6, spec Slice-2 : « extraction MSBuild-infrastructure avec son propre risque, hors scope
+    d'une slice de généralité »). `TopDown.csproj` duplique ces targets depuis `Sandbox.csproj` verbatim ; seul
+    `build/Agapanthe.Cook.targets` (assets) était déjà partagé et reste tel quel. La dette persiste donc, avec
+    un déclencheur plus concret : **coût de build ×3** (chaque app cuit tout `content/` dans son propre `obj/`,
+    audit Slice-2) — à trancher à l'app n°3.
   - **Séparation géométrie / images du blob `.agmodel`** — aujourd'hui `DamagedHelmet.glb` (3,7 Mo source) →
     `.agmodel` **21 Mo** (RGBA8 décodé, Deflate ~inefficace sur de la photo), ratio **structurel** ~×6. Un serveur
     dédié ship et lit des Mo de pixels qu'il n'upload jamais. **Groupé avec BC7/BC5** (compression bloc GPU — jalon
@@ -580,8 +585,26 @@ pas fixe = source de vérité unique (prérequis netcode) — voir §Physique.
       d'un chemin d'exercice GPU réel pour re-garder le leak de descripteurs qu'`AGAPANTHE_UNLOAD_TEST`
       fermait, idéalement au reload de scène de 3c.
   - Puis définitions **data-driven** (items/recettes = données, pas du code — prérequis du Stardew-like).
-- **La 2ᵉ slice, dissemblable** : une mini-slice top-down/orthographique. **Le moteur, c'est ce qui est commun aux deux.**
-  Test de généralité le moins cher qui existe ; exposera violemment tout ce qui est hardcodé pour l'échelle planétaire.
+- ~~**La 2ᵉ slice, dissemblable** : une mini-slice top-down/orthographique.~~ ✅ **LIVRÉ (Slice-2, S38)** — spec
+  `plans/2026-09-12-slice2-topdown-design.md` (4,3/5). `samples/TopDown` (2ᵉ app séparée, réutilise
+  `AppHost`/`IGame`/`SceneRecipe` intégralement) ; `Camera` gagne une vraie projection orthographique
+  (`CameraProjection`, `MathHelpers.OrthographicVulkanReversed`) ; `.agscene` v4→v5 ; `EngineWindowAdapter` +
+  `DriveControlSystemFactory` extraits vers `src/Agapanthe.Platform.App` (partagé Sandbox/TopDown, zéro
+  duplication — solde la dette `EngineWindowAdapter` ci-dessous). **2 vrais bugs de généralité trouvés en
+  testant live** : `"Sandbox: "` codé en dur dans 2 lignes de log de `SceneRecipe.cs` (code partagé) ; le puck de
+  la scène topdown sans `casts_shadow=false` explicite (défaut `true`, violait D3 silencieusement). Double audit
+  ×2 (4,3/4,2) PASS-with-concerns, aucun 🔴, 4 findings dupliqués corrigés (voir `AVANCEMENT.md` pour le détail).
+  **Dette laissée** (assumée, pas un manque) : le garde-fou D3 (ombres CSM hors scope) ne repose que sur une
+  convention TOML sans filet de code — un cook-time reject serait plus sûr, décision différée · `DriveControl`
+  est désormais 2 scènes/2 apps refusées par `HeadlessSim` — **signal de conception pour le netcode** : un
+  corps pilotable est le cas d'usage canonique d'un serveur autoritaire, et le modèle actuel dit « cette scène
+  n'existe pas côté serveur » ; la distinction manquante est entre *le système* (client, échantillonne un
+  clavier) et *la déclaration de scène* (« l'entité N est pilotable », parfaitement sim-side) · exposition HDR
+  câblée en dur pour le studio HDRI du Sandbox, aucun champ `.agscene` ne permet à une scène d'en authorer une ·
+  `skybox.vert`/`FreeCameraController` faux en orthographique (mineur, non exercé aujourd'hui) · coût de build
+  ×3 (chaque app cuit tout `content/` dans son propre `obj/`, à grouper avec la dette d'extraction des targets
+  de cook ci-dessous) · garde `Frustum.Normalize` `1e-8` dégrade plus tôt à l'échelle planétaire orthographique
+  (requalifie la dette pré-existante §2 ci-dessous, ne l'ajoute pas).
 - **Texte & UI** (§ ci-dessous), audio, **queries physiques** (raycast/formes/layers — aujourd'hui on ne peut même pas
   demander « qu'y a-t-il sous le curseur ? »), **job system** (tout est mono-thread, `AssertOwnerThread` partout =
   plafond dur), transparence triée.
@@ -592,19 +615,16 @@ pas fixe = source de vérité unique (prérequis netcode) — voir §Physique.
 *Aucune n'est bloquante ; le double audit signe PASS. Le 🔴 exit-code + tous les 🟠/🟡 contenables ont été
 corrigés avant clôture ; ce qui suit reste, avec l'accord explicite des deux auditeurs.*
 
-- **`SceneContext` indissociablement client — la plus importante.** Les 10 membres sont `required` et
-  non-nullables (`Device`, `Renderer`, `Camera`, `Window`…) → une `ISceneRecipe` **ne se construit pas sans GPU
-  ni fenêtre**, et `samples/HeadlessSim` continue de bâtir son monde à la main : le contrat de scène partage
-  **zéro** code de peuplement entre client et serveur, alors que c'était son premier bénéfice attendu. Symptôme :
-  `LandingChallengeSystem` est un `ISystem` en `PostSimulation` (moitié headless) qui **tient un `IWindow`** pour
-  écrire le titre — logique de jeu qui ne tourne pas sans présentation.
-  **Fix** : scinder `SceneContext` en un noyau simulation (`World`, `Orchestrator`/`Simulation`, `Args`, options)
-  + un volet présentation optionnel. **Mord au moment de la 2ᵉ slice dissemblable et de `RunDedicatedServer`.**
-- **`EngineWindowAdapter` (~75 l) à recopier par toute 2ᵉ application.** C'est du glue moteur générique
-  (forwarding pur `EngineWindow` → `IWindow`), pas du Sandbox. **Fix** : projet `src/Agapanthe.Platform.App`
-  (réf. Platform + App, un fichier) **quand l'app n°2 arrive** — prématuré aujourd'hui. *(La couverture partielle
-  est en place : `IWindowSurfaceTests` assère que `IWindow` reste un sous-ensemble de `EngineWindow` par
-  réflexion, et qu'`EngineWindow` n'implémente jamais `IWindow` directement.)*
+- ~~**`SceneContext` indissociablement client — la plus importante.**~~ ✅ **RÉSOLU (Contenu-3a, S33)**, tenue
+  confirmée par Slice-2 (S38) : la scission `SimSceneContext` (headless-safe)/`PresentationSceneContext`
+  (nullable) n'a nécessité **aucune modification** pour la 2ᵉ app — `DriveControlSystemFactory.Create` prend un
+  `PresentationSceneContext` non-nullable et ne touche que `presentation.Window`, `SceneRecipe`/
+  `SceneMaterializer` sont restés intouchés. C'est exactement le test que « mord au moment de la 2ᵉ slice » était
+  censé faire, et il a tenu silencieusement (confirmé par l'audit `engine-architect` de Slice-2).
+- ~~**`EngineWindowAdapter` (~75 l) à recopier par toute 2ᵉ application.**~~ ✅ **LIVRÉ (Slice-2, S38)** —
+  `src/Agapanthe.Platform.App` (réf. Platform + App), `EngineWindowAdapter` **et** `DriveControlSystemFactory`
+  déplacés verbatim, `Sandbox` et `TopDown` référencent tous deux le même projet. *(`IWindowSurfaceTests`
+  continue d'asserter que `IWindow` reste un sous-ensemble de `EngineWindow` par réflexion.)*
 - **Helpers génériques restés dans le Sandbox** (`Cameras/SandboxCameras`, `Content/ModelContent` :
   `FrameCamera`, `SetupLights`, `NarrowBounds`, `BuildGroundModel`, `BuildSkyEnvironment`,
   `RecipeInput.WireFreeFly`). Rien de spécifique au Sandbox → une 2ᵉ app les copie. **Fix** : remonter dans

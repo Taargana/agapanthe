@@ -56,6 +56,21 @@ public static class SceneCameraApplier
                 renderer.ShadowDistance = scene.ShadowDistance;
             }
 
+            // Slice-2: Agapanthe.Assets.Scene.CameraProjection (this cooked DTO, GPU-free) and
+            // Agapanthe.Rendering.CameraProjection (the live Camera, Rendering-side) are deliberately two
+            // distinct enums — Assets cannot reference Rendering — so the mapping is explicit, not a cast.
+            // Always applied (not sentinel-gated like MoveSpeed/ShadowDistance above): SceneCamera.Projection
+            // defaults to Perspective when a scene doesn't author one, which re-asserts Camera's own default —
+            // harmless, and OrthoWidth/OrthoHeight are simply unused whenever Projection stays Perspective.
+            camera.Projection = scene.Projection switch
+            {
+                Agapanthe.Assets.Scene.CameraProjection.Perspective => Agapanthe.Rendering.CameraProjection.Perspective,
+                Agapanthe.Assets.Scene.CameraProjection.Orthographic => Agapanthe.Rendering.CameraProjection.Orthographic,
+                _ => throw new InvalidOperationException($"unknown scene camera projection {scene.Projection}"),
+            };
+            camera.OrthoWidth = scene.OrthoWidth;
+            camera.OrthoHeight = scene.OrthoHeight;
+
             return;
         }
 

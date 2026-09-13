@@ -7,7 +7,8 @@ namespace Agapanthe.App;
 /// <summary>
 /// The windowing + input surface <see cref="AppHost"/> needs, decoupled from the concrete backend (GLFW/Silk).
 /// It is a 1:1 projection of <c>Agapanthe.Platform.EngineWindow</c>'s public surface — the application adapts the
-/// concrete window to this interface (<c>samples/Sandbox/EngineWindowAdapter</c>) so that
+/// concrete window to this interface (<c>Agapanthe.Platform.App.EngineWindowAdapter</c>, shared by every windowed
+/// app since Slice-2 — it used to live in <c>samples/Sandbox</c>) so that
 /// <see cref="AppHost"/> — and every <see cref="ISceneRecipe"/> — never names a platform type.
 /// <para>
 /// It deliberately exposes <see cref="Key"/> and the opaque <see cref="IVkSurface"/>: neither is a Vulkan type,

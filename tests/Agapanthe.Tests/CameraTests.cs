@@ -253,4 +253,55 @@ public class CameraTests
 
         Assert.Equal(new Double3(1, 2, 3), camera.Position);
     }
+
+    [Fact]
+    public void ProjectionMatrix_DefaultsToPerspective_ByteIdenticalToBeforeSlice2()
+    {
+        // Regression: every scene before Slice-2 relied on Camera defaulting to a perspective projection —
+        // Projection must default to Perspective so ProjectionMatrix keeps producing PerspectiveVulkanReversed.
+        var camera = new Camera { FovY = MathF.PI / 3f, AspectRatio = 16f / 9f, Near = 0.1f, Far = 1000f };
+
+        Assert.Equal(CameraProjection.Perspective, camera.Projection);
+        Assert.Equal(
+            MathHelpers.PerspectiveVulkanReversed(camera.FovY, camera.AspectRatio, camera.Near, camera.Far),
+            camera.ProjectionMatrix);
+    }
+
+    [Fact]
+    public void ProjectionMatrix_Orthographic_UsesOrthographicVulkanReversed()
+    {
+        var camera = new Camera
+        {
+            Projection = CameraProjection.Orthographic, OrthoWidth = 40f, OrthoHeight = 30f, Near = 0.1f, Far = 200f,
+        };
+
+        Assert.Equal(
+            MathHelpers.OrthographicVulkanReversed(camera.OrthoWidth, camera.OrthoHeight, camera.Near, camera.Far),
+            camera.ProjectionMatrix);
+    }
+
+    [Fact]
+    public void ProjectionMatrix_Orthographic_ZeroHeight_DerivesFromWidthAndAspectRatio()
+    {
+        // Audit finding (Slice-2, both csharp-lowlevel and engine-architect): a fixed OrthoHeight does not
+        // auto-correct on window resize the way perspective's FovY+AspectRatio does — OrthoHeight=0 is the
+        // "derive dynamically" sentinel, matching the MoveSpeed/ShadowDistance convention.
+        var camera = new Camera
+        {
+            Projection = CameraProjection.Orthographic,
+            OrthoWidth = 40f, OrthoHeight = 0f, AspectRatio = 16f / 9f, Near = 0.1f, Far = 200f,
+        };
+
+        Assert.Equal(
+            MathHelpers.OrthographicVulkanReversed(40f, 40f / (16f / 9f), camera.Near, camera.Far),
+            camera.ProjectionMatrix);
+    }
+
+    [Fact]
+    public void ProjectionMatrix_Orthographic_NonPositiveWidth_Throws()
+    {
+        var camera = new Camera { Projection = CameraProjection.Orthographic, OrthoWidth = 0f, OrthoHeight = 30f };
+
+        Assert.Throws<InvalidOperationException>(() => camera.ProjectionMatrix);
+    }
 }

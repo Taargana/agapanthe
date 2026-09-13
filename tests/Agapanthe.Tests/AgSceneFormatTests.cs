@@ -225,6 +225,135 @@ public sealed class AgSceneFormatTests
     }
 
     [Fact]
+    public void Read_RejectsV4WithARecookMessage()
+    {
+        var bytes = Write(Sample());
+        BinaryPrimitives.WriteUInt32LittleEndian(bytes.AsSpan(4, 4), 4);
+        var ex = Assert.Throws<AgSceneException>(() => AgSceneFormat.Read(bytes));
+        Assert.Contains("re-run the asset cook", ex.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void RoundTrip_OrthographicFixedCamera()
+    {
+        // Slice-2: the [fixed] camera variant gains Projection/OrthoWidth/OrthoHeight, always serialized
+        // (same convention as MoveSpeed/ShadowDistance).
+        var d = Sample() with
+        {
+            Camera = new SceneCamera
+            {
+                Mode = SceneCameraMode.Fixed, FovY = 60f, Position = new Double3(0, 50, 0), Yaw = 0f, Pitch = -1.5708f,
+                Near = 0.1f, Far = 200f, MoveSpeed = 0f, ShadowDistance = 0f,
+                Projection = CameraProjection.Orthographic, OrthoWidth = 40f, OrthoHeight = 30f,
+            },
+        };
+        var bytes = Write(d);
+        var restored = AgSceneFormat.Read(bytes);
+
+        Assert.Equal(bytes, Write(restored));
+        Assert.Equal(CameraProjection.Orthographic, restored.Camera.Projection);
+        Assert.Equal(40f, restored.Camera.OrthoWidth);
+        Assert.Equal(30f, restored.Camera.OrthoHeight);
+    }
+
+    [Fact]
+    public void RoundTrip_PerspectiveFixedCamera_DefaultsProjectionToPerspective()
+    {
+        var d = Sample() with
+        {
+            Camera = new SceneCamera
+            {
+                Mode = SceneCameraMode.Fixed, FovY = 70f, Position = new Double3(0, 0, 10), Yaw = 0f, Pitch = 0f,
+                Near = 1f, Far = 1000f, MoveSpeed = 20f, ShadowDistance = 1f,
+            },
+        };
+        var bytes = Write(d);
+        var restored = AgSceneFormat.Read(bytes);
+
+        Assert.Equal(CameraProjection.Perspective, restored.Camera.Projection);
+        Assert.Equal(0f, restored.Camera.OrthoWidth);
+        Assert.Equal(0f, restored.Camera.OrthoHeight);
+    }
+
+    [Fact]
+    public void Read_RejectsUnknownProjectionByte()
+    {
+        // Crafts a minimal hostile raw payload (mirrors Read_RejectsForgedEntityCount_BeyondWhatRemainingBytesCouldHold's
+        // pattern) with a Fixed camera whose projection byte is neither 0 (Perspective) nor 1 (Orthographic).
+        using var ms = new MemoryStream();
+        Span<byte> u32 = stackalloc byte[4];
+        ms.Write(new byte[2]);                                           // name length 0
+        ms.Write(new byte[24]);                                          // worldOrigin
+        BinaryPrimitives.WriteUInt32LittleEndian(u32, 1); ms.Write(u32);  // keyCount = 1 (sentinel only)
+        ms.Write(new byte[2]);                                           // sentinel string length 0
+        BinaryPrimitives.WriteUInt32LittleEndian(u32, 0); ms.Write(u32);  // entityCount = 0
+        BinaryPrimitives.WriteUInt32LittleEndian(u32, 0); ms.Write(u32);  // lightCount = 0
+        ms.Write(new byte[12]);                                          // ambient (Vector3)
+        ms.WriteByte((byte)SceneCameraMode.Fixed);
+        WriteF32(ms, 60f);                                               // fovY
+        ms.WriteByte(0);                                                 // freeFly = false
+        ms.Write(new byte[24]);                                          // position (Double3)
+        WriteF32(ms, 0f); WriteF32(ms, 0f);                              // yaw, pitch
+        WriteF32(ms, 0.1f); WriteF32(ms, 200f);                          // near, far
+        WriteF32(ms, 0f); WriteF32(ms, 0f);                              // moveSpeed, shadowDistance
+        ms.WriteByte(99);                                                // projection = 99 (forged, unknown)
+        WriteF32(ms, 0f); WriteF32(ms, 0f);                              // orthoWidth, orthoHeight
+        ms.WriteByte((byte)SceneEnvironmentMode.None);
+        ms.WriteByte(0);                                                 // physics.present = false
+        ms.WriteByte(0);                                                 // restore.present = false
+        BinaryPrimitives.WriteUInt32LittleEndian(u32, 0); ms.Write(u32); // systemCount = 0
+
+        Assert.Throws<AgSceneException>(() => AgSceneFormat.Read(Container(ms.ToArray())));
+
+        static void WriteF32(Stream s, float v)
+        {
+            Span<byte> b = stackalloc byte[4];
+            BinaryPrimitives.WriteSingleLittleEndian(b, v);
+            s.Write(b);
+        }
+    }
+
+    [Fact]
+    public void Read_RejectsOrthographicCameraWithNonPositiveWidth()
+    {
+        // Audit finding (Slice-2, csharp-lowlevel): SceneCompiler validates ortho_width/ortho_height at cook
+        // time, but the reader must not trust a forged/corrupted blob to have gone through that path — an
+        // Orthographic camera with width<=0 would otherwise reach CreateOrthographic(0, …) at runtime and
+        // upload a NaN/Inf projection matrix with no validation-layer message.
+        using var ms = new MemoryStream();
+        Span<byte> u32 = stackalloc byte[4];
+        ms.Write(new byte[2]);                                           // name length 0
+        ms.Write(new byte[24]);                                          // worldOrigin
+        BinaryPrimitives.WriteUInt32LittleEndian(u32, 1); ms.Write(u32);  // keyCount = 1 (sentinel only)
+        ms.Write(new byte[2]);                                           // sentinel string length 0
+        BinaryPrimitives.WriteUInt32LittleEndian(u32, 0); ms.Write(u32);  // entityCount = 0
+        BinaryPrimitives.WriteUInt32LittleEndian(u32, 0); ms.Write(u32);  // lightCount = 0
+        ms.Write(new byte[12]);                                          // ambient (Vector3)
+        ms.WriteByte((byte)SceneCameraMode.Fixed);
+        WriteF32(ms, 60f);                                               // fovY
+        ms.WriteByte(0);                                                 // freeFly = false
+        ms.Write(new byte[24]);                                          // position (Double3)
+        WriteF32(ms, 0f); WriteF32(ms, 0f);                              // yaw, pitch
+        WriteF32(ms, 0.1f); WriteF32(ms, 200f);                          // near, far
+        WriteF32(ms, 0f); WriteF32(ms, 0f);                              // moveSpeed, shadowDistance
+        ms.WriteByte(1);                                                 // projection = Orthographic
+        WriteF32(ms, 0f); WriteF32(ms, 30f);                             // orthoWidth = 0 (invalid), orthoHeight
+        ms.WriteByte((byte)SceneEnvironmentMode.None);
+        ms.WriteByte(0);                                                 // physics.present = false
+        ms.WriteByte(0);                                                 // restore.present = false
+        BinaryPrimitives.WriteUInt32LittleEndian(u32, 0); ms.Write(u32); // systemCount = 0
+
+        Assert.Throws<AgSceneException>(() => AgSceneFormat.Read(Container(ms.ToArray())));
+
+        static void WriteF32(Stream s, float v)
+        {
+            Span<byte> b = stackalloc byte[4];
+            BinaryPrimitives.WriteSingleLittleEndian(b, v);
+            s.Write(b);
+        }
+    }
+
+    [Fact]
     public void RoundTrip_DriveControlSystem_HasNoProbeModel()
     {
         // Contenu-3c-3: the first non-spawning SceneSystemKind — ProbeModel stays AssetKey.None (key index 0,

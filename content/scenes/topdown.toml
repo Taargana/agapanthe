@@ -1,0 +1,69 @@
+# Slice-2 — the 2nd dissimilar slice (backlog §4quater, AGAPANTHE_SCENE=topdown, samples/TopDown): a small
+# flat diorama viewed through a TRUE orthographic camera straight overhead — the generality test for
+# Camera.CameraProjection (perspective was the only projection this engine ever rendered before this).
+# Reuses the existing ground_quad floor and uv_sphere puck/prop generators; the puck is steered via the
+# same SceneSystemKind.DriveControl/DriveControlSystemFactory `drive` already uses (no new gameplay
+# system). Shadows are off everywhere (D3, spec) — ShadowFit's frustum-slice math assumes a perspective
+# cone and is not yet correct for an orthographic box; deferred, not fixed here.
+name = "topdown"
+ambient = [0.15, 0.15, 0.15]
+
+[[entity]]
+model = "procedural/probe"
+position = [0.0, 3.0, 0.0]
+body = true
+inverse_mass = 1.0
+restitution = 0.0
+radius = 3.0
+casts_shadow = false
+
+[[entity]]
+model = "procedural/ground"
+position = [0.0, 0.0, 0.0]
+casts_shadow = false
+
+[[entity]]
+model = "procedural/topdown-prop-blue"
+position = [-12.0, 2.0, -8.0]
+casts_shadow = false
+
+[[entity]]
+model = "procedural/topdown-prop-green"
+position = [12.0, 2.0, 8.0]
+casts_shadow = false
+
+[[light]]
+kind = "directional"
+direction = [0.3, -0.9, 0.2]
+color = [1.0, 1.0, 1.0]
+intensity = 8.0
+
+[environment]
+black = true
+
+[camera]
+mode = "fixed"
+position = [0.0, 50.0, 0.0]
+yaw = 0.0
+pitch = -1.5708
+fov_y = 60.0
+near = 1.0
+far = 100.0
+shadow_distance = 1.0
+free_fly = false
+projection = "orthographic"
+# ortho_height = 0 is the "derive from ortho_width / the runtime AspectRatio" sentinel (Camera —
+# audit finding, Slice-2): an orthographic camera has no automatic aspect correction the way
+# perspective's FovY+AspectRatio gets for free, so a fixed authored height would stretch props into
+# ellipses on any window resize.
+ortho_width = 40.0
+ortho_height = 0.0
+
+[physics]
+gravity = [0.0, 0.0, 0.0]
+ground_y = -100000.0
+
+[[system]]
+kind = "drive_control"
+controlled_entity_index = 0
+move_speed = 6.0

@@ -1,0 +1,34 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- Slice-2 — the shared client-app glue every windowed app needs: adapting the concrete GLFW/Silk
+       EngineWindow (Agapanthe.Platform) to the abstract IWindow (Agapanthe.App), plus the generic
+       ISceneSystemFactory implementations no scene family owns exclusively (DriveControlSystemFactory).
+       Both live here — not in Sandbox, not in App — because this is the one project both an
+       Agapanthe.Platform reference AND an Agapanthe.App reference can meet without pulling Vulkan into
+       Agapanthe.App itself (the same reason EngineWindowAdapter used to live in samples/Sandbox: it is the
+       one place both were already referenced). Extracted in Slice-2 so a second windowed app (samples/TopDown)
+       does not have to duplicate either. -->
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <IsAotCompatible>true</IsAotCompatible>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\Agapanthe.Core\Agapanthe.Core.csproj" />
+    <ProjectReference Include="..\Agapanthe.World\Agapanthe.World.csproj" />
+    <ProjectReference Include="..\Agapanthe.Assets\Agapanthe.Assets.csproj" />
+    <ProjectReference Include="..\Agapanthe.Scene\Agapanthe.Scene.csproj" />
+    <ProjectReference Include="..\Agapanthe.Engine\Agapanthe.Engine.csproj" />
+    <ProjectReference Include="..\Agapanthe.App\Agapanthe.App.csproj" />
+    <ProjectReference Include="..\Agapanthe.Platform\Agapanthe.Platform.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Same reason Agapanthe.App itself pulls this in: EngineWindowAdapter/DriveControlSystemFactory name
+         Silk.NET.Input.Key (via IWindow's surface, and the InputMap/SimCommand wiring). -->
+    <PackageReference Include="Silk.NET.Input" Version="2.23.0" />
+  </ItemGroup>
+
+</Project>
