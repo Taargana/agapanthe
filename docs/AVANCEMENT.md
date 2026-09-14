@@ -986,10 +986,44 @@ Spec : [2026-07-25-vs2-spawn-runtime-newtonian-gravity-design.md](plans/2026-07-
 > copie champ-à-champ restants · `layer = 0` authoré silencieusement inatteignable, rejeté au cook. Détail
 > complet dans le spec §8 et `.absolute-work/archive/board-session40-physicsqueries.md`.
 >
+> ### ✅ **Queries de formes CLOS (S41)** — sphere overlap
+> Deuxième item §4quater après les queries physiques (raycast + layer mask, S40). Spec
+> `docs/plans/2026-09-14-shape-queries-overlap-design.md`, approuvée **4,4/5** après 2 tours (round 1 : 3,4/5
+> NEEDS WORK — un vrai défaut de cohérence interne dans le raisonnement du dédup de cellules, corrigé et
+> re-vérifié indépendamment au round 2).
+>
+> **Livré** : `GameWorld.OverlapSphere` (nouveau, `GameWorld.Queries.cs`) — « qu'y a-t-il dans cette sphère ? »,
+> réutilise **intégralement, sans modification**, `GatherCandidates`/`BuildGrid` de S40 (confirmé par `git diff` :
+> 0 ligne touchée) · `OverlapHit(EntityRef, double Distance)` (pas de `Point`, D2) · démo `Key.G` (Sandbox+TopDown,
+> même câblage que `Key.F`).
+>
+> **Gates** : **922 tests** (+5), 0 warning, 0 régression, les 9 captures pinnées re-vérifiées byte-identiques
+> (toutes tombent exactement sur les hashes déjà connus de S40), JIT == NativeAOT confirmé avant/après audit,
+> verdict visuel humain PASS (`G` près d'une entité → compte + distance plausibles, `G` loin de tout → 0).
+>
+> **Double audit** `csharp-lowlevel` (**3,8/5**) + `engine-architect` (**4,0/5**), PASS-with-concerns —
+> convergence très forte (même risque 🔴 et même bug pré-existant trouvés indépendamment par les deux). **1 🔴
+> trouvé-et-corrigé** : le balayage de cellules n'était borné par rien lié à la query elle-même (`cellSize` dicté
+> par le plus gros objet du monde, pas par le rayon demandé) — un appel naturel pouvait balayer des milliards de
+> cellules vides ; corrigé par une estimation en `double` du volume balayé avant tout calcul `long`, avec repli
+> sur un scan linéaire direct quand la grille coûterait plus cher que le nombre de candidats. **Un vrai bug
+> pré-existant trouvé dans `RaycastAll`** (livré avec S40, déjà audité et clos) — la garde de capacité de buffer
+> n'était vérifiée qu'après la fin de la chaîne d'une cellule, pas dans la boucle elle-même, pouvant lever une
+> `IndexOutOfRangeException` contredisant son propre contrat documenté ; trouvé par comparaison avec la garde
+> correcte d'`OverlapSphere`, corrigé en miroir. Findings 🟠 : dédup `_qVisitedStamp` restauré (aliasing de hash
+> possible) · `ValidateCenter` ajouté (un `center` non-fini retournait silencieusement 0) · seuil de chevauchement
+> élargi en `double` (même classe de défaut que S40 sur `RaycastHit.Point`) · tri à distance égale rendu
+> déterministe (clé secondaire `GlobalId`, même classe de bug que S40 avait fermée une fois pour `TryRaycast`
+> mais jamais reportée sur les jumeaux basés sur le tri). **Dette laissée** : `OverlapHit` ne porte ni centre ni
+> rayon (probable point de friction au premier vrai consommateur, D2 déjà approuvé) · `Double3.Distance` paie sa
+> racine carrée sur chaque candidat rejeté (micro-optimisation) · deux chemins de query de région évoluent
+> désormais indépendamment (`OverlapSphere`/`QuerySurfaceContacts`), signalé pas fusionné. **Verdict visuel
+> humain : PASS** (2026-09-14).
+>
 > ### ▶️ Reprise — autre item du backlog §4quater
-> Les domaines **Contenu**, **Slice-2**, **Texte & UI** et **queries physiques (raycast + layer mask)** sont
-> tous CLOS. Voir `BACKLOG.md` §4quater pour les items restants (audio, queries de formes, job system,
-> netcode…).
+> Les domaines **Contenu**, **Slice-2**, **Texte & UI**, **queries physiques (raycast + layer mask)** et
+> **queries de formes (sphere overlap)** sont tous CLOS. Voir `BACKLOG.md` §4quater pour les items restants
+> (audio, box overlap, job system, netcode…).
 >
 > ### Contexte — **Cap moteur** (réorientation S25)
 > **Vertical Slice CLOSE dans son intention** : VS-1 (S22) · VS-2 (S23) · VS-3 (S24) ont prouvé l'intégration

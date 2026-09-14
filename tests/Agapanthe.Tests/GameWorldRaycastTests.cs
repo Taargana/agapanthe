@@ -311,6 +311,27 @@ public sealed class GameWorldRaycastTests
     }
 
     [Fact]
+    public void RaycastAll_ManyCandidatesInOneCell_TruncatesWithoutThrowing()
+    {
+        // Session-41 audit finding (csharp-lowlevel F4 / engine-architect F5), found while auditing the
+        // OverlapSphere sibling by comparison: the old `written < capacity` check sat only AFTER a whole cell's
+        // candidate chain was processed, not in the loop condition — a single cell holding more candidates than
+        // the remaining buffer capacity wrote past `results[capacity - 1]` and threw IndexOutOfRangeException,
+        // contradicting this method's own "never throws for an undersized buffer" documentation. Three spheres
+        // packed close enough to land in the same broadphase cell (cellSize = 2*radius = 2) reproduce it.
+        using var world = new GameWorld();
+        Spawn(world, new Double3(0, 0, 5.0), 1f);
+        Spawn(world, new Double3(0, 0, 5.1), 1f);
+        Spawn(world, new Double3(0, 0, 5.2), 1f);
+        var ray = new Ray(Double3.Zero, Vector3.UnitZ);
+
+        Span<RaycastHit> results = stackalloc RaycastHit[1];
+        var count = world.RaycastAll(in ray, 100.0, results); // must not throw
+
+        Assert.Equal(1, count);
+    }
+
+    [Fact]
     public void TryRaycast_OriginOutsideOccupiedGrid_StillFindsTheHit()
     {
         // F10: the origin starts well outside the occupied-cell AABB (exercises the AABB-bounded walk not

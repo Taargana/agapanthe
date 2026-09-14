@@ -622,8 +622,13 @@ pas fixe = source de vérité unique (prérequis netcode) — voir §Physique.
   audit) ; démo `Key.F` (crosshair écran-centre — `IWindow` n'expose aucun événement de clic, D6 réinterprété).
   Spec `docs/plans/2026-09-14-physics-queries-raycast-design.md` §8. **Restent hors scope** (voir item suivant) :
   queries de formes (sphère/boîte), raycast mesh-accurate, broadphase persistée.
-- Audio, **queries de formes** (sphere/box overlap — scindées des queries physiques, D1), **job system** (tout
-  est mono-thread, `AssertOwnerThread` partout = plafond dur), transparence triée.
+- ~~**Queries de formes — sphere overlap**~~ ✅ **CLOS (S41)** — `GameWorld.OverlapSphere`, réutilise
+  intégralement la broadphase du raycast (S40). Double audit a trouvé et corrigé un 🔴 (balayage de cellules non
+  borné par le rayon de la query) et, par comparaison, un vrai bug pré-existant dans `RaycastAll` (livré avec
+  S40) autour d'un dépassement de buffer. Spec `docs/plans/2026-09-14-shape-queries-overlap-design.md` §8.
+  **Reste hors scope** : box overlap (voir item suivant).
+- Audio, **box overlap** (forme distincte — rotation, AABB vs OBB — pas de cas d'usage concret pour l'instant),
+  **job system** (tout est mono-thread, `AssertOwnerThread` partout = plafond dur), transparence triée.
 - **Netcode réel** : transport, réplication delta, prediction/reconciliation.
 
 ### Dette `Agapanthe.App` (S30) — à corriger, par échéance

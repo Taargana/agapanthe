@@ -45,7 +45,24 @@ public sealed partial class GameWorld
 
     private static readonly Comparison<RaycastHit> CompareByDistance = CompareHitsByDistance;
 
-    private static int CompareHitsByDistance(RaycastHit a, RaycastHit b) => a.Distance.CompareTo(b.Distance);
+    // Audit fix (session 41, engine-architect F4): Span<T>.Sort is an unstable introsort, so ties resolved only
+    // by distance fall back to grid-walk/pre-sort order — itself a function of Arch's archetype/chunk iteration,
+    // which is not part of this project's determinism contract. A GlobalId secondary key (EntityRef.Id, internal
+    // but accessible within this assembly) makes the ordering total and reproducible regardless of insertion
+    // order, matching the byte-identical-simulation posture the whole §4quater netcode direction depends on.
+    private static int CompareHitsByDistance(RaycastHit a, RaycastHit b)
+    {
+        var cmp = a.Distance.CompareTo(b.Distance);
+        return cmp != 0 ? cmp : a.Entity.Id.CompareTo(b.Entity.Id);
+    }
+
+    private static readonly Comparison<OverlapHit> CompareOverlapsByDistance = CompareOverlapHitsByDistance;
+
+    private static int CompareOverlapHitsByDistance(OverlapHit a, OverlapHit b)
+    {
+        var cmp = a.Distance.CompareTo(b.Distance);
+        return cmp != 0 ? cmp : a.Entity.Id.CompareTo(b.Entity.Id);
+    }
 
     /// <summary>
     /// Casts <paramref name="ray"/> against every drawable (D2) and returns the nearest hit within
@@ -195,7 +212,15 @@ public sealed partial class GameWorld
                             continue;
                         }
 
-                        for (; k != -1; k = _qCellNext[k])
+                        // Audit fix (session 41, csharp-lowlevel F4 / engine-architect F5): `written < capacity`
+                        // must gate the loop CONDITION, not just the post-bucket check below — a single cell's
+                        // candidate chain routinely holds more than one entity (that is exactly what `cellSize
+                        // = 2 * maxRadius` makes likely), so without this guard a chain longer than the
+                        // remaining capacity wrote past `results[capacity - 1]` and threw `IndexOutOfRangeException`
+                        // out of an API documented as "never throws for an undersized buffer" — a real,
+                        // pre-existing bug this session's audit of the (correctly-guarded) `OverlapSphere`
+                        // sibling exposed by comparison.
+                        for (; k != -1 && written < capacity; k = _qCellNext[k])
                         {
                             if (_qVisitedStamp[k] == _qStamp)
                             {
@@ -211,9 +236,9 @@ public sealed partial class GameWorld
                             }
                         }
 
-                        // Audit fix (engine-architect F17): once the caller's buffer is full, stop testing —
-                        // everything remaining would just be discarded by the old `written < capacity &&`
-                        // short-circuit while still paying for the sphere test and chunk indirection.
+                        // Once the caller's buffer is full, stop testing further cells entirely — everything
+                        // remaining would just be discarded while still paying for the sphere test and chunk
+                        // indirection.
                         if (written == capacity)
                         {
                             goto Done;
@@ -232,6 +257,176 @@ public sealed partial class GameWorld
         Done:
         results[..written].Sort(CompareByDistance);
         return written;
+    }
+
+    /// <summary>
+    /// Shape queries (spec docs/plans/2026-09-14-shape-queries-overlap-design.md): "what is inside this sphere?"
+    /// — reuses <see cref="GatherCandidates"/>/<see cref="BuildGrid"/> unmodified (D4 of the raycast spec
+    /// anticipated exactly this reuse). Writes every candidate whose effective layer mask intersects
+    /// <paramref name="layerMask"/> and whose <c>Bounds</c> sphere overlaps the query sphere into
+    /// <paramref name="results"/>, sorted nearest-first by center-to-center distance, truncating silently if
+    /// there are more matches than <paramref name="results"/> can hold (same limitation <c>RaycastAll</c>
+    /// documents: the first <c>results.Length</c> matches encountered in grid-walk order are kept and sorted,
+    /// not a guaranteed globally-nearest-N). Returns the number of hits written.
+    /// </summary>
+    public int OverlapSphere(Double3 center, float radius, Span<OverlapHit> results, uint layerMask = AllLayers)
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        AssertOwnerThread();
+        ValidateRadius(radius);
+        ValidateCenter(center);
+
+        var count = GatherCandidates(layerMask);
+        if (count == 0 || results.Length == 0)
+        {
+            return 0;
+        }
+
+        var cellSize = BuildGrid(count);
+        var invCell = 1.0 / cellSize;
+
+        // Audit fix (session 41, csharp-lowlevel F1 BLOCKING / engine-architect F1): estimate the swept cell-box
+        // volume in `double` BEFORE ever computing `long` cell bounds. `cellSize` is dictated by the largest
+        // candidate in the whole world, not by this call's own radius — so a perfectly natural "what's within
+        // 1 km" query over a world of small, dense objects sweeps a cube of cells whose side is `radius /
+        // maxCandidateRadius`, an effective hang reachable from the public API with a legitimate finite
+        // `radius`. The grid is only ever an acceleration structure over the flat `_qCenter`/`_qRadius` arrays
+        // already gathered — whenever it would visit at least as many cells as there are candidates, scanning
+        // the candidate array directly is strictly cheaper AND exactly as correct. Computed in `double` (not
+        // `long`) specifically so an extreme radius degrades to this cheap, always-safe fallback instead of
+        // overflowing the `long` arithmetic the grid path needs below.
+        var span = (2.0 * radius * invCell) + 3.0; // cells per axis: diameter/cellSize + 2*margin + 1
+        var approxCells = span * span * span;
+        if (!double.IsFinite(approxCells) || approxCells >= count)
+        {
+            return OverlapSphereScanCandidates(center, radius, results, count);
+        }
+
+        // One-cell margin expansion (spec §3.1): BuildGrid buckets a candidate by its centre ALONE
+        // (floor(candidateCentre / cellSize)), and cellSize = 2 * maxCandidateRadius — so a candidate whose
+        // centre falls in the cell just past this sphere's own naive [center-radius, center+radius] range can
+        // still geometrically overlap it via its own radius (the same reason the raycast's DDA walk tests a
+        // 3x3x3 neighbourhood at every step, not just its current cell).
+        var minX = (long)Math.Floor((center.X - radius) * invCell) - 1;
+        var maxX = (long)Math.Floor((center.X + radius) * invCell) + 1;
+        var minY = (long)Math.Floor((center.Y - radius) * invCell) - 1;
+        var maxY = (long)Math.Floor((center.Y + radius) * invCell) + 1;
+        var minZ = (long)Math.Floor((center.Z - radius) * invCell) - 1;
+        var maxZ = (long)Math.Floor((center.Z + radius) * invCell) + 1;
+
+        // Clamp against the occupied-cell AABB from BuildGrid — an empty region outside every candidate is
+        // never walked (same audit-learned lesson as the raycast's WalkHasLeftOccupiedBounds).
+        if (minX < _qMinCellX) minX = _qMinCellX;
+        if (maxX > _qMaxCellX) maxX = _qMaxCellX;
+        if (minY < _qMinCellY) minY = _qMinCellY;
+        if (maxY > _qMaxCellY) maxY = _qMaxCellY;
+        if (minZ < _qMinCellZ) minZ = _qMinCellZ;
+        if (maxZ > _qMaxCellZ) maxZ = _qMaxCellZ;
+
+        // Audit fix (session 41, csharp-lowlevel F2): this walk visits each CELL COORDINATE at most once (unlike
+        // the raycast's step-by-step march, whose 3x3x3 neighbourhood can revisit the same coordinate across
+        // successive steps) — but QueryCellHash is a hash, not an injective key, and two distinct coordinates
+        // within the swept range can alias to the same dictionary bucket and share one candidate chain. Without
+        // this stamp, a candidate reachable from two aliasing cells would be tested — and WRITTEN — twice.
+        EnsureStampCapacity(count);
+        unchecked
+        {
+            _qStamp++;
+        }
+
+        var written = 0;
+        var capacity = results.Length;
+
+        for (var cz = minZ; cz <= maxZ; cz++)
+        {
+            for (var cy = minY; cy <= maxY; cy++)
+            {
+                for (var cx = minX; cx <= maxX; cx++)
+                {
+                    var key = QueryCellHash(cx, cy, cz);
+                    if (!_qCellHead.TryGetValue(key, out var k))
+                    {
+                        continue;
+                    }
+
+                    for (; k != -1 && written < capacity; k = _qCellNext[k])
+                    {
+                        if (_qVisitedStamp[k] == _qStamp)
+                        {
+                            continue;
+                        }
+
+                        _qVisitedStamp[k] = _qStamp;
+                        var distance = Double3.Distance(center, _qCenter[k]);
+                        // Audit fix (csharp-lowlevel F5, engine-architect F2): widen to double BEFORE summing —
+                        // `radius + _qRadius[k]` in bare float rounds the threshold itself, contradicting the
+                        // "resolved in double" premise the exact `distance` computation already honours.
+                        if (distance <= (double)radius + _qRadius[k])
+                        {
+                            results[written] = new OverlapHit(new EntityRef(_qGid[k]), distance);
+                            written++;
+                        }
+                    }
+
+                    // Once the caller's buffer is full, stop testing further cells entirely.
+                    if (written == capacity)
+                    {
+                        goto Done;
+                    }
+                }
+            }
+        }
+
+        Done:
+        results[..written].Sort(CompareOverlapsByDistance);
+        return written;
+    }
+
+    // Audit fix (session 41, csharp-lowlevel F1 BLOCKING / engine-architect F1): the cheap, always-correct
+    // fallback OverlapSphere takes when the grid's swept cell-box would visit at least as many cells as there
+    // are candidates in the whole world. No dictionary, no hashing, no aliasing risk — just the flat scratch
+    // GatherCandidates already populated.
+    private int OverlapSphereScanCandidates(Double3 center, float radius, Span<OverlapHit> results, int count)
+    {
+        var written = 0;
+        var capacity = results.Length;
+
+        for (var k = 0; k < count && written < capacity; k++)
+        {
+            var distance = Double3.Distance(center, _qCenter[k]);
+            if (distance <= (double)radius + _qRadius[k])
+            {
+                results[written] = new OverlapHit(new EntityRef(_qGid[k]), distance);
+                written++;
+            }
+        }
+
+        results[..written].Sort(CompareOverlapsByDistance);
+        return written;
+    }
+
+    // Audit-precedent guard (mirrors ValidateMaxDistance's exact shape): a radius <= 0 or non-finite (NaN or
+    // +/-Infinity) is essentially always a caller bug, not a legitimate query — the raycast's maxDistance guard
+    // set this precedent (session-40 audit F1: +Infinity is neither NaN nor <= 0 and needs a separate check).
+    private static void ValidateRadius(float radius)
+    {
+        if (!(radius > 0f) || float.IsInfinity(radius))
+        {
+            throw new ArgumentOutOfRangeException(nameof(radius), radius, "radius must be a positive, finite value.");
+        }
+    }
+
+    // Audit fix (session 41, csharp-lowlevel F3): a non-finite query centre (NaN/+-Infinity — e.g. a NaN camera
+    // position feeding the Key.G demo) previously produced a nonsense-but-silent cell range (the `(long)` cast
+    // of NaN saturates to 0) and made every distance test NaN, so the query returned 0 indistinguishable from a
+    // legitimate miss. Mirrors ValidateDirection's posture below: a real ArgumentException at the public
+    // boundary, not a silently wrong answer.
+    private static void ValidateCenter(Double3 center)
+    {
+        if (!double.IsFinite(center.X) || !double.IsFinite(center.Y) || !double.IsFinite(center.Z))
+        {
+            throw new ArgumentException("center must be finite.", nameof(center));
+        }
     }
 
     private static void ValidateMaxDistance(double maxDistance)

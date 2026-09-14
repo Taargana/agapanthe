@@ -268,6 +268,18 @@ public static class AppHost
                     }
 
                     break;
+                case Key.G:
+                    // Shape queries demo (D5, spec docs/plans/2026-09-14-shape-queries-overlap-design.md): "what
+                    // is inside this sphere?" around the camera — demo only, no new gameplay system.
+                    Span<OverlapHit> overlapResults = stackalloc OverlapHit[64];
+                    var overlapCount = world.OverlapSphere(camera.Position, 10f, overlapResults, GameWorld.AllLayers);
+                    Log.Info($"AppHost: [overlap] {overlapCount} entities within 10 m of the camera.");
+                    for (var i = 0; i < overlapCount; i++)
+                    {
+                        Log.Info($"AppHost: [overlap]   {overlapResults[i].Entity} at distance {overlapResults[i].Distance:F2} m.");
+                    }
+
+                    break;
             }
 
             void LogSensitivity()
