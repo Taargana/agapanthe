@@ -405,6 +405,177 @@ public sealed partial class GameWorld
         return written;
     }
 
+    /// <summary>
+    /// Shape queries (spec docs/plans/2026-09-14-shape-queries-box-overlap-design.md): "what is inside this
+    /// box?" — an AABB counterpart to <see cref="OverlapSphere"/>, reusing <see cref="GatherCandidates"/>/
+    /// <see cref="BuildGrid"/> unmodified. Writes every candidate whose effective layer mask intersects
+    /// <paramref name="layerMask"/> and whose <c>Bounds</c> sphere overlaps the axis-aligned box
+    /// [<paramref name="min"/>, <paramref name="max"/>] into <paramref name="results"/>, sorted nearest-first by
+    /// the box's own center-to-candidate-center distance (D2 — NOT a surface distance, not adjusted for either
+    /// radius), truncating silently if there are more matches than <paramref name="results"/> can hold (same
+    /// limitation <see cref="OverlapSphere"/>/<see cref="RaycastAll"/> document). Returns the number of hits
+    /// written. Every session-41 audit lesson (cost-bound fallback, stamp dedup, loop-condition capacity check,
+    /// deterministic sort) is applied here from the start, not retrofitted.
+    /// </summary>
+    public int OverlapBox(Double3 min, Double3 max, Span<OverlapHit> results, uint layerMask = AllLayers)
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        AssertOwnerThread();
+        ValidateBox(min, max);
+
+        var count = GatherCandidates(layerMask);
+        if (count == 0 || results.Length == 0)
+        {
+            return 0;
+        }
+
+        var boxCenter = (min + max) * 0.5;
+        var cellSize = BuildGrid(count);
+        var invCell = 1.0 / cellSize;
+
+        // Cost-bound check in double, before any long arithmetic (spec §3.1 — applies OverlapSphere's audited
+        // fix from the start). A box need not be cubic, so each axis's span is estimated independently.
+        var spanX = ((max.X - min.X) * invCell) + 3.0;
+        var spanY = ((max.Y - min.Y) * invCell) + 3.0;
+        var spanZ = ((max.Z - min.Z) * invCell) + 3.0;
+        var approxCells = spanX * spanY * spanZ;
+        if (!double.IsFinite(approxCells) || approxCells >= count)
+        {
+            return OverlapBoxScanCandidates(min, max, boxCenter, results, count);
+        }
+
+        // One-cell margin expansion (same reasoning as OverlapSphere): a candidate's radius is at most
+        // cellSize/2, so its center can be bucketed one cell beyond the box's own naive range and still overlap.
+        var minX = (long)Math.Floor(min.X * invCell) - 1;
+        var maxX = (long)Math.Floor(max.X * invCell) + 1;
+        var minY = (long)Math.Floor(min.Y * invCell) - 1;
+        var maxY = (long)Math.Floor(max.Y * invCell) + 1;
+        var minZ = (long)Math.Floor(min.Z * invCell) - 1;
+        var maxZ = (long)Math.Floor(max.Z * invCell) + 1;
+
+        // Clamp against the occupied-cell AABB from BuildGrid.
+        if (minX < _qMinCellX) minX = _qMinCellX;
+        if (maxX > _qMaxCellX) maxX = _qMaxCellX;
+        if (minY < _qMinCellY) minY = _qMinCellY;
+        if (maxY > _qMaxCellY) maxY = _qMaxCellY;
+        if (minZ < _qMinCellZ) minZ = _qMinCellZ;
+        if (maxZ > _qMaxCellZ) maxZ = _qMaxCellZ;
+
+        // Stamp dedup against QueryCellHash aliasing (same reasoning as OverlapSphere).
+        EnsureStampCapacity(count);
+        unchecked
+        {
+            _qStamp++;
+        }
+
+        var written = 0;
+        var capacity = results.Length;
+
+        for (var cz = minZ; cz <= maxZ; cz++)
+        {
+            for (var cy = minY; cy <= maxY; cy++)
+            {
+                for (var cx = minX; cx <= maxX; cx++)
+                {
+                    var key = QueryCellHash(cx, cy, cz);
+                    if (!_qCellHead.TryGetValue(key, out var k))
+                    {
+                        continue;
+                    }
+
+                    for (; k != -1 && written < capacity; k = _qCellNext[k])
+                    {
+                        if (_qVisitedStamp[k] == _qStamp)
+                        {
+                            continue;
+                        }
+
+                        _qVisitedStamp[k] = _qStamp;
+                        if (TryOverlapBox(min, max, _qCenter[k], _qRadius[k], boxCenter, out var reportDistance))
+                        {
+                            results[written] = new OverlapHit(new EntityRef(_qGid[k]), reportDistance);
+                            written++;
+                        }
+                    }
+
+                    if (written == capacity)
+                    {
+                        goto Done;
+                    }
+                }
+            }
+        }
+
+        Done:
+        results[..written].Sort(CompareOverlapsByDistance);
+        return written;
+    }
+
+    // The cheap, always-correct fallback OverlapBox takes when the grid's swept cell-box would visit at least as
+    // many cells as there are candidates in the whole world — mirrors OverlapSphereScanCandidates.
+    private int OverlapBoxScanCandidates(Double3 min, Double3 max, Double3 boxCenter, Span<OverlapHit> results, int count)
+    {
+        var written = 0;
+        var capacity = results.Length;
+
+        for (var k = 0; k < count && written < capacity; k++)
+        {
+            if (TryOverlapBox(min, max, _qCenter[k], _qRadius[k], boxCenter, out var reportDistance))
+            {
+                results[written] = new OverlapHit(new EntityRef(_qGid[k]), reportDistance);
+                written++;
+            }
+        }
+
+        results[..written].Sort(CompareOverlapsByDistance);
+        return written;
+    }
+
+    // Standard, exact AABB-vs-sphere overlap test: clamp the candidate's center into the box, compare the
+    // squared distance to that clamped point against the candidate's radius squared (no sqrt paid on rejected
+    // candidates). The reported distance (D2) is a SEPARATE quantity — the box's own center to the candidate's
+    // center — computed only when the candidate actually overlaps.
+    private static bool TryOverlapBox(
+        Double3 min, Double3 max, Double3 candidateCenter, float candidateRadius, Double3 boxCenter,
+        out double reportDistance)
+    {
+        var clampedX = Math.Clamp(candidateCenter.X, min.X, max.X);
+        var clampedY = Math.Clamp(candidateCenter.Y, min.Y, max.Y);
+        var clampedZ = Math.Clamp(candidateCenter.Z, min.Z, max.Z);
+        var dx = candidateCenter.X - clampedX;
+        var dy = candidateCenter.Y - clampedY;
+        var dz = candidateCenter.Z - clampedZ;
+
+        if ((dx * dx) + (dy * dy) + (dz * dz) <= (double)candidateRadius * candidateRadius)
+        {
+            reportDistance = Double3.Distance(boxCenter, candidateCenter);
+            return true;
+        }
+
+        reportDistance = default;
+        return false;
+    }
+
+    // Audit-precedent guard, mirrors ValidateRadius/ValidateCenter's exact posture: a non-finite min/max, or an
+    // inverted box (min > max on any axis), is essentially always a caller bug, not a legitimate query.
+    private static void ValidateBox(Double3 min, Double3 max)
+    {
+        if (!double.IsFinite(min.X) || !double.IsFinite(min.Y) || !double.IsFinite(min.Z))
+        {
+            throw new ArgumentException("min must be finite.", nameof(min));
+        }
+
+        if (!double.IsFinite(max.X) || !double.IsFinite(max.Y) || !double.IsFinite(max.Z))
+        {
+            throw new ArgumentException("max must be finite.", nameof(max));
+        }
+
+        if (min.X > max.X || min.Y > max.Y || min.Z > max.Z)
+        {
+            throw new ArgumentException("min must be componentwise <= max.", nameof(min));
+        }
+    }
+
     // Audit-precedent guard (mirrors ValidateMaxDistance's exact shape): a radius <= 0 or non-finite (NaN or
     // +/-Infinity) is essentially always a caller bug, not a legitimate query — the raycast's maxDistance guard
     // set this precedent (session-40 audit F1: +Infinity is neither NaN nor <= 0 and needs a separate check).

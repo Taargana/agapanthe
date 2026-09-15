@@ -280,6 +280,21 @@ public static class AppHost
                     }
 
                     break;
+                case Key.H:
+                    // Shape queries demo (D4, spec docs/plans/2026-09-14-shape-queries-box-overlap-design.md):
+                    // "what is inside this box?" — a 10x10x10 AABB centered on the camera. Demo only, no new
+                    // gameplay system.
+                    var boxMin = camera.Position - new Double3(5, 5, 5);
+                    var boxMax = camera.Position + new Double3(5, 5, 5);
+                    Span<OverlapHit> boxResults = stackalloc OverlapHit[64];
+                    var boxCount = world.OverlapBox(boxMin, boxMax, boxResults, GameWorld.AllLayers);
+                    Log.Info($"AppHost: [overlap-box] {boxCount} entities in the box.");
+                    for (var i = 0; i < boxCount; i++)
+                    {
+                        Log.Info($"AppHost: [overlap-box]   {boxResults[i].Entity} at distance {boxResults[i].Distance:F2} m.");
+                    }
+
+                    break;
             }
 
             void LogSensitivity()

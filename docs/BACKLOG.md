@@ -627,8 +627,20 @@ pas fixe = source de vérité unique (prérequis netcode) — voir §Physique.
   borné par le rayon de la query) et, par comparaison, un vrai bug pré-existant dans `RaycastAll` (livré avec
   S40) autour d'un dépassement de buffer. Spec `docs/plans/2026-09-14-shape-queries-overlap-design.md` §8.
   **Reste hors scope** : box overlap (voir item suivant).
-- Audio, **box overlap** (forme distincte — rotation, AABB vs OBB — pas de cas d'usage concret pour l'instant),
-  **job system** (tout est mono-thread, `AssertOwnerThread` partout = plafond dur), transparence triée.
+- ~~**Queries de formes — box overlap (AABB)**~~ ✅ **CLOS (S42)** — `GameWorld.OverlapBox`, réutilise
+  intégralement la broadphase de S40/S41. Double audit a trouvé, par mutation, un 🔴 (le chemin grid-walk entier
+  n'était exercé par aucun test — repli scan systématique) et le même défaut latent dans les tests
+  d'`OverlapSphere` de S41, corrigé rétroactivement. Spec
+  `docs/plans/2026-09-14-shape-queries-box-overlap-design.md` §8. **Reste hors scope** : OBB (rotation).
+- 🟠 **`TryRaycast`/`RaycastAll` n'ont aucun repli de coût borné** analogue à celui de `OverlapSphere`/`OverlapBox`
+  (S41/S42) — leur coût de marche DDA est également dicté par `cellSize` (le plus gros objet du monde), pas par
+  `maxDistance` de la query. La démo `Key.F` (`maxDistance: 1_000_000.0`) peut déjà atteindre des millions de
+  sondes de dictionnaire par pression dans un monde dense en petits objets. Trouvé lors de l'audit S42 par
+  comparaison entre les 4 queries de `GameWorld.Queries.cs`. Réel, pré-existant depuis S40, non bloquant
+  aujourd'hui (aucune scène pinnée ne l'atteint), mais à traiter avant qu'une scène dense + grand `maxDistance`
+  ne devienne un vrai problème de perf.
+- Audio, OBB (rotation — forme distincte différée de box overlap, D1 de S42), **job system** (tout est
+  mono-thread, `AssertOwnerThread` partout = plafond dur), transparence triée.
 - **Netcode réel** : transport, réplication delta, prediction/reconciliation.
 
 ### Dette `Agapanthe.App` (S30) — à corriger, par échéance

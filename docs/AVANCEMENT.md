@@ -1020,10 +1020,34 @@ Spec : [2026-07-25-vs2-spawn-runtime-newtonian-gravity-design.md](plans/2026-07-
 > désormais indépendamment (`OverlapSphere`/`QuerySurfaceContacts`), signalé pas fusionné. **Verdict visuel
 > humain : PASS** (2026-09-14).
 >
+> ### ✅ **Queries de formes — box overlap CLOS (S42)** — AABB
+> Troisième item §4quater après les queries physiques (S40) et sphere overlap (S41). Spec
+> `docs/plans/2026-09-14-shape-queries-box-overlap-design.md`, approuvée **4,6/5** après 1 tour (aucune
+> fabrication trouvée, chaque citation de réutilisation vérifiée contre le code réel).
+>
+> **Livré** : `GameWorld.OverlapBox` (AABB seule, D1 — pas de rotation, `Double3` n'a ni dot/cross product ni
+> quaternion) réutilise intégralement `GatherCandidates`/`BuildGrid` (confirmé `git diff` : 0 ligne touchée) et
+> `OverlapHit` (D2, `Distance` = centre-boîte → centre-candidat). Démo `Key.H`.
+>
+> **Gates** : **937 tests** (+1), 0 warning, 0 régression, 9 captures re-vérifiées byte-identiques, JIT ==
+> NativeAOT confirmé avant/après audit, verdict visuel humain PASS.
+>
+> **Double audit** `csharp-lowlevel` (**3,7/5**) + `engine-architect` (**4,1/5**), PASS-with-concerns — **les
+> deux ont prouvé par mutation, indépendamment, le même défaut sérieux** : le chemin grid-walk entier n'était
+> exercé par aucun des 14 tests livrés (repli scan systématique, estimation minimale toujours ≥27 cellules) ; le
+> test-vitrine « marge de bordure » ne prouvait rien. **Même défaut retrouvé, en silence, dans les tests
+> d'`OverlapSphere` de S41** — jamais détecté avant cette comparaison inter-jalons. Corrigé aux deux endroits
+> (leurres pour forcer le chemin grid) et **re-vérifié personnellement par mutation**. Nouveau test de
+> couverture grid-path ajouté, également vérifié par mutation. Findings 🟠/🟡 : tests « énorme sur monde épars »
+> réécrits avec candidats vraiment dispersés · inversion `min > max` couvre désormais les 3 axes ·
+> `ValidateBox`/`TryOverlapBox`/`OverlapHit` peaufinés. **Dette versée au backlog** : `TryRaycast`/`RaycastAll`
+> n'ont aucun repli de coût analogue (réel, pré-existant, hors scope). **Verdict visuel humain : PASS**
+> (2026-09-15).
+>
 > ### ▶️ Reprise — autre item du backlog §4quater
 > Les domaines **Contenu**, **Slice-2**, **Texte & UI**, **queries physiques (raycast + layer mask)** et
-> **queries de formes (sphere overlap)** sont tous CLOS. Voir `BACKLOG.md` §4quater pour les items restants
-> (audio, box overlap, job system, netcode…).
+> **queries de formes (sphere + box overlap)** sont tous CLOS. Voir `BACKLOG.md` §4quater pour les items
+> restants (audio, job system, netcode…).
 >
 > ### Contexte — **Cap moteur** (réorientation S25)
 > **Vertical Slice CLOSE dans son intention** : VS-1 (S22) · VS-2 (S23) · VS-3 (S24) ont prouvé l'intégration
