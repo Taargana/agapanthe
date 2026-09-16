@@ -28,6 +28,38 @@ public sealed class SimCommandQueue
     private bool _draining;
     private readonly int _ownerThreadId = Environment.CurrentManagedThreadId;
 
+    // Job-1 D2: mirrors GameWorld.SetSanctionedWorkerThreads — null until a scheduler configures one, in which case
+    // AssertOwnerThread's behavior is bit-for-bit what it was before this field existed. Volatile-published for the
+    // same reason as GameWorld's copy: the setter is callable at any time, not only inside the scheduler's own
+    // Release()/Wait() happens-before chain.
+    private HashSet<int>? _sanctionedWorkerThreadIds;
+
+    /// <summary>
+    /// Lets a job-system worker pool touch this queue without tripping <see cref="AssertOwnerThread"/>. Called once,
+    /// by the scheduler that owns the pool, at pool creation (Job-1 D2). Does NOT relax the guard for any other
+    /// thread — a genuinely foreign thread still throws. Unions with, never replaces, any set already sanctioned
+    /// (Job-1 F2) — two independent pools must not un-sanction each other.
+    /// <para>
+    /// <b>Being sanctioned to call <see cref="Enqueue"/>/<see cref="DrainUpTo"/> is not the same as it being safe.</b>
+    /// Neither method is thread-safe against a concurrent call on this SAME instance (a shared array resize/shift/
+    /// count, exactly like <c>GameWorld</c>'s own structural queue) — see <see cref="ISystem.RequiresExclusiveExecution"/>'s
+    /// remarks. This mechanism only removes the Debug tripwire for a thread that is the queue's ONLY caller this
+    /// tick; it does not arbitrate concurrent callers.
+    /// </para>
+    /// </summary>
+    internal void SetSanctionedWorkerThreads(IReadOnlyCollection<int> threadIds)
+    {
+        ArgumentNullException.ThrowIfNull(threadIds);
+        var merged = new HashSet<int>(threadIds);
+        var existing = Volatile.Read(ref _sanctionedWorkerThreadIds);
+        if (existing is not null)
+        {
+            merged.UnionWith(existing);
+        }
+
+        Volatile.Write(ref _sanctionedWorkerThreadIds, merged);
+    }
+
     /// <summary>Commands currently buffered.</summary>
     public int Count => _count;
 
@@ -120,12 +152,21 @@ public sealed class SimCommandQueue
     [Conditional("DEBUG")]
     private void AssertOwnerThread([CallerMemberName] string caller = "")
     {
-        if (Environment.CurrentManagedThreadId != _ownerThreadId)
+        var callingThreadId = Environment.CurrentManagedThreadId;
+        if (callingThreadId == _ownerThreadId)
         {
-            throw new InvalidOperationException(
-                $"SimCommandQueue.{caller} was called from thread {Environment.CurrentManagedThreadId}, but the " +
-                $"queue is owned by thread {_ownerThreadId}. It is single-threaded — a receive path must marshal " +
-                "onto the owner thread before enqueuing.");
+            return;
         }
+
+        if (Volatile.Read(ref _sanctionedWorkerThreadIds) is { } sanctioned && sanctioned.Contains(callingThreadId))
+        {
+            return;
+        }
+
+        throw new InvalidOperationException(
+            $"SimCommandQueue.{caller} was called from thread {callingThreadId}, but the " +
+            $"queue is owned by thread {_ownerThreadId}. It is single-threaded — a receive path must marshal " +
+            "onto the owner thread before enqueuing, unless the calling thread was sanctioned by a job-system " +
+            "worker pool.");
     }
 }

@@ -115,7 +115,7 @@ public sealed partial class GameWorld
     public void Save(Stream stream)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
-        AssertOwnerThread();
+        AssertOwnerThreadStrict();
         ArgumentNullException.ThrowIfNull(stream);
 
         // Settle the world: no pending spawn/despawn/reparent, so what we write is exactly what is live.
@@ -326,7 +326,7 @@ public sealed partial class GameWorld
     public SnapshotLoadResult Load(Stream stream, SnapshotAllocatorPolicy policy, MeshRefResolver? resolve)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
-        AssertOwnerThread();
+        AssertOwnerThreadStrict();
         ArgumentNullException.ThrowIfNull(stream);
 
         if (_live.Count != 0 || _commands.Count != 0 || _pendingSpawn.Count != 0 || _pendingDead.Count != 0)
@@ -559,7 +559,7 @@ public sealed partial class GameWorld
     internal int AotSerializationSmoke()
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
-        AssertOwnerThread();
+        AssertOwnerThreadStrict();
 
         // Every archetype, so every component type's Add<T> is exercised at load: a plain drawable, a non-caster
         // (NoShadowCast), a physics body (Velocity + RigidBody), and a parented hierarchy (LocalTransform + Parent).

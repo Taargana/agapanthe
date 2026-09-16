@@ -71,7 +71,7 @@ public sealed partial class GameWorld
     public bool TryRaycast(in Ray ray, double maxDistance, out RaycastHit hit, uint layerMask = AllLayers)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
-        AssertOwnerThread();
+        AssertOwnerThreadStrict();
         ValidateMaxDistance(maxDistance);
         ValidateDirection(ray.Direction);
 
@@ -169,7 +169,7 @@ public sealed partial class GameWorld
     public int RaycastAll(in Ray ray, double maxDistance, Span<RaycastHit> results, uint layerMask = AllLayers)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
-        AssertOwnerThread();
+        AssertOwnerThreadStrict();
         ValidateMaxDistance(maxDistance);
         ValidateDirection(ray.Direction);
 
@@ -272,7 +272,7 @@ public sealed partial class GameWorld
     public int OverlapSphere(Double3 center, float radius, Span<OverlapHit> results, uint layerMask = AllLayers)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
-        AssertOwnerThread();
+        AssertOwnerThreadStrict();
         ValidateRadius(radius);
         ValidateCenter(center);
 
@@ -420,7 +420,7 @@ public sealed partial class GameWorld
     public int OverlapBox(Double3 min, Double3 max, Span<OverlapHit> results, uint layerMask = AllLayers)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
-        AssertOwnerThread();
+        AssertOwnerThreadStrict();
         ValidateBox(min, max);
 
         var count = GatherCandidates(layerMask);

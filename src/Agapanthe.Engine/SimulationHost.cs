@@ -17,10 +17,18 @@ namespace Agapanthe.Engine;
 /// stays with the application, exactly as it did with the orchestrator.
 /// </para>
 /// <para>
-/// <b>Single-threaded.</b> The scheduler parallelises nothing, and the allocation bracket below depends on it.
+/// <b><see cref="Stage.Simulation"/> may run systems in parallel worker threads (Job-1).</b> The allocation
+/// bracket below (<c>BeginFrame</c>/<c>EndFrame</c>) measures only the OWNER thread's
+/// <c>GC.GetAllocatedBytesForCurrentThread()</c> — a per-thread counter — so an allocation made by a system
+/// running on a worker thread is invisible to <see cref="LastFrameAllocatedBytes"/> and to whatever reads it
+/// (<c>FrameStats</c>, the debug overlay). Harmless today: the only real <see cref="Stage.Simulation"/> system
+/// anywhere in this codebase (<c>PhysicsSystem</c>) is <c>RequiresExclusiveExecution == true</c>, so no worker
+/// pool is ever created in production and the owner thread still does 100% of the work. This becomes a real blind
+/// spot the day a second, non-exclusive <see cref="Stage.Simulation"/> system exists — closing it (measuring and
+/// folding in worker-thread allocations) is deferred, tracked debt, not silently dropped.
 /// </para>
 /// </summary>
-public sealed class SimulationHost
+public sealed class SimulationHost : IDisposable
 {
     private readonly SystemScheduler _scheduler;
 
@@ -41,7 +49,14 @@ public sealed class SimulationHost
     {
         // The structural barrier the scheduler runs at the end of every stage IS the world's deferred-change flush
         // (P3-M2 D2): a system enqueues spawns/despawns, the barrier applies them before the next stage iterates.
-        _scheduler = new SystemScheduler(world.FlushStructuralChanges);
+        // The sanctioned-thread callback (Job-1 D2) fires at most once, only if Stage.Simulation ever needs a real
+        // worker pool — it wires the SAME thread ids into both the world and the command queue, so a system running
+        // on a worker thread can touch either without tripping their Debug-only owner-thread guards.
+        _scheduler = new SystemScheduler(world.FlushStructuralChanges, ids =>
+        {
+            world.SetSanctionedWorkerThreads(ids);
+            Commands.SetSanctionedWorkerThreads(ids);
+        });
         _discard = Discard; // cached once — `ApplyCommand ?? _discard` then allocates nothing per tick
         Settings = settings;
     }
@@ -67,6 +82,14 @@ public sealed class SimulationHost
         host._scheduler.Add(Stage.PostSimulation, new PropagateSystem(world));
         return host;
     }
+
+    /// <summary>
+    /// Shuts down the scheduler's Job-1 worker pool, if one was ever created (a no-op otherwise — see
+    /// <see cref="SystemScheduler.Dispose"/>). Does NOT dispose the borrowed <see cref="GameWorld"/> — this host
+    /// never owned it. A long-lived production host (the application's whole run) has no strict need to call this;
+    /// it exists so a short-lived host (a unit test) does not leak a worker pool past its own lifetime.
+    /// </summary>
+    public void Dispose() => _scheduler.Dispose();
 
     /// <summary>
     /// The simulation's protocol constants — today the fixed step (<see cref="SimulationSettings"/>). The single

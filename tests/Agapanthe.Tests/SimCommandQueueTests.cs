@@ -146,13 +146,38 @@ public sealed class SimCommandQueueTests
         Assert.IsType<InvalidOperationException>(thrown);
     }
 
-    private static Exception? RunOnAnotherThread(Action action)
+    [Fact]
+    public void Enqueue_FromASanctionedWorkerThread_DoesNotThrow()
+    {
+        var queue = new SimCommandQueue();
+        var thrown = RunOnAnotherThread(
+            () => queue.Enqueue(Cmd(0)),
+            sanctionThisThread: queue.SetSanctionedWorkerThreads);
+
+        Assert.Null(thrown);
+        Assert.Equal(1, queue.Count);
+    }
+
+    [Fact]
+    public void Enqueue_FromAnUnsanctionedThread_StillThrows_EvenWithOtherThreadsSanctioned()
+    {
+        // Regression guard for Job-1 D2: sanctioning a worker pool must not accidentally disable the check for
+        // everyone — an unrelated foreign thread (not in the pool) must still be rejected.
+        var queue = new SimCommandQueue();
+        queue.SetSanctionedWorkerThreads([-1]); // a thread id that will never be Environment.CurrentManagedThreadId
+
+        var thrown = RunOnAnotherThread(() => queue.Enqueue(Cmd(0)));
+        Assert.IsType<InvalidOperationException>(thrown);
+    }
+
+    private static Exception? RunOnAnotherThread(Action action, Action<IReadOnlyCollection<int>>? sanctionThisThread = null)
     {
         Exception? captured = null;
         var t = new Thread(() =>
         {
             try
             {
+                sanctionThisThread?.Invoke([Environment.CurrentManagedThreadId]);
                 action();
             }
             catch (Exception ex)

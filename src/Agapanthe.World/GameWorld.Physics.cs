@@ -53,7 +53,7 @@ public sealed partial class GameWorld
         in ImportedEntitySpec spec, Vector3 velocity, float inverseMass, float restitution, float radius)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
-        AssertOwnerThread();
+        AssertOwnerThreadStrict();
         var id = NextId();
         MaterialiseBody(id, in spec, velocity, inverseMass, restitution, radius);
         return new EntityRef(id);
@@ -70,7 +70,7 @@ public sealed partial class GameWorld
         in ImportedEntitySpec spec, Vector3 velocity, float inverseMass, float restitution, float radius)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
-        AssertOwnerThread();
+        AssertOwnerThreadStrict();
         var id = NextId();
         _pendingSpawn.Add(id);
         _commands.Add(new StructuralCommand
@@ -122,7 +122,7 @@ public sealed partial class GameWorld
     public void StepPhysics(in PhysicsSettings settings)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
-        AssertOwnerThread();
+        AssertOwnerThreadStrict();
 
         var dt = settings.FixedDt;
         var gravity = settings.Gravity;
@@ -492,7 +492,7 @@ public sealed partial class GameWorld
     public void SetBodyVelocity(EntityRef entity, Vector3 linear)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
-        AssertOwnerThread();
+        AssertOwnerThreadStrict();
         var e = Deref(entity);
         RequireBody(e, entity);
         e.Set(new Velocity { Linear = linear });
@@ -511,7 +511,7 @@ public sealed partial class GameWorld
         Double3 attractorCenter, double surfaceRadius, double surfaceBand, Double3 zoneCenter, double zoneRadius)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
-        AssertOwnerThread();
+        AssertOwnerThreadStrict();
 
         var total = 0;
         var airborne = 0;

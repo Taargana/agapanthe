@@ -9,6 +9,7 @@ using ArchWorld = Arch.Core.World;
 
 [assembly: InternalsVisibleTo("Agapanthe.Tests")]
 [assembly: InternalsVisibleTo("AotComponentProbe")]
+[assembly: InternalsVisibleTo("Agapanthe.Engine")]
 
 namespace Agapanthe.World;
 
@@ -161,20 +162,96 @@ public sealed partial class GameWorld : IDisposable
 
     private bool _disposed;
 
+    // Job-1 D2: threads a job-system worker pool sanctions to touch this world's READ-ONLY surface (AssertOwnerThread
+    // below — e.g. IsAlive, while running a RequiresExclusiveExecution == false system in a Stage.Simulation wave).
+    // Null until a scheduler configures one — AssertOwnerThread's behavior is then bit-for-bit what it was before
+    // this field existed. Volatile-published (Volatile.Write in the setter, Volatile.Read here): the setter is
+    // callable at any time, not only from inside the scheduler's own Release()/Wait() happens-before chain, so the
+    // HashSet's own constructor stores need their own publication guarantee.
+    private HashSet<int>? _sanctionedWorkerThreadIds;
+
     /// <summary>
-    /// Debug-only guard: a GameWorld must be driven from the thread that created it. <see cref="ConditionalAttribute"/>
-    /// compiles the call away entirely in Release, so the zero-alloc hot path pays nothing for it.
+    /// Lets a job-system worker pool touch this world's <see cref="AssertOwnerThread"/>-guarded, READ-ONLY surface
+    /// (e.g. <see cref="IsAlive"/>) without tripping the guard. Meant to be called ONCE, by the scheduler that owns
+    /// the pool, at pool creation (Job-1 D2) — not part of the surface an application is expected to call directly.
+    /// <para>
+    /// <b>Does NOT relax <see cref="AssertOwnerThreadStrict"/>.</b> Every structural mutation
+    /// (<c>Spawn</c>/<c>Despawn</c>/<c>SetParent</c>/<c>Save</c>/<c>Load</c>/…) and every method that touches the
+    /// shared physics/query broadphase scratch (<c>StepPhysics</c>, <c>TryRaycast</c>, <c>OverlapSphere</c>, …)
+    /// stays owner-thread-only no matter what is sanctioned here — those are exactly the kind of state D4 in the
+    /// Job-1 spec says is invisible to <c>ISystem.Reads</c>/<c>Writes</c>, and sanctioning them would legalize a
+    /// genuine, undetected data race rather than merely widen a safe surface.
+    /// </para>
+    /// <para>
+    /// <b>Unions with, never replaces, any set already sanctioned.</b> Two independent pools (e.g. two
+    /// <c>SimulationHost</c>s sharing one borrowed world) each calling this must not un-sanction each other's
+    /// threads.
+    /// </para>
+    /// </summary>
+    internal void SetSanctionedWorkerThreads(IReadOnlyCollection<int> threadIds)
+    {
+        ArgumentNullException.ThrowIfNull(threadIds);
+        var merged = new HashSet<int>(threadIds);
+        var existing = Volatile.Read(ref _sanctionedWorkerThreadIds);
+        if (existing is not null)
+        {
+            merged.UnionWith(existing);
+        }
+
+        Volatile.Write(ref _sanctionedWorkerThreadIds, merged);
+    }
+
+    /// <summary>
+    /// Debug-only guard for this world's READ-ONLY surface: must be driven from the thread that created it, or from
+    /// a thread a job-system worker pool has sanctioned (<see cref="SetSanctionedWorkerThreads"/>, Job-1 D2).
+    /// <see cref="ConditionalAttribute"/> compiles the call away entirely in Release, so the zero-alloc hot path
+    /// pays nothing for it. Every structural/mutating entry point uses <see cref="AssertOwnerThreadStrict"/>
+    /// instead — see its remarks for why the two must not be merged.
     /// </summary>
     [Conditional("DEBUG")]
     private void AssertOwnerThread([CallerMemberName] string caller = "")
     {
-        if (Environment.CurrentManagedThreadId != _ownerThreadId)
+        var callingThreadId = Environment.CurrentManagedThreadId;
+        if (callingThreadId == _ownerThreadId)
         {
-            throw new InvalidOperationException(
-                $"GameWorld.{caller} was called from thread {Environment.CurrentManagedThreadId}, but the world is " +
-                $"owned by thread {_ownerThreadId}. A world is single-threaded (Arch's world creation and entity " +
-                "storage are not thread-safe).");
+            return;
         }
+
+        if (Volatile.Read(ref _sanctionedWorkerThreadIds) is { } sanctioned && sanctioned.Contains(callingThreadId))
+        {
+            return;
+        }
+
+        throw new InvalidOperationException(
+            $"GameWorld.{caller} was called from thread {callingThreadId}, but the world is " +
+            $"owned by thread {_ownerThreadId}. A world is single-threaded (Arch's world creation and entity " +
+            "storage are not thread-safe), unless the calling thread was sanctioned by a job-system worker pool.");
+    }
+
+    /// <summary>
+    /// Debug-only guard for this world's structural/mutating surface and its shared physics/query broadphase
+    /// scratch: owner thread ONLY, never a sanctioned worker (Job-1 F1) — <see cref="SetSanctionedWorkerThreads"/>
+    /// has no effect here. <c>Spawn</c>/<c>Despawn</c>/<c>SetParent</c>/<c>FlushStructuralChanges</c>/
+    /// <c>Save</c>/<c>Load</c>/<c>StepPhysics</c>/<c>SetBodyVelocity</c>/<c>ResolveMeshRefs</c> and every
+    /// <c>TryRaycast</c>/<c>RaycastAll</c>/<c>OverlapSphere</c>/<c>OverlapBox</c>/<c>QuerySurfaceContacts</c>
+    /// broadphase entry point use this — none of them are safe for two threads to call concurrently, and a
+    /// <c>Reads</c>/<c>Writes</c> declaration cannot represent why (D4). A system that needs any of these from
+    /// <see cref="Execute"/>-equivalent code must keep <c>RequiresExclusiveExecution == true</c>; there is no opt-out.
+    /// </summary>
+    [Conditional("DEBUG")]
+    private void AssertOwnerThreadStrict([CallerMemberName] string caller = "")
+    {
+        var callingThreadId = Environment.CurrentManagedThreadId;
+        if (callingThreadId == _ownerThreadId)
+        {
+            return;
+        }
+
+        throw new InvalidOperationException(
+            $"GameWorld.{caller} was called from thread {callingThreadId}, but the world is " +
+            $"owned by thread {_ownerThreadId}. This member mutates shared state (or the physics/query broadphase " +
+            "scratch) that a job-system worker pool is never sanctioned to touch, regardless of " +
+            "SetSanctionedWorkerThreads — see AssertOwnerThreadStrict's remarks.");
     }
 
     /// <summary>Builds a world that issues ids from <see cref="GlobalIdRange.Default"/> — bit-for-bit what the bare
@@ -229,7 +306,7 @@ public sealed partial class GameWorld : IDisposable
     public void SpawnImported(in ImportedEntitySpec spec, bool castsShadow = true)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
-        AssertOwnerThread();
+        AssertOwnerThreadStrict();
         // Immediate on purpose: SpawnImported is the LOAD-time seam (the Sandbox fills the scene before the loop),
         // never called from inside a running system's query. Runtime spawning goes through the deferred Spawn* API.
         var entity = MaterialiseDrawable(NextId(), in spec);
@@ -303,7 +380,7 @@ public sealed partial class GameWorld : IDisposable
     public EntityRef Spawn(Double3 position, Quaternion rotation, float scale, EntityRef parent = default)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
-        AssertOwnerThread();
+        AssertOwnerThreadStrict();
         var id = NextId();
         _pendingSpawn.Add(id);
         _commands.Add(new StructuralCommand
@@ -321,7 +398,7 @@ public sealed partial class GameWorld : IDisposable
     public EntityRef SpawnDeferred(in ImportedEntitySpec spec)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
-        AssertOwnerThread();
+        AssertOwnerThreadStrict();
         var id = NextId();
         _pendingSpawn.Add(id);
         _commands.Add(new StructuralCommand { Kind = CommandKind.SpawnDrawable, Target = id, Imported = spec });
@@ -341,7 +418,7 @@ public sealed partial class GameWorld : IDisposable
     public void Despawn(EntityRef entity)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
-        AssertOwnerThread();
+        AssertOwnerThreadStrict();
         if (entity.IsNone)
         {
             return;
@@ -358,7 +435,7 @@ public sealed partial class GameWorld : IDisposable
     public void SetParent(EntityRef child, EntityRef parent)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
-        AssertOwnerThread();
+        AssertOwnerThreadStrict();
         _commands.Add(new StructuralCommand { Kind = CommandKind.SetParent, Target = child.Id, ParentId = parent.Id });
     }
 
@@ -370,7 +447,7 @@ public sealed partial class GameWorld : IDisposable
     public bool IsAlive(EntityRef entity)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
-        AssertOwnerThread();
+        AssertOwnerThread(); // read-only (Job-1): safe for a sanctioned worker, unlike every mutating member below
         if (entity.IsNone || _pendingDead.Contains(entity.Id))
         {
             return false;
@@ -389,7 +466,7 @@ public sealed partial class GameWorld : IDisposable
     public void FlushStructuralChanges()
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
-        AssertOwnerThread();
+        AssertOwnerThreadStrict();
         if (_commands.Count == 0 && _pendingDead.Count == 0)
         {
             return; // the common case: nothing structural happened this stage
@@ -539,7 +616,7 @@ public sealed partial class GameWorld : IDisposable
     internal int AotRootingSmoke()
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
-        AssertOwnerThread();
+        AssertOwnerThreadStrict();
 
         // Imported-shape entities (GlobalId, WorldTransform, MeshRef, AssetRef, Bounds, RenderOrder). A non-None
         // identity so the managed AssetRef[] chunk array carries a real (non-null) string reference under the ILC.
@@ -694,7 +771,7 @@ public sealed partial class GameWorld : IDisposable
         where TAnimator : struct, IDrawableAnimator
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
-        AssertOwnerThread();
+        AssertOwnerThreadStrict();
         foreach (ref var chunk in _world.Query(in AnimateDesc))
         {
             var ids = chunk.GetSpan<GlobalId>();
@@ -735,7 +812,7 @@ public sealed partial class GameWorld : IDisposable
     public void PropagateTransforms()
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
-        AssertOwnerThread();
+        AssertOwnerThreadStrict();
         foreach (ref var chunk in _world.Query(in PropagateDesc))
         {
             var entities = chunk.Entities;
@@ -765,7 +842,7 @@ public sealed partial class GameWorld : IDisposable
     public Double3Bounds AggregateBounds()
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
-        AssertOwnerThread();
+        AssertOwnerThreadStrict();
         var acc = Double3Bounds.Empty;
         foreach (ref var chunk in _world.Query(in BoundsDesc))
         {
@@ -815,7 +892,7 @@ public sealed partial class GameWorld : IDisposable
     public void CollectRenderLists(RenderList render, SceneCandidateSet persistent, in RenderView view)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
-        AssertOwnerThread();
+        AssertOwnerThreadStrict();
         ArgumentNullException.ThrowIfNull(render);
         ArgumentNullException.ThrowIfNull(persistent);
 
@@ -1189,7 +1266,7 @@ public sealed partial class GameWorld : IDisposable
     public void ResolveMeshRefs(MeshRefResolver resolve)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
-        AssertOwnerThread();
+        AssertOwnerThreadStrict();
         ArgumentNullException.ThrowIfNull(resolve);
 
         // Set BEFORE the loop, not after a successful pass (audit finding): resolve throws for a key it cannot

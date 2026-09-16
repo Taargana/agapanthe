@@ -30,6 +30,14 @@ public sealed class PhysicsSystem : ISystem
     }
 
     /// <summary>
+    /// Always <see langword="true"/> (Job-1 D4): <see cref="GameWorld.StepPhysics"/> owns the shared physics
+    /// broadphase scratch (<c>_cellHead</c>/<c>_cellNext</c> in <c>GameWorld.Physics.cs</c>), which is invisible to
+    /// the <see cref="ISystem.Reads"/>/<see cref="ISystem.Writes"/> conflict model — this system must never run
+    /// concurrently with any other <see cref="Stage.Simulation"/> system.
+    /// </summary>
+    public bool RequiresExclusiveExecution => true;
+
+    /// <summary>
     /// Whether the tick's delta and the physics fixed step agree. Extracted so a unit test can exercise it
     /// directly: a failed <see cref="Debug.Assert"/> goes through <c>DebugProvider.FailCore</c> and terminates the
     /// test host rather than raising a catchable exception (MP-0c R3), so the assert below cannot be the test's

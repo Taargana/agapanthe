@@ -131,4 +131,23 @@ public sealed class SchedulerTests
     {
         public void Execute(in TickContext ctx) => body(ctx);
     }
+
+    // Job-1 D6: a bare ISystem that overrides nothing must default to "declares no access, runs exclusively" — an
+    // existing, unaudited implementation must stay exactly as sequential as it is today.
+    private sealed class MinimalSystem : ISystem
+    {
+        public void Execute(in TickContext ctx)
+        {
+        }
+    }
+
+    [Fact]
+    public void ISystem_DefaultMembers_DeclareNoAccessAndRequireExclusiveExecution()
+    {
+        ISystem system = new MinimalSystem();
+
+        Assert.Empty(system.Reads);
+        Assert.Empty(system.Writes);
+        Assert.True(system.RequiresExclusiveExecution);
+    }
 }

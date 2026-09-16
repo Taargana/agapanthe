@@ -639,9 +639,23 @@ pas fixe = source de vérité unique (prérequis netcode) — voir §Physique.
   comparaison entre les 4 queries de `GameWorld.Queries.cs`. Réel, pré-existant depuis S40, non bloquant
   aujourd'hui (aucune scène pinnée ne l'atteint), mais à traiter avant qu'une scène dense + grand `maxDistance`
   ne devienne un vrai problème de perf.
-- Audio, OBB (rotation — forme distincte différée de box overlap, D1 de S42), **job system** (tout est
-  mono-thread, `AssertOwnerThread` partout = plafond dur), transparence triée.
+- Audio, OBB (rotation — forme distincte différée de box overlap, D1 de S42), transparence triée.
 - **Netcode réel** : transport, réplication delta, prediction/reconciliation.
+- **Job system — sous-jalons 2 et 3** (S43 a livré le sous-jalon 1 « fondations » : dépendance déclarative
+  `Reads`/`Writes`, groupement en vagues, pool de workers persistant paresseux, `Stage.Simulation` uniquement).
+  **Sous-jalon 2** : modélisation fine des ressources partagées de `GameWorld` (scratch de broadphase
+  physique/query, `SimCommandQueue`) — aujourd'hui, tout système qui les touche doit rester
+  `RequiresExclusiveExecution = true`, un escape hatch grossier mais sûr, documenté dans `ISystem`. **Sous-jalon
+  3** : filet de vérification runtime prouvant que l'accès réel d'un système correspond à ses `Reads`/`Writes`
+  déclarés — pour l'instant, un système qui ment est un hasard silencieux non détecté, exactement la posture
+  qu'`AssertOwnerThread` lui-même a eue pendant des années avant Job-1.
+- 🟡 **Job-1 — churn de threads dans la suite de tests** : plusieurs classes de test (`SystemSchedulerParallelismTests`,
+  `SystemSchedulerWaveGroupingTests`) créent et détruisent de vrais pools de threads OS pour prouver un
+  parallélisme réel. Prouvé par A/B (`git stash`) : 23/23 propre sur la baseline pré-Job-1, ~1/10-15 flaky avec
+  Job-1 présent sur un test non lié (`CopySyncStateTests.PlanFrame_IsZeroAlloc_InSteadyState`), largement résorbé
+  en disposant chaque `SystemScheduler`/`SimulationHost` (`using`), résiduel non éliminé. Sans impact production
+  (le chemin parallèle n'est atteint par aucun hôte réel aujourd'hui — `PhysicsSystem` est le seul système
+  `Stage.Simulation` existant et il est `RequiresExclusiveExecution = true`).
 
 ### Dette `Agapanthe.App` (S30) — à corriger, par échéance
 
