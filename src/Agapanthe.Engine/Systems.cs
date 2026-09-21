@@ -66,11 +66,13 @@ public interface ISystem
     /// exactly like the broadphase scratch above, but it is untyped — no <see cref="Reads"/>/<see cref="Writes"/>
     /// entry can represent it. The SAME is true of <c>SimCommandQueue.Enqueue</c>/<c>DrainUpTo</c> — the same
     /// sanctioned-thread wiring that reaches <c>GameWorld</c> reaches it too (<c>SimulationHost</c> configures both
-    /// together), but the queue itself is no more thread-safe for concurrent writers than the world's own queue is.
+    /// together), but the queue itself is not made safe for concurrent writers by being sanctioned (Job-2 added a
+    /// runtime guard that DETECTS and throws on a genuinely overlapping cross-thread call — loud, not silent — but
+    /// it is a detector, not a scheduling mechanism: it does not make concurrent access correct, only diagnosable).
     /// A system that calls any of these from <see cref="Execute"/> must keep this <c>true</c> unless it can prove no
     /// other system in the same wave ever touches the same queue concurrently — until a future sub-milestone models
-    /// these queues as declarable resources (Job-1 out-of-scope), setting it <c>false</c> anyway is a genuine,
-    /// undetected data race, not merely an over-conservative choice.
+    /// these queues as declarable resources (Job-1 out-of-scope), setting it <c>false</c> anyway risks a data race
+    /// that Job-2's guard would at best turn into a thrown exception, not a correct outcome.
     /// </para>
     /// </summary>
     bool RequiresExclusiveExecution => true;

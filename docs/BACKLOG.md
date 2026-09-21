@@ -709,14 +709,61 @@ pas fixe = source de vérité unique (prérequis netcode) — voir §Physique.
   entité introduite via le sweep de late-join et rendue correctement, 0 leak GPU au shutdown.
 - **Netcode réel — la suite** : réplication multi-client, `OriginatorId`/ownership routing, delta réel (marquage
   conditionnel plutôt que systématique), réplication de despawn, prediction/reconciliation, interest management.
-- **Job system — sous-jalons 2 et 3** (S43 a livré le sous-jalon 1 « fondations » : dépendance déclarative
-  `Reads`/`Writes`, groupement en vagues, pool de workers persistant paresseux, `Stage.Simulation` uniquement).
-  **Sous-jalon 2** : modélisation fine des ressources partagées de `GameWorld` (scratch de broadphase
-  physique/query, `SimCommandQueue`) — aujourd'hui, tout système qui les touche doit rester
-  `RequiresExclusiveExecution = true`, un escape hatch grossier mais sûr, documenté dans `ISystem`. **Sous-jalon
-  3** : filet de vérification runtime prouvant que l'accès réel d'un système correspond à ses `Reads`/`Writes`
-  déclarés — pour l'instant, un système qui ment est un hasard silencieux non détecté, exactement la posture
-  qu'`AssertOwnerThread` lui-même a eue pendant des années avant Job-1.
+- ~~**Job system — sous-jalon 2 : garde de concurrence `SimCommandQueue` (Job-2)**~~ ✅ **CLOS (S45)**
+  — 2ᵉ des sous-jalons gatés d'un job system complet (S43 a livré le sous-jalon 1 « fondations »).
+  Spec `docs/plans/2026-09-21-job-system-submilestone2-design.md`, approuvée **4,70/5** après 2
+  tours (round 1 : 2,3/5 NEEDS WORK — le plan initial flippait `PhysicsSystem.RequiresExclusiveExecution`
+  à `false`, mais `StepPhysics` appelle `AssertOwnerThreadStrict`, qui ne respecte jamais la liste
+  blanche de workers par design explicite de Job-1 → aurait throw en Debug / racé en Release le jour
+  d'une vague partagée ; corrigé en descopant honnêtement ce volet plutôt qu'en le maquillant).
+  **Livré** : `SimCommandQueue` gagne une garde de concurrence always-on (`EnterCriticalSection`/
+  `ExitCriticalSection`, CAS thread-id + profondeur de ré-entrance), fermant le trou que son propre
+  commentaire Job-1 admettait déjà (« does not arbitrate concurrent callers ») ; `AssertOwnerThread`
+  promu always-on (trouvé à l'audit — le vrai risque, un appel réseau cross-thread non-chevauchant
+  entre deux ticks, restait non détecté en Release par le seul nouveau garde). **Descopé** : la
+  modélisation fine du scratch physique (voir ci-dessous, reformulé après audit) et le scratch de
+  queries (même contrainte `AssertOwnerThreadStrict`, confirmé inatteignable depuis `Stage.Simulation`).
+  997 tests, 0 warning, 0 régression (diff confiné à `SimCommandQueue.cs` + un commentaire
+  `Systems.cs` + le fichier de test — `PhysicsSystem.cs`/`GameWorld.Physics.cs`/`GameWorld.Queries.cs`
+  byte-identiques à `a408c47`), AOT JIT==NativeAOT re-confirmé sur `HeadlessSim`.
+
+  Double audit `csharp-lowlevel` (3,7/5) + `engine-architect` (4,0/5), tous deux PASS-with-concerns,
+  aucun 🔴 côté archi. **1 🔴 côté bas niveau, trouvé par mutation** : le test-vitrine
+  `PostFailureIntegrity_...` ne discriminait pas réellement le bug d'ordre `Enter`-avant-`try` qu'il
+  prétendait garder — vérifié en reproduisant la mutation exacte (déplacer `EnterCriticalSection()`
+  dans le `try`) : les 13 tests restaient verts, la sonde même-thread se contentant de ré-acquérir
+  une section libérée à tort par erreur au lieu de détecter la corruption. Corrigé par une vraie
+  assertion discriminante (un 3ᵉ thread concurrent, qui réussirait à tort si la section avait été
+  libérée) + 2 `Debug.Assert` anti-déséquilibre dans `ExitCriticalSection`, les deux re-vérifiés
+  contre la même mutation (rouges comme attendu). **Reformulation post-audit (engine-architect)** :
+  le cadrage initial du volet physique disait l'objectif « genuinely blocked » — faux tel quel :
+  seul le *plan* (relâcher `AssertOwnerThreadStrict`) est bloqué, pas l'objectif. `RequiresExclusiveExecution`
+  confond deux axes orthogonaux qu'un job system mûr sépare (exclusivité de ressource vs affinité de
+  thread — précédent Bevy `NonSend`/`exclusive_system`, Unity main-thread affinity vs job dependency) :
+  `PhysicsSystem` a besoin d'affinité (toujours sur le thread propriétaire, où vit déjà
+  `AssertOwnerThreadStrict`), pas d'exclusivité totale — un `bool RequiresOwnerThread` séparé,
+  exécuté inline dans une vague mixte pendant que le reste part aux workers (`RunSimulationWaves`
+  exécute déjà une vague solo inline), fermerait le trou sans toucher au garde strict. **Piste
+  candidate n°1 du prochain sous-jalon physique**, pas une impasse. Findings 🟠 corrigés : 3
+  commentaires périmés décrivant encore la faille comme non fermée (`SetSanctionedWorkerThreads`,
+  `ISystem.RequiresExclusiveExecution`, le résumé de classe) · 3 corps de thread de test non protégés
+  par try/catch (un throw inattendu aurait tué le process de test au lieu de faire échouer un test
+  nommé) · throw extrait en méthode `[MethodImpl(NoInlining)]` (garde désormais always-on) ·
+  sémantique cross-thread de `Count` documentée (best-effort hors thread propriétaire). **1 finding
+  accepté, non corrigé** (documenté dans la spec, D2) : `NetChannel` avalerait l'exception de ce
+  garde comme « paquet malformé » sur le seul appelant réseau réel (`DedicatedServer`) — inatteignable
+  aujourd'hui (le receive tourne toujours sur le thread propriétaire), et corriger proprement
+  exigerait de distinguer deux sources d'`InvalidOperationException` sans rouvrir la protection
+  anti-crash de Net-1 — différé comme son propre petit chantier.
+- **Job system — sous-jalon 2b (candidat, non planifié)** : `bool RequiresOwnerThread` sur `ISystem`
+  (affinité de thread, orthogonal à `RequiresExclusiveExecution`) — permettrait à `PhysicsSystem` de
+  déclarer de vrais `Reads`/`Writes` et de tourner inline sur le thread propriétaire pendant qu'un
+  système disjoint tourne sur un worker dans la même vague, sans toucher à `AssertOwnerThreadStrict`.
+  Voir le détail dans l'entrée Job-2 ci-dessus.
+- **Job system — sous-jalon 3 (non planifié)** : filet de vérification runtime prouvant que l'accès
+  réel d'un système correspond à ses `Reads`/`Writes` déclarés — pour l'instant, un système qui ment
+  est un hasard silencieux non détecté, exactement la posture qu'`AssertOwnerThread` lui-même a eue
+  pendant des années avant Job-1.
 - 🟡 **Job-1 — churn de threads dans la suite de tests** : plusieurs classes de test (`SystemSchedulerParallelismTests`,
   `SystemSchedulerWaveGroupingTests`) créent et détruisent de vrais pools de threads OS pour prouver un
   parallélisme réel. Prouvé par A/B (`git stash`) : 23/23 propre sur la baseline pré-Job-1, ~1/10-15 flaky avec
