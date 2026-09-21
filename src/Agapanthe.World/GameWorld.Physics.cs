@@ -268,6 +268,8 @@ public sealed partial class GameWorld
             _pEntity[k].Set(new WorldPosition { Value = _pPos[k] });
             _pEntity[k].Set(new Velocity { Linear = _pVel[k] });
             MarkDirty(_pEntity[k].Get<InstanceSlot>().Value); // the body moved → queue its slot for a patch (P3-M6)
+            MarkNetworkDirty(_pEntity[k].Get<GlobalId>().Value); // Net-1: independent of slot (a headless server
+                                                                  // never assigns one — see MarkNetworkDirty's remarks)
         }
     }
 

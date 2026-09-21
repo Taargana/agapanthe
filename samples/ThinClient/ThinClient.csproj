@@ -1,0 +1,136 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- Net-1 — the thin client: renders whatever the dedicated server tells it, never simulates locally (D1/D7).
+       Mirrors TopDown.csproj's shape (D6 precedent: duplicated cook/shader/font targets rather than a shared
+       .targets file) plus a reference to Agapanthe.Net for the wire codec/transport. -->
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\Agapanthe.App\Agapanthe.App.csproj" />
+    <ProjectReference Include="..\..\src\Agapanthe.Platform.App\Agapanthe.Platform.App.csproj" />
+    <ProjectReference Include="..\..\src\Agapanthe.Engine\Agapanthe.Engine.csproj" />
+    <ProjectReference Include="..\..\src\Agapanthe.Engine.Render\Agapanthe.Engine.Render.csproj" />
+    <ProjectReference Include="..\..\src\Agapanthe.Rendering\Agapanthe.Rendering.csproj" />
+    <ProjectReference Include="..\..\src\Agapanthe.World\Agapanthe.World.csproj" />
+    <ProjectReference Include="..\..\src\Agapanthe.Platform\Agapanthe.Platform.csproj" />
+    <ProjectReference Include="..\..\src\Agapanthe.Graphics\Agapanthe.Graphics.csproj" />
+    <ProjectReference Include="..\..\src\Agapanthe.Assets\Agapanthe.Assets.csproj" />
+    <ProjectReference Include="..\..\src\Agapanthe.Core\Agapanthe.Core.csproj" />
+    <ProjectReference Include="..\..\src\Agapanthe.Net\Agapanthe.Net.csproj" />
+  </ItemGroup>
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <!-- Phase 2 rule 1: the shipping executable must publish as NativeAOT (same gate as Sandbox/TopDown). -->
+    <PublishAot>true</PublishAot>
+    <!-- Same benign third-party trim/AOT/single-file warnings as Sandbox.csproj/TopDown.csproj. -->
+    <NoWarn>$(NoWarn);IL2104;IL3000;IL3002;IL3053</NoWarn>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- Ship the GLSL sources next to the executable; ShaderCompiler reads them at runtime. -->
+    <Content Include="..\..\shaders\**\*" Link="shaders\%(RecursiveDir)%(Filename)%(Extension)">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
+  </ItemGroup>
+
+  <!-- ============================ Offline SPIR-V pre-cook ============================
+       Duplicated from Sandbox.csproj/TopDown.csproj (D6 precedent). -->
+  <PropertyGroup>
+    <ShaderSourceDir>$([MSBuild]::NormalizeDirectory('$(MSBuildThisFileDirectory)..\..\shaders'))</ShaderSourceDir>
+    <ShaderPrecompilerProject>$([MSBuild]::NormalizePath('$(MSBuildThisFileDirectory)..\..\tools\ShaderPrecompiler\ShaderPrecompiler.csproj'))</ShaderPrecompilerProject>
+    <ShaderCacheStageDir>$([MSBuild]::NormalizeDirectory('$(MSBuildProjectDirectory)\obj\shadercache'))</ShaderCacheStageDir>
+    <ShaderCacheStamp>$(ShaderCacheStageDir).precooked.stamp</ShaderCacheStamp>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ShaderSourceFile Include="$(ShaderSourceDir)**\*" />
+  </ItemGroup>
+
+  <Target Name="PrecompileShaders"
+          Inputs="@(ShaderSourceFile)"
+          Outputs="$(ShaderCacheStamp)">
+    <MSBuild Projects="$(ShaderPrecompilerProject)"
+             Targets="Build"
+             Properties="Configuration=$(Configuration)"
+             RemoveProperties="RuntimeIdentifier;SelfContained;PublishAot;PublishTrimmed;PublishSingleFile">
+      <Output TaskParameter="TargetOutputs" ItemName="_ShaderPrecompilerAssembly" />
+    </MSBuild>
+    <MakeDir Directories="$(ShaderCacheStageDir)" />
+    <Exec Command="dotnet exec &quot;@(_ShaderPrecompilerAssembly)&quot; &quot;$(ShaderSourceDir.TrimEnd('\'))&quot; &quot;$(ShaderCacheStageDir.TrimEnd('\'))&quot;" />
+    <Touch Files="$(ShaderCacheStamp)" AlwaysCreate="true" />
+  </Target>
+
+  <Target Name="IncludePrecompiledShaders"
+          DependsOnTargets="PrecompileShaders"
+          BeforeTargets="AssignTargetPaths">
+    <ItemGroup>
+      <_PrecookedSpv Include="$(ShaderCacheStageDir)*.spv" />
+      <Content Include="@(_PrecookedSpv)" Link=".shadercache\%(Filename)%(Extension)">
+        <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      </Content>
+    </ItemGroup>
+  </Target>
+
+  <!-- ============================ Font cooking (UI-1) ============================
+       Duplicated from Sandbox.csproj/TopDown.csproj — this app draws the debug overlay text too. -->
+  <PropertyGroup>
+    <FontSourceDir>$([MSBuild]::NormalizeDirectory('$(MSBuildThisFileDirectory)..\..\fonts'))</FontSourceDir>
+    <FontCookerProject>$([MSBuild]::NormalizePath('$(MSBuildThisFileDirectory)..\..\tools\FontCooker\FontCooker.csproj'))</FontCookerProject>
+    <FontCacheStageDir>$([MSBuild]::NormalizeDirectory('$(MSBuildProjectDirectory)\obj\fontcache'))</FontCacheStageDir>
+    <FontCacheStamp>$(FontCacheStageDir).cooked.stamp</FontCacheStamp>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <FontSourceFile Include="$(FontSourceDir)**\*" />
+    <FontSourceFile Include="$(MSBuildThisFileDirectory)..\..\tools\FontCooker\**\*.cs"
+                    Exclude="$(MSBuildThisFileDirectory)..\..\tools\FontCooker\obj\**;$(MSBuildThisFileDirectory)..\..\tools\FontCooker\bin\**" />
+  </ItemGroup>
+
+  <Target Name="CookFonts"
+          Inputs="@(FontSourceFile)"
+          Outputs="$(FontCacheStamp)">
+    <MSBuild Projects="$(FontCookerProject)"
+             Targets="Build"
+             Properties="Configuration=$(Configuration)"
+             RemoveProperties="RuntimeIdentifier;SelfContained;PublishAot;PublishTrimmed;PublishSingleFile">
+      <Output TaskParameter="TargetOutputs" ItemName="_FontCookerAssembly" />
+    </MSBuild>
+    <MakeDir Directories="$(FontCacheStageDir)" />
+    <Exec Command="dotnet exec &quot;@(_FontCookerAssembly)&quot; &quot;$(FontSourceDir)JetBrainsMono-Regular.ttf&quot; &quot;$(FontSourceDir)charset.txt&quot; &quot;$(FontCacheStageDir)JetBrainsMono-Regular.agfont&quot;" />
+    <Touch Files="$(FontCacheStamp)" AlwaysCreate="true" />
+  </Target>
+
+  <Target Name="IncludeCookedFonts"
+          DependsOnTargets="CookFonts"
+          BeforeTargets="AssignTargetPaths">
+    <ItemGroup>
+      <_CookedFont Include="$(FontCacheStageDir)*.agfont" />
+      <Content Include="@(_CookedFont)" Link="fonts\%(Filename)%(Extension)">
+        <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      </Content>
+    </ItemGroup>
+  </Target>
+
+  <!-- Offline asset cook (shared with Sandbox/TopDown/HeadlessSim). ThinClient needs the cooked content/ tree
+       only to resolve AssetKeys the server names over the wire (Contenu-1/2's AssetCatalog) — it needs no
+       .agscene (D7: the "scene" is entirely network-driven). -->
+  <Import Project="$(MSBuildThisFileDirectory)..\..\build\Agapanthe.Cook.targets" />
+
+  <!-- Same shaderc-strip as Sandbox.csproj/TopDown.csproj. -->
+  <Target Name="StripShadercFromRelease"
+          Condition="'$(Configuration)' == 'Release'"
+          AfterTargets="CopyFilesToOutputDirectory;Publish">
+    <ItemGroup>
+      <_ShadercNativeToStrip Include="$(OutDir)shaderc_shared.dll;$(OutDir)libshaderc_shared.so*;$(OutDir)libshaderc_shared.dylib" />
+      <_ShadercNativeToStrip Include="$(OutDir)runtimes\**\*shaderc_shared*" />
+      <_ShadercNativeToStrip Include="$(PublishDir)shaderc_shared.dll;$(PublishDir)libshaderc_shared.so*;$(PublishDir)libshaderc_shared.dylib"
+                             Condition="'$(PublishDir)' != ''" />
+      <_ShadercNativeToStrip Include="$(PublishDir)runtimes\**\*shaderc_shared*" Condition="'$(PublishDir)' != ''" />
+    </ItemGroup>
+    <Delete Files="@(_ShadercNativeToStrip)" />
+  </Target>
+
+</Project>

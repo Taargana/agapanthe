@@ -118,6 +118,11 @@ public sealed partial class GameWorld : IDisposable
     private Entity[] _gatherEntities = [];             // gather-order entities, parallel to the pre-sort render list
     private int[] _sortPerm = [];                      // sorted position -> gather index (from RenderList.SortByKey)
 
+    // Net-1: GlobalId-keyed, NOT slot-keyed — see MarkNetworkDirty's remarks for why. Drained by
+    // GameWorld.Network.cs's DrainDirtyDrawables, entirely independent of the render-facing dirty state above.
+    private readonly HashSet<ulong> _networkDirtyIdSet = new();
+    private readonly List<ulong> _networkDirtyIds = new(64);
+
     // Marks a drawable's slot for an incremental patch (P3-M6). Called by the three mutation surfaces (animation,
     // physics writeback, hierarchy propagation). A negative slot is an unassigned drawable (spawned but not yet
     // through a structural rebuild) — ignored, because that rebuild will emit it in full anyway.
@@ -133,6 +138,20 @@ public sealed partial class GameWorld : IDisposable
         {
             _slotDirty[slot] = true;
             _dirtySlots.Add(slot);
+        }
+    }
+
+    // Net-1 (live end-to-end verification finding): MarkDirty(int slot) is keyed by InstanceSlot, which is ONLY
+    // ever assigned a real (non-negative) value by CollectRenderLists (P3-M6) — a genuinely headless server
+    // (DedicatedServer) never renders, so InstanceSlot stays -1 forever and MarkDirty silently no-ops for it. The
+    // network-dirty set is therefore keyed by GlobalId instead, entirely independent of slot assignment — the
+    // three mutation surfaces (animation, physics writeback, hierarchy propagation) call THIS in addition to
+    // MarkDirty, not instead of it.
+    private void MarkNetworkDirty(ulong globalId)
+    {
+        if (_networkDirtyIdSet.Add(globalId))
+        {
+            _networkDirtyIds.Add(globalId);
         }
     }
 
@@ -784,6 +803,7 @@ public sealed partial class GameWorld : IDisposable
                 animator.Animate(ids[i].Value, ref positions[i].Value, ref worlds[i].Value);
                 AssertNoTranslation(worlds[i].Value); // the animator must not bake a translation (see the contract)
                 MarkDirty(slots[i].Value); // an animated drawable moved → queue its slot for an incremental patch (P3-M6)
+                MarkNetworkDirty(ids[i].Value); // Net-1: independent of slot assignment (see MarkNetworkDirty's remarks)
             }
         }
     }
@@ -827,6 +847,7 @@ public sealed partial class GameWorld : IDisposable
                 if (entities[i].Has<InstanceSlot>())
                 {
                     MarkDirty(entities[i].Get<InstanceSlot>().Value);
+                    MarkNetworkDirty(entities[i].Get<GlobalId>().Value); // Net-1: same "is it a drawable" guard
                 }
             }
         }

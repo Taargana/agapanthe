@@ -632,6 +632,18 @@ pas fixe = source de vérité unique (prérequis netcode) — voir §Physique.
   n'était exercé par aucun test — repli scan systématique) et le même défaut latent dans les tests
   d'`OverlapSphere` de S41, corrigé rétroactivement. Spec
   `docs/plans/2026-09-14-shape-queries-box-overlap-design.md` §8. **Reste hors scope** : OBB (rotation).
+- ~~**Job system — fondations (Job-1)**~~ ✅ **CLOS (S43)** — premier des N sous-jalons gatés. `ISystem.Reads`/
+  `Writes`/`RequiresExclusiveExecution` (défaut `true`, sûr) ; `SystemScheduler` groupe `Stage.Simulation` en
+  vagues sans conflit, dispatch réel sur un pool de workers persistant créé paresseusement (D7, raffinement sur
+  la lettre de la spec) ; `GameWorld`/`SimCommandQueue` gagnent une liste blanche de threads sanctionnés. Double
+  audit `csharp-lowlevel` (3,4/5) + `engine-architect` (3,5/5) — **1 défaut bloquant trouvé indépendamment par
+  les deux** : la liste blanche s'appliquait à tous les 25 sites d'`AssertOwnerThread`, y compris les mutateurs
+  structurels, et un test livré épinglait le cas dangereux comme voulu — scindé en `AssertOwnerThread`
+  (lecture seule) / `AssertOwnerThreadStrict` (propriétaire uniquement, tous les mutateurs). `SystemScheduler`/
+  `SimulationHost` désormais `IDisposable` (leak de threads trouvé en vérifiant le correctif — un test non
+  disposé polluait un test non lié par churn de threads, prouvé par A/B). Spec
+  `docs/plans/2026-09-15-job-system-foundations-design.md` (outcome). **Restent hors scope** : sous-jalons 2
+  (ressources fines) et 3 (filet de vérification runtime) — voir dette ci-dessous.
 - 🟠 **`TryRaycast`/`RaycastAll` n'ont aucun repli de coût borné** analogue à celui de `OverlapSphere`/`OverlapBox`
   (S41/S42) — leur coût de marche DDA est également dicté par `cellSize` (le plus gros objet du monde), pas par
   `maxDistance` de la query. La démo `Key.F` (`maxDistance: 1_000_000.0`) peut déjà atteindre des millions de
@@ -639,8 +651,64 @@ pas fixe = source de vérité unique (prérequis netcode) — voir §Physique.
   comparaison entre les 4 queries de `GameWorld.Queries.cs`. Réel, pré-existant depuis S40, non bloquant
   aujourd'hui (aucune scène pinnée ne l'atteint), mais à traiter avant qu'une scène dense + grand `maxDistance`
   ne devienne un vrai problème de perf.
-- Audio, OBB (rotation — forme distincte différée de box overlap, D1 de S42), transparence triée.
-- **Netcode réel** : transport, réplication delta, prediction/reconciliation.
+- ~~**Netcode réel — coup d'envoi (Net-1)**~~ ✅ **CLOS (S44)** — 1ᵉʳ des N sous-jalons gatés d'un netcode complet.
+  Spec `docs/plans/2026-09-16-netcode-net1-design.md` (approuvée 4,3/5). Client fin/serveur autoritaire seul
+  simulateur (D1) ; delta/dirty-tracking dès le départ (D2, choix humain divergeant de la recommandation
+  « snapshot complet d'abord ») via `GameWorld.MarkNetworkDirty(ulong)` (GlobalId-keyed, indépendant du
+  `MarkDirty(int slot)` render-facing de P3-M6) ; **Reliable UDP** via **LiteNetLib 2.1.4** (D3, choix humain
+  divergeant du TCP-localhost recommandé), vérifié empiriquement NativeAOT-clean. Nouveaux `src/Agapanthe.Net`
+  (closure headless `{Core, Engine}`, 1ᵉʳ projet du dépôt autorisé un `PackageReference` dans une closure
+  headless — allowlist restreinte à `{LiteNetLib}` exactement), `samples/DedicatedServer` (mirroring
+  `HeadlessSim`), `samples/ThinClient` (`AppHost.RunClient`, `GameWorld` = pur cache de rendu, ne tick jamais
+  `Stage.Simulation`). `DrawableTransform` (nouveau, `Core` — payload wire/API partagé, `Core` car simulation
+  et réseau doivent tous deux le nommer sans que l'un dépende de l'autre) ; `GameWorld.Network.cs` (nouveau,
+  sibling `.Physics.cs`/`.Queries.cs` — surface réseau complète de `GameWorld` : `TryGetEntity`,
+  `GetDrawableTransform`/`SetDrawableTransform`, `DrainDirtyDrawables`, `SnapshotAllDrawables`). Deux formes de
+  paquet (D9, ajoutée après revue de spec) : `EntityIntroduce` (une fois, porte l'identité d'asset) vs
+  `PositionUpdate` (par-tick, transform seul). **Deux vrais bugs trouvés en vérification live, pas en relisant
+  le code** : le dirty-tracking était couplé à `InstanceSlot`, jamais assigné par un serveur headless
+  (`DrainDirtyDrawables` renvoyait toujours 0) — découplé en un set `GlobalId`-keyed indépendant ; une race
+  `EntityIntroduce`/`PositionUpdate` pour la même entité dans un seul `PollEvents()` sans `Tick()` entre les
+  deux — corrigée par un `FlushStructuralChanges()` explicite après `SpawnDeferred`. **994 tests**, 0 warning,
+  0 régression (ce jalon ne touche que `GameWorld.cs`/`GameWorld.Physics.cs` de façon additive — 23 lignes,
+  aucune capture/snapshot pinnée affectée), live 2-process vérifié + AOT re-publié après la passe d'audit.
+
+  Double audit `csharp-lowlevel` (3,4/5) + `engine-architect` (3,5/5), tous deux PASS-with-concerns — **4 🔴
+  trouvés au total, tous corrigés**, convergence forte : la démo (un seul pilot physique, toujours dirty)
+  masquait deux trous réels — un drawable non-physique/non-animé n'était **jamais** introduit à un client
+  (aucun site de spawn ne marquait dirty), et un client rejoignant après que le monde s'est stabilisé (le flux
+  nominal d'un serveur dédié) n'avait aucun moyen de le découvrir. Corrigé par `GameWorld.SnapshotAllDrawables()`
+  (sweep complet indépendant du dirty-set, appelé une fois par `PeerConnected`) — le dirty-stream ne pilote
+  plus que les `PositionUpdate` d'entités déjà connues. Les deux autres 🔴 : un paquet malformé/tronqué tuait le
+  process (`NetChannel` n'avait ni `try/catch` ni garde de longueur) — corrigé par un `try/catch`+`finally
+  Recycle()` + compteur `MalformedPacketCount` (patron `DiscardedCommandCount`) ; un `SimCommand.Vector` non
+  validé atteignait `SetBodyVelocity` sans contrainte — un NaN empoisonnait la simulation de façon
+  irrécupérable, et un client non coopératif pouvait contourner le cap de vitesse serveur — corrigé par un
+  rejet des composantes non-finies + normalisation/clamp côté serveur avant toute mutation. Findings 🟠
+  appliqués : dirty-set qui grossissait sans borne sans client connecté (drain désormais inconditionnel,
+  résultat jeté si aucun peer) ; boucle serveur en `Thread.Sleep` dur, seul hôte du projet à ne pas utiliser
+  `FixedTimestepAccumulator` (MP-0c) — dérive silencieuse du temps simulé sous charge, corrigé ;
+  `ObjectDisposedException` manquant sur les 5 méthodes de `GameWorld.Network.cs` ; `Matrix4x4.Decompose`
+  dont le retour `bool` était ignoré et l'échelle non-uniforme tronquée en silence à sa composante X (rejeté,
+  patron des rejets NaN/dégénérés déjà appliqués ailleurs au cook) ; `Math.Clamp` masquant un mismatch d'asset
+  serveur/client au lieu de lever (aligné sur la posture de `SceneMaterializer`, Contenu-3b) ; `NetChannel`
+  jamais disposé côté client, double-abonnement possible sur `Listen` ; allocation `NetDataWriter` par paquet
+  dans le hot path serveur ; duplication des 4 constantes de tag de protocole entre les deux samples (nouveau
+  `Agapanthe.Net.NetProtocol`, source unique) ; référence `ProjectReference` morte `Agapanthe.Net → World` (le
+  gate statique l'aurait rendue obligatoire pour toujours) — `Agapanthe.Net` gagne aussi un closure walk
+  réflexif propre (`NetAssemblyClosure_ContainsNoGpuAssembly`), jusque-là seul `Agapanthe.Engine` en avait un.
+  6 nouveaux tests de régression. **Dette laissée** (assumée, versée ci-dessous) : types LiteNetLib
+  (`NetPeer`/`NetDataWriter`) qui traversent encore la surface publique d'`Agapanthe.Net` (pas d'équivalent de
+  « aucun `Vk*` ne sort de `Graphics` » ici) · le dirty-tracking marque toujours inconditionnellement chaque
+  corps physique à chaque tick — un mécanisme de delta réel, mais dont l'effet à l'échelle de la démo est
+  proche d'un snapshot complet · despawn non répliqué du tout (aucun consommateur du jalon n'en fait, donc
+  inexercé plutôt que simplement non testé) · `FlushStructuralChanges()` après `SpawnDeferred` est correct
+  mais tient un invariant non local par convention (une surcharge `SpawnImported` retournant `EntityRef`
+  fermerait le trou structurellement) · `NetChannel` du ThinClient disposé via `AppDomain.ProcessExit` faute
+  d'un hook de teardown ordonné sur `ISceneRecipe`/`PresentationSceneContext`. Verdict humain live : pilot
+  entité introduite via le sweep de late-join et rendue correctement, 0 leak GPU au shutdown.
+- **Netcode réel — la suite** : réplication multi-client, `OriginatorId`/ownership routing, delta réel (marquage
+  conditionnel plutôt que systématique), réplication de despawn, prediction/reconciliation, interest management.
 - **Job system — sous-jalons 2 et 3** (S43 a livré le sous-jalon 1 « fondations » : dépendance déclarative
   `Reads`/`Writes`, groupement en vagues, pool de workers persistant paresseux, `Stage.Simulation` uniquement).
   **Sous-jalon 2** : modélisation fine des ressources partagées de `GameWorld` (scratch de broadphase

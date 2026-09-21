@@ -72,6 +72,22 @@ public sealed class EngineIsHeadlessTests
         "src/Agapanthe.Platform.App/Agapanthe.Platform.App.csproj",
         "Agapanthe.App", "Agapanthe.Assets", "Agapanthe.Core", "Agapanthe.Engine",
         "Agapanthe.Platform", "Agapanthe.Scene", "Agapanthe.World")]
+    // Net-1: the network transport + wire codec lives in the SAME headless closure as Agapanthe.Engine — a
+    // dedicated server links this with no GPU on the machine. Not World: nothing here names a World/Arch type
+    // (World arrives transitively via Engine for any consumer that needs it, e.g. DedicatedServer itself) — an
+    // audit finding caught the ProjectReference as dead, which the static allowlist would otherwise have made
+    // MANDATORY forever (removing an unused reference would fail this very test). LiteNetLib is a
+    // PackageReference (plain sockets, no Vulkan/GLFW); NetProjectFile_CarriesOnlyTheAllowedPackageReference
+    // below is what actually constrains it — this Theory only sees ProjectReferences.
+    [InlineData(
+        "src/Agapanthe.Net/Agapanthe.Net.csproj",
+        "Agapanthe.Core", "Agapanthe.Engine")]
+    // Net-1: the seed of a real dedicated server (mirrors HeadlessSim's own entry above) — GameWorld +
+    // SimulationHost + Agapanthe.Net, no window, no Vulkan device, no cooked content (it never resolves an
+    // AssetKey to a GPU handle, only names one over the wire).
+    [InlineData(
+        "samples/DedicatedServer/DedicatedServer.csproj",
+        "Agapanthe.Core", "Agapanthe.Engine", "Agapanthe.Net", "Agapanthe.World")]
     public void ProjectFile_ReferencesExactlyTheAllowedProjects(string relativePath, params string[] allowed)
     {
         var csproj = Path.Combine(RepositoryRoot(), relativePath.Replace('/', Path.DirectorySeparatorChar));
@@ -120,10 +136,24 @@ public sealed class EngineIsHeadlessTests
     /// </summary>
     [Fact]
     public void EngineAssemblyClosure_ContainsNoGpuAssembly()
+        => AssertClosureIsGpuFree(typeof(SystemScheduler).Assembly, "Agapanthe.Engine");
+
+    /// <summary>
+    /// Net-1 (audit finding, engine-architect): the static allowlist above proves <c>Agapanthe.Net</c>'s
+    /// <c>ProjectReference</c> set is exactly <c>{Core, Engine}</c>, but — MP-0a's own documented lesson, proven
+    /// by mutation — static and closure are not redundant. Without this, a future <c>PackageReference</c> on
+    /// <c>Agapanthe.Net</c> pulling something GPU-bound transitively into the dedicated server's closure would
+    /// go undetected: only <c>Agapanthe.Engine</c> had a closure walk rooted on it before this test existed.
+    /// </summary>
+    [Fact]
+    public void NetAssemblyClosure_ContainsNoGpuAssembly()
+        => AssertClosureIsGpuFree(typeof(Agapanthe.Net.PacketCodec).Assembly, "Agapanthe.Net");
+
+    private static void AssertClosureIsGpuFree(Assembly root, string label)
     {
         var seen = new HashSet<string>(StringComparer.Ordinal);
         var unresolved = new List<string>();
-        Walk(typeof(SystemScheduler).Assembly, seen, unresolved);
+        Walk(root, seen, unresolved);
 
         var offenders = seen
             .Where(n => ForbiddenAssemblies.Contains(n, StringComparer.Ordinal)
@@ -133,14 +163,34 @@ public sealed class EngineIsHeadlessTests
 
         Assert.True(
             offenders.Length == 0,
-            $"Agapanthe.Engine must stay headless but its closure contains: {string.Join(", ", offenders)}. "
-            + "The simulation has to build and run on a machine with no Vulkan — see Agapanthe.Engine.csproj.");
+            $"{label} must stay headless but its closure contains: {string.Join(", ", offenders)}. "
+            + "It has to build and run on a machine with no Vulkan.");
 
         // A closure this test could not fully walk is a closure it cannot vouch for. Say so rather than pass on a
         // partial answer: a silently truncated walk is exactly how this kind of gate goes quietly green forever.
         Assert.True(
             unresolved.Count == 0,
-            $"Could not load referenced assemblies, so the closure is unverified: {string.Join(", ", unresolved)}.");
+            $"Could not load assemblies referenced by {label}, so its closure is unverified: {string.Join(", ", unresolved)}.");
+    }
+
+    /// <summary>
+    /// Net-1 (audit finding, engine-architect): <c>Agapanthe.Net</c> is the first project ever allowed a
+    /// <c>PackageReference</c> inside a headless closure (<see cref="EngineProjectFile_CarriesNoPackageReference"/>
+    /// deliberately exempts it), but nothing constrained WHICH package — a future addition could pull anything,
+    /// including something GPU-bound, with no gate noticing until <see cref="NetAssemblyClosure_ContainsNoGpuAssembly"/>
+    /// happened to catch its transitive closure. This pins the allowlist to exactly what D3 approved.
+    /// </summary>
+    [Fact]
+    public void NetProjectFile_CarriesOnlyTheAllowedPackageReference()
+    {
+        var csproj = Path.Combine(RepositoryRoot(), "src", "Agapanthe.Net", "Agapanthe.Net.csproj");
+        var packages = XDocument.Load(csproj)
+            .Descendants("PackageReference")
+            .Select(e => e.Attribute("Include")?.Value ?? "<no Include>")
+            .OrderBy(n => n, StringComparer.Ordinal)
+            .ToArray();
+
+        Assert.Equal(new[] { "LiteNetLib" }, packages);
     }
 
     /// <summary>The simulation half must not even be able to NAME a render type: a public surface mentioning one
