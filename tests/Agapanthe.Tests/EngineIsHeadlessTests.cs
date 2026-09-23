@@ -26,6 +26,8 @@ public sealed class EngineIsHeadlessTests
         "Agapanthe.Rendering",  // owns the Renderer, hence Graphics
         "Agapanthe.Platform",   // GLFW: a server has no window
         "Agapanthe.Engine.Render",
+        "Agapanthe.Audio",      // OpenAL: a server never plays sound (audit finding — was only incidentally
+                                // caught via the "Silk.NET" prefix check below; explicit now)
     ];
 
     /// <summary>
@@ -62,7 +64,7 @@ public sealed class EngineIsHeadlessTests
     // static allowlist exists to close.
     [InlineData(
         "src/Agapanthe.App/Agapanthe.App.csproj",
-        "Agapanthe.Assets", "Agapanthe.Core", "Agapanthe.Engine", "Agapanthe.Engine.Render",
+        "Agapanthe.Assets", "Agapanthe.Audio", "Agapanthe.Core", "Agapanthe.Engine", "Agapanthe.Engine.Render",
         "Agapanthe.Graphics", "Agapanthe.Rendering", "Agapanthe.Scene", "Agapanthe.Ui", "Agapanthe.World")]
     // Slice-2 (audit finding, both csharp-lowlevel and engine-architect): the one project a Platform reference AND
     // an App reference can meet without pulling Vulkan into App itself — its entire reason to exist is being that
@@ -197,10 +199,11 @@ public sealed class EngineIsHeadlessTests
     /// would drag the dependency back in the moment an application used that member.</summary>
     [Fact]
     public void EngineAssembly_ExposesNoTypeFromAForbiddenAssembly()
-    {
-        var engine = typeof(SystemScheduler).Assembly;
+        => AssertExposesNoForbiddenType(typeof(SystemScheduler).Assembly);
 
-        foreach (var type in engine.GetExportedTypes())
+    private static void AssertExposesNoForbiddenType(Assembly assembly)
+    {
+        foreach (var type in assembly.GetExportedTypes())
         {
             foreach (var method in type.GetMethods(BindingFlags.Public | BindingFlags.Instance | BindingFlags.Static
                 | BindingFlags.DeclaredOnly))
@@ -212,6 +215,61 @@ public sealed class EngineIsHeadlessTests
                 }
             }
         }
+    }
+
+    /// <summary>
+    /// Audio-1 (audit finding, engine-architect): <c>Agapanthe.Graphics</c> has the equivalent invariant ("no
+    /// <c>Vk*</c> type ever leaves it") backed by a reflective gate; <c>Agapanthe.Audio</c> had the same property
+    /// by construction (verified by hand during the audit) but no test pinning it — a future overload exposing a
+    /// raw <c>Silk.NET.OpenAL</c> type (e.g. returning <c>BufferFormat</c> from a public method) would have gone
+    /// unnoticed. Checked narrowly against the "Silk.NET" prefix only (not the full <see cref="ForbiddenAssemblies"/>
+    /// list used above) — unlike <c>Agapanthe.Engine</c> checking ANOTHER assembly's types, this walks
+    /// <c>Agapanthe.Audio</c>'s OWN exported surface, which legitimately and correctly names its own types
+    /// (e.g. <c>AudioClip</c>, now itself in <see cref="ForbiddenAssemblies"/> for the closure-walk tests above).
+    /// </summary>
+    [Fact]
+    public void AudioAssembly_ExposesNoSilkNetType()
+    {
+        var audio = typeof(Agapanthe.Audio.AudioDevice).Assembly;
+        foreach (var type in audio.GetExportedTypes())
+        {
+            foreach (var method in type.GetMethods(BindingFlags.Public | BindingFlags.Instance | BindingFlags.Static
+                | BindingFlags.DeclaredOnly))
+            {
+                AssertNoSilkNetType(method.ReturnType, $"{type.Name}.{method.Name} return type");
+                foreach (var p in method.GetParameters())
+                {
+                    AssertNoSilkNetType(p.ParameterType, $"{type.Name}.{method.Name} parameter '{p.Name}'");
+                }
+            }
+        }
+
+        static void AssertNoSilkNetType(Type type, string where)
+        {
+            var owner = type.Assembly.GetName().Name ?? string.Empty;
+            Assert.False(
+                owner.StartsWith("Silk.NET", StringComparison.Ordinal),
+                $"{where} is '{type.Name}' from '{owner}' — no Silk.NET.OpenAL type may leave Agapanthe.Audio.");
+        }
+    }
+
+    /// <summary>
+    /// Audio-1 (audit finding, engine-architect): mirrors <see cref="NetProjectFile_CarriesOnlyTheAllowedPackageReference"/>
+    /// — <c>Agapanthe.Audio</c> is the second project ever allowed a <c>PackageReference</c> inside a project
+    /// whose closure a headless server never reaches, and nothing constrained WHICH packages. Pins the allowlist
+    /// to exactly what D1/the post-audit native-runtime fix approved.
+    /// </summary>
+    [Fact]
+    public void AudioProjectFile_CarriesOnlyTheAllowedPackageReferences()
+    {
+        var csproj = Path.Combine(RepositoryRoot(), "src", "Agapanthe.Audio", "Agapanthe.Audio.csproj");
+        var packages = XDocument.Load(csproj)
+            .Descendants("PackageReference")
+            .Select(e => e.Attribute("Include")?.Value ?? "<no Include>")
+            .OrderBy(n => n, StringComparer.Ordinal)
+            .ToArray();
+
+        Assert.Equal(new[] { "Silk.NET.OpenAL", "Silk.NET.OpenAL.Soft.Native" }, packages);
     }
 
     /// <summary>Contenu-3a: <see cref="Agapanthe.App.SimSceneContext"/> is the "headless-safe" half of the scene

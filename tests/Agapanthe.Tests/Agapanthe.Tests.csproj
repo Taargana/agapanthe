@@ -32,6 +32,7 @@
     <ProjectReference Include="..\..\src\Agapanthe.Engine.Render\Agapanthe.Engine.Render.csproj" />
     <ProjectReference Include="..\..\src\Agapanthe.Ui\Agapanthe.Ui.csproj" />
     <ProjectReference Include="..\..\src\Agapanthe.Net\Agapanthe.Net.csproj" />
+    <ProjectReference Include="..\..\src\Agapanthe.Audio\Agapanthe.Audio.csproj" />
   </ItemGroup>
 
   <!-- Khronos glTF sample fixtures (Box, BoxInterleaved, BoxTextured, DamagedHelmet),

@@ -19,6 +19,7 @@
 
   <ItemGroup>
     <ProjectReference Include="..\Agapanthe.Core\Agapanthe.Core.csproj" />
+    <ProjectReference Include="..\Agapanthe.Audio\Agapanthe.Audio.csproj" />
     <ProjectReference Include="..\Agapanthe.World\Agapanthe.World.csproj" />
     <ProjectReference Include="..\Agapanthe.Assets\Agapanthe.Assets.csproj" />
     <ProjectReference Include="..\Agapanthe.Graphics\Agapanthe.Graphics.csproj" />

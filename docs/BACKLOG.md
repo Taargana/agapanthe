@@ -379,7 +379,7 @@ path, tests verts, NativeAOT PASS, GPU==CPU) :
 - ⏸️ **VS-4 — HUD minimal** : **EN PAUSE (session 25)**. La slice a fait son travail (VS-1→VS-3 ont prouvé
   l'intégration) ; le texte à l'écran revient en **§4quater** comme *infrastructure* (debug overlay → profiler → UI de
   jeu), pas comme HUD de démo.
-- ⏸️ **VS-5 — Audio** *(stretch)* : **EN PAUSE (session 25)**, sans regret. Repris quand un jeu-échantillon le tire.
+- ~~⏸️ **VS-5 — Audio** *(stretch)*, **EN PAUSE (session 25)**~~ ✅ **REPRISE ET Audio-1 CLOS (S46)** — voir §4quater.
 - **Prérequis externe non bloquant** : **P3-M0** (validation Linux/macOS) — à faire dès machine dispo, hors gate slice.
   *Requalifié en §4quater* : le cross-platform est **revendiqué** sans avoir jamais été validé → item de crédibilité
   pour un moteur-artefact.
@@ -764,6 +764,51 @@ pas fixe = source de vérité unique (prérequis netcode) — voir §Physique.
   réel d'un système correspond à ses `Reads`/`Writes` déclarés — pour l'instant, un système qui ment
   est un hasard silencieux non détecté, exactement la posture qu'`AssertOwnerThread` lui-même a eue
   pendant des années avant Job-1.
+- ~~**Audio — coup d'envoi (Audio-1)**~~ ✅ **CLOS (S46)** — domaine entièrement vierge repris (VS-5,
+  en pause depuis S25). Spec `docs/plans/2026-09-21-audio-1-design.md`, approuvée **4,72/5** après 3
+  tours (round 1 : erreur de câblage `AppHost` — `presentation` invisible depuis `KeyPressed`,
+  corrigée en variable locale à la méthode comme `device`/`renderer` ; round 2 : deux trous de
+  testabilité de même nature que ceux déjà vus sur Net-1/Job-2, corrigés). **Livré** : `Silk.NET.OpenAL`
+  (même case que Vulkan/GLFW — bindings, le reste from scratch), nouveau `src/Agapanthe.Audio`
+  (jamais référencé par `Engine`/`World`, miroir exact de `Agapanthe.Graphics`) ; lecture one-shot 2D
+  minimale (mono 16-bit 44100 Hz), pas de 3D, pas de streaming ; `AudioLoader.Load(path|Stream, device)`
+  sans cook (miroir `HdrImageLoader`) ; `AudioDevice` ouvert systématiquement au bootstrap
+  (`HostOptions.AudioEnabled`, `AGAPANTHE_AUDIO=0`) mais **jamais** ne fait planter l'hôte (miroir
+  `SupportsGpuTimestamps`/UI-3) ; démo `Key.J` (Sandbox+TopDown), **verdict humain à l'oreille PASS**.
+
+  Double audit `csharp-lowlevel` + `engine-architect` — **1ᵉʳ tour : verdict FAIL, pas un
+  PASS-with-concerns.** Les deux ont convergé indépendamment sur le même défaut racine, prouvé par
+  mutation : `AudioDevice.ReportLeaks()` ne pouvait jamais rapporter de fuite (`Dispose()` vidait ses
+  compteurs sans condition), et `Dispose()` **fuyait vraiment** chaque buffer déjà joué (suppression
+  des buffers avant les sources — OpenAL refuse de supprimer un buffer encore attaché à une source).
+  **Corrigé** : `Dispose()` détache/stoppe puis supprime les sources d'abord, les buffers ensuite,
+  vérifie chaque suppression via `AL.IsSource`/`AL.IsBuffer` (always-on — c'est la garde elle-même,
+  pas un confort de dev) ; `ReportLeaks()` reflète désormais cette vérification. Findings 🟠 corrigés :
+  `UploadClip` perdait l'id d'un buffer si l'upload échouait après `GenBuffer` · `TryCreate` fuyait
+  les ressources natives partiellement créées sur tout throw après la création du contexte ·
+  **garde mono-instance par process** ajoutée (le contexte OpenAL est global au process — une 2ᵉ
+  instance volait le contexte de la 1ʳᵉ, reproduit par deux tests du jalon lui-même) ; `audioClean`
+  côté `AppHost` démarre désormais `false` (un `Dispose()` qui lève ne rapporte plus « propre » par
+  erreur) · `WavFormat.Read` bornait mal une allocation contre la taille réelle du flux restant (un
+  fichier forgé de 44 octets pouvait déclencher une allocation de 512 Mo) · `AGAPANTHE_AUDIO` sorti
+  d'`Agapanthe.Audio` vers `HostOptions.AudioEnabled` (fermait une violation de l'invariant S30
+  « aucune lecture d'env hors `HostOptions` ») · runtime natif `Silk.NET.OpenAL.Soft.Native` référencé
+  (miroir GLFW/shaderc — avant, ne marchait que grâce au driver système déjà installé sur la machine
+  de dev, en silence) + un log de statut au démarrage · détour synthèse→fichier-temp→relecture de la
+  démo supprimé (nouvelle surcharge `AudioLoader.Load(Stream, device)`, un seul générateur de bip
+  partagé tests+démo). 2 nouvelles gates réflexives ajoutées (miroir `Agapanthe.Net`) : aucun type
+  `Silk.NET.OpenAL` ne sort de l'assembly, allowlist stricte des `PackageReference`. **1014 tests**,
+  0 warning, 0 régression (capture `model` inchangée, JIT==NativeAOT re-confirmé après la passe de
+  correctifs). **Dette laissée, versée à Audio-2** : `AudioClip` sans cycle de vie individuel (chaque
+  buffer vit jusqu'à la mort du device entier — vrai problème dès qu'un rechargement de scène en
+  accumule) · rien n'empêche aujourd'hui un futur `ISystem` `Stage.Simulation` d'un assembly client
+  d'appeler `AudioDevice.Play` directement (le split headless est tenu au niveau assembly, pas au
+  niveau système — Audio-2 doit router via des cues émises par la simulation, consommées par un
+  système présentation, jamais depuis `Stage.Simulation` lui-même) · notes de préparation positionnel
+  (spatialisation OpenAL mono seulement, `Play` devra renvoyer un handle de voix, positions
+  camera-relative `Vector3` jamais `Double3` brut) · vocabulaire de leak-tracking encore ad-hoc par
+  domaine (`ResourceTracker` Vulkan / `ReportLeaks` Audio / disposal `SystemScheduler`) — à unifier
+  avant un 3ᵉ domaine natif, pas urgent maintenant.
 - 🟡 **Job-1 — churn de threads dans la suite de tests** : plusieurs classes de test (`SystemSchedulerParallelismTests`,
   `SystemSchedulerWaveGroupingTests`) créent et détruisent de vrais pools de threads OS pour prouver un
   parallélisme réel. Prouvé par A/B (`git stash`) : 23/23 propre sur la baseline pré-Job-1, ~1/10-15 flaky avec

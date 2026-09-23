@@ -1,0 +1,32 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- Audio-1: minimal one-shot playback. Same closure posture as Agapanthe.Graphics — a dedicated
+       project referenced only by App/client hosts, never by Agapanthe.Engine/World. A DedicatedServer
+       never needs to play a sound, exactly as it never needs a GPU (EngineIsHeadlessTests guards this). -->
+  <ItemGroup>
+    <ProjectReference Include="..\Agapanthe.Core\Agapanthe.Core.csproj" />
+  </ItemGroup>
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <IsAotCompatible>true</IsAotCompatible>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- OS/driver-facing binding (Bindings Silk.NET: Vulkan + GLFW + input ; le reste from scratch) —
+         same bucket as Silk.NET.Vulkan/GLFW, not hand-rolled WASAPI/CoreAudio. -->
+    <PackageReference Include="Silk.NET.OpenAL" Version="2.23.0" />
+    <!-- Audit finding (engine-architect): without a shipped native runtime, "Supported" only ever becomes true
+         on a machine with a system-installed OpenAL (e.g. this dev machine's Creative driver from 2021) —
+         GLFW/shaderc are both shipped this way (runtimes/*/native), audio should be too. -->
+    <PackageReference Include="Silk.NET.OpenAL.Soft.Native" Version="1.23.1" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="Agapanthe.Tests" />
+  </ItemGroup>
+
+</Project>

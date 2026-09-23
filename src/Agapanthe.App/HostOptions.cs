@@ -68,6 +68,14 @@ public sealed class HostOptions
     /// force-exercise the disabled path on hardware that does support it.</summary>
     public bool GpuTimestampsEnabled { get; init; } = true;
 
+    /// <summary>Whether the host should report its <c>AudioDevice</c> as usable (<c>AGAPANTHE_AUDIO</c> != "0"),
+    /// same "0 = off" shape as <see cref="OverlayVisible"/>/<see cref="GpuTimestampsEnabled"/> — Audio-1 (spec
+    /// D11, tightened post-audit): <c>AudioDevice.TryCreate</c> always attempts the real OpenAL open first and
+    /// ANDs this flag onto the result afterward, it is never a short-circuit. Moved here (rather than read
+    /// directly inside <c>Agapanthe.Audio</c>) so the S30 invariant holds: no path reads the environment outside
+    /// <see cref="HostOptions"/>.</summary>
+    public bool AudioEnabled { get; init; } = true;
+
     /// <summary>Builds options from the environment. <paramref name="read"/> is the accessor (defaults to
     /// <see cref="Environment.GetEnvironmentVariable(string)"/>); a test passes a dictionary lookup so it never
     /// mutates process state. A malformed <c>AGAPANTHE_UNIVERSE</c> logs a warning and leaves
@@ -104,6 +112,7 @@ public sealed class HostOptions
             VerifyCull = read("AGAPANTHE_CULL_VERIFY") is "1",
             ShaderReloadTest = read("AGAPANTHE_SHADER_RELOAD_TEST") is { Length: > 0 },
             GpuTimestampsEnabled = read("AGAPANTHE_GPU_TIMESTAMPS") is not "0",
+            AudioEnabled = read("AGAPANTHE_AUDIO") is not "0",
         };
 
         static string? NullIfEmpty(string? s) => string.IsNullOrEmpty(s) ? null : s;

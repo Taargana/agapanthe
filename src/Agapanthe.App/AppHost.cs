@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using Agapanthe.Assets;
 using Agapanthe.Assets.Font;
+using Agapanthe.Audio;
 using Agapanthe.Core;
 using Agapanthe.Engine;
 using Agapanthe.Engine.Render;
@@ -56,6 +57,8 @@ public static class AppHost
         FrameRenderer? frameRenderer = null;
         FrameOrchestrator? orchestrator = null;
         DebugOverlaySystem? debugOverlay = null;
+        AudioDevice? audioDevice = null;
+        AudioClip audioDemoClip = default;
 
         var world = new GameWorld(GlobalIdRange.Default, ResolveUniverse(game, options));
         var camera = new Camera();
@@ -71,6 +74,10 @@ public static class AppHost
 
         window.Loaded += () =>
         {
+            // Audio-1: independent of the GPU/Vulkan bootstrap below — always attempted (spec D7), never
+            // crashes the host on a machine with no audio hardware/driver (AudioDevice.TryCreate never throws).
+            audioDevice = AudioDevice.TryCreate(enabled: options.AudioEnabled);
+
             var requiredExtensions = window.GetRequiredVulkanExtensions();
             device = new GraphicsDevice(game.Title, requiredExtensions, window.VkSurface!);
 
@@ -295,6 +302,29 @@ public static class AppHost
                     }
 
                     break;
+                case Key.J when audioDevice is not null:
+                    // Audio-1 demo: a synthesized beep, loaded once and cached (spec D5/D6) — always safe to
+                    // call, a silent no-op on a machine with no audio device (audioDevice.Supported == false).
+                    // Wrapped: an unexpected AudioException/IOException here must not crash the whole app from
+                    // inside a KeyPressed handler (audit finding, csharp-lowlevel) — log and drop instead.
+                    try
+                    {
+                        if (audioDemoClip.Equals(default(AudioClip)) && audioDevice.Supported)
+                        {
+                            using var demoWav = new MemoryStream();
+                            WavFormat.Write(demoWav, WavFormat.SineTone());
+                            demoWav.Position = 0;
+                            audioDemoClip = AudioLoader.Load(demoWav, audioDevice);
+                        }
+
+                        audioDevice.Play(audioDemoClip);
+                    }
+                    catch (Exception ex) when (ex is not (OutOfMemoryException or StackOverflowException))
+                    {
+                        Log.Error($"AppHost: Key.J audio demo failed — {ex.Message}");
+                    }
+
+                    break;
             }
 
             void LogSensitivity()
@@ -402,6 +432,10 @@ public static class AppHost
 
         var clean = false;
         var failed = false;
+        // Audio-1: starts false, same posture as `clean` (GPU) — only set true after Dispose()+ReportLeaks()
+        // both actually succeed (audit finding, csharp-lowlevel: starting it true meant a THROW inside
+        // DisposeAudio's own step left it true, incorrectly reporting a clean exit).
+        var audioClean = false;
         try
         {
             window.Run();
@@ -428,6 +462,28 @@ public static class AppHost
                         ? "AppHost: clean shutdown, no GPU resource leaks."
                         : "AppHost: LEAKS DETECTED (see above).");
                 },
+                // Audio-1 (spec D10): disposed FIRST (cheapest, most independent resource — each step's own
+                // isolated try/catch below means exact position has no correctness consequence either way).
+                // audioClean is a SEPARATE local, not folded into `clean` via `Report`'s assignment — this step
+                // runs before ResourceTracker.Report(), and `clean = ResourceTracker.Report()` is a plain
+                // assignment that would silently overwrite anything set here first.
+                DisposeAudio = () =>
+                {
+                    // audioClean is left false (its initial value) if Dispose() itself throws below — a thrown
+                    // teardown step must never read as a clean exit (audit finding, csharp-lowlevel).
+                    if (audioDevice is null)
+                    {
+                        audioClean = true; // Loaded never ran far enough to create one — vacuously nothing to leak.
+                        return;
+                    }
+
+                    audioDevice.Dispose();
+                    audioClean = audioDevice.ReportLeaks();
+                    if (!audioClean)
+                    {
+                        Log.Error("AppHost: AUDIO LEAK DETECTED — an OpenAL buffer/source was never released.");
+                    }
+                },
             };
 
             // Each step is isolated: a throw in one (e.g. WaitIdle on a lost device) must not skip the leak
@@ -445,7 +501,7 @@ public static class AppHost
             }
         }
 
-        return clean && !failed ? 0 : 1;
+        return clean && !failed && audioClean ? 0 : 1;
     }
 
     /// <summary>Picks the recipe for <paramref name="sceneToken"/> (already trimmed; may be null/empty for the
@@ -515,8 +571,10 @@ public static class AppHost
         var sc = t.Swapchain;
         var win = t.Window;
         var report = t.Report;
+        var disposeAudio = t.DisposeAudio;
         return
         [
+            ("audioDevice.Dispose+ReportLeaks", disposeAudio ?? (static () => { })),
             ("frameRenderer.WaitIdle", () => fr?.WaitIdle()),
             ("frameRenderer.Dispose", () => fr?.Dispose()),
             ("world.Dispose", () => w?.Dispose()),
@@ -577,4 +635,8 @@ internal readonly record struct TeardownTargets(
     IWindow? Window)
 {
     public Action? Report { get; init; }
+
+    /// <summary>Audio-1 (spec D10): disposes the <c>AudioDevice</c> and folds <c>ReportLeaks()</c> into a
+    /// caller-owned flag — <c>default</c> leaves it a no-op so a test can assert the label order unaffected.</summary>
+    public Action? DisposeAudio { get; init; }
 }
