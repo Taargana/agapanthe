@@ -30,6 +30,7 @@ public enum PixelFormat
     D32Sfloat,
 
     // Vertex attribute layouts
+    R32Sfloat,
     R32G32Sfloat,
     R32G32B32Sfloat,
     R32G32B32A32Sfloat,
@@ -46,6 +47,7 @@ internal static class PixelFormatExtensions
         PixelFormat.Rg16Sfloat => Format.R16G16Sfloat,
         PixelFormat.R8Unorm => Format.R8Unorm,
         PixelFormat.D32Sfloat => Format.D32Sfloat,
+        PixelFormat.R32Sfloat => Format.R32Sfloat,
         PixelFormat.R32G32Sfloat => Format.R32G32Sfloat,
         PixelFormat.R32G32B32Sfloat => Format.R32G32B32Sfloat,
         PixelFormat.R32G32B32A32Sfloat => Format.R32G32B32A32Sfloat,
@@ -62,6 +64,7 @@ internal static class PixelFormatExtensions
         Format.R16G16Sfloat => PixelFormat.Rg16Sfloat,
         Format.R8Unorm => PixelFormat.R8Unorm,
         Format.D32Sfloat => PixelFormat.D32Sfloat,
+        Format.R32Sfloat => PixelFormat.R32Sfloat,
         Format.R32G32Sfloat => PixelFormat.R32G32Sfloat,
         Format.R32G32B32Sfloat => PixelFormat.R32G32B32Sfloat,
         Format.R32G32B32A32Sfloat => PixelFormat.R32G32B32A32Sfloat,

@@ -111,6 +111,7 @@ public sealed class Renderer : IDisposable
     private const string SkyboxLabel = "Skybox";
     private const string TonemapPassLabel = "Tonemap";
     private const string UiPassLabel = "UI";
+    private const string NoesisCompositePassLabel = "NoesisComposite";
 
     // UI-3: the 4 GPU-timestamp-instrumented regions — exactly the 4 existing debug-label regions above
     // (Skybox is nested inside Scene and shares its pair). 2 queries per region (begin, end), one block
@@ -267,6 +268,11 @@ public sealed class Renderer : IDisposable
     private DescriptorSetLayout? _uiSetLayout;
     private FontResources? _fontResources;
     private StorageBufferRing<UiQuad>? _uiQuads;
+
+    // Generic texture composite (vertical slice demo, branch spike/noesis-probe — see DrawTexture).
+    private NoesisCompositePass? _noesisCompositePass;
+    private DescriptorSetLayout? _noesisCompositeSetLayout;
+    private Sampler? _noesisCompositeSampler;
 
     // Swapchain-sized attachments owned here now that the frame loop is attachment-agnostic: the HDR scene
     // color target (rendered then sampled by the tonemap pass) and the depth target. Both are (re)created
@@ -471,6 +477,19 @@ public sealed class Renderer : IDisposable
             _uiPass = new UiPass(
                 device, shaderDirectory, _shaderCompiler,
                 _uiSetLayout, swapchain.ColorFormat);
+
+            // Generic texture composite (vertical slice demo, branch spike/noesis-probe): one binding, an
+            // arbitrary color texture as a combined image sampler, read by the fragment stage.
+            _noesisCompositeSetLayout = new DescriptorSetLayout(
+                device,
+                [new DescriptorBinding(0, DescriptorKind.CombinedImageSampler, ShaderStages.Fragment)]);
+            _noesisCompositeSampler = new Sampler(device, new SamplerDesc(
+                Filter: SamplerFilter.Linear,
+                MipFilter: SamplerFilter.Linear,
+                AddressMode: SamplerAddressMode.ClampToEdge));
+            _noesisCompositePass = new NoesisCompositePass(
+                device, shaderDirectory, _shaderCompiler,
+                _noesisCompositeSetLayout, swapchain.ColorFormat);
 
             // --- GPU scene cull compute (P3-M4 W1) ----------------------------------------------------------
             // Not a graphics pass (not hot-reloadable, like the IBL kernels): compiled once here. Four storage
@@ -1537,6 +1556,60 @@ public sealed class Renderer : IDisposable
     private readonly record struct UiPushConstants(Vector2 InvScreenSize, float SdfPixelRange);
 
     /// <summary>
+    /// Composites an arbitrary color <paramref name="source"/> texture over the frame (vertical slice
+    /// demo for the Noesis Vulkan RenderDevice spike, branch spike/noesis-probe). Deliberately generic —
+    /// this method and <see cref="Passes.NoesisCompositePass"/> know nothing about Noesis; the caller
+    /// (e.g. <c>Agapanthe.App</c>) owns whatever produced the texture. Call it after <see cref="DrawUi"/>
+    /// so it draws on top of everything else, same <c>LoadOp.Load</c> + explicit barrier idiom.
+    /// </summary>
+    public void DrawTexture(CommandList cmd, FrameContext frame, SwapchainTarget target, GpuImage source)
+    {
+        ArgumentNullException.ThrowIfNull(frame);
+        ArgumentNullException.ThrowIfNull(source);
+        ObjectDisposedException.ThrowIf(_disposed, this);
+
+        if (_noesisCompositePass is null || _noesisCompositeSetLayout is null || _noesisCompositeSampler is null)
+        {
+            return;
+        }
+
+        using var _ = cmd.PushDebugLabel(NoesisCompositePassLabel);
+
+        // The source is a caller-owned GpuImage this method did not create — its layout is whatever the
+        // caller last left it in (VulkanRenderDevice.DrawBatch leaves it ColorAttachment after its last
+        // draw). Transition it for sampling every call: simple and correct for a once-per-keypress demo,
+        // not a hot-path optimization.
+        cmd.TransitionImage(source, ImageLayoutState.ColorAttachment, ImageLayoutState.ShaderReadOnly);
+
+        cmd.ColorAttachmentBarrier(target.View);
+        cmd.BeginRendering(new RenderingAttachments
+        {
+            Color = new ColorAttachmentInfo
+            {
+                Target = target.View,
+                LoadOp = AttachmentLoadAction.Load,
+            },
+            Width = target.Width,
+            Height = target.Height,
+        });
+        cmd.SetViewportScissor(target.Width, target.Height);
+
+        var set = frame.AllocateSet(_noesisCompositeSetLayout);
+        frame.WriteCombinedImageSampler(set, 0, source, _noesisCompositeSampler);
+
+        var pipeline = _noesisCompositePass.Pipeline;
+        cmd.BindPipeline(pipeline);
+        cmd.BindDescriptorSet(pipeline, 0, set);
+        cmd.Draw(3);
+
+        cmd.EndRendering();
+
+        // Leave it ready for VulkanRenderDevice to draw into again next time without an extra transition
+        // at that end (mirrors the ColorAttachment state DrawBatch itself expects to find/leave).
+        cmd.TransitionImage(source, ImageLayoutState.ShaderReadOnly, ImageLayoutState.ColorAttachment);
+    }
+
+    /// <summary>
     /// Ensures the owned HDR-color and depth targets match <paramref name="width"/>×<paramref name="height"/>.
     /// Both are swapchain-sized and always created/recreated together, so the HDR extent is the single source
     /// of truth for the check. On the first call it creates both; when the extent changes (resize) it waits for
@@ -1830,6 +1903,13 @@ public sealed class Renderer : IDisposable
         _uiSetLayout = null;
         _fontResources = null;
         _uiQuads = null;
+
+        _noesisCompositePass?.Dispose();
+        _noesisCompositeSetLayout?.Dispose();
+        _noesisCompositeSampler?.Dispose();
+        _noesisCompositePass = null;
+        _noesisCompositeSetLayout = null;
+        _noesisCompositeSampler = null;
 
         _materialSetLayout?.Dispose();
         _frameSetLayout?.Dispose();

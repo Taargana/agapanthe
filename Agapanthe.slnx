@@ -21,6 +21,7 @@
     <Project Path="src/Agapanthe.Rendering/Agapanthe.Rendering.csproj" />
     <Project Path="src/Agapanthe.Scene/Agapanthe.Scene.csproj" />
     <Project Path="src/Agapanthe.Ui/Agapanthe.Ui.csproj" />
+    <Project Path="src/Agapanthe.Ui.Noesis/Agapanthe.Ui.Noesis.csproj" />
     <Project Path="src/Agapanthe.World/Agapanthe.World.csproj" />
   </Folder>
   <Folder Name="/tests/">

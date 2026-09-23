@@ -59,6 +59,11 @@ public static class AppHost
         DebugOverlaySystem? debugOverlay = null;
         AudioDevice? audioDevice = null;
         AudioClip audioDemoClip = default;
+        // Noesis spike (branch spike/noesis-probe, vertical slice): Key.K renders a solid-color XAML
+        // through VulkanRenderDevice once, into noesisTexture; noesisSystem composites it every frame.
+        Ui.Noesis.VulkanRenderDevice? noesisDevice = null;
+        GpuImage? noesisTexture = null;
+        NoesisDemoRenderSystem? noesisSystem = null;
 
         var world = new GameWorld(GlobalIdRange.Default, ResolveUniverse(game, options));
         var camera = new Camera();
@@ -123,6 +128,11 @@ public static class AppHost
             {
                 Log.Warn($"AppHost: [ui] no cooked font at '{fontPath}' — text overlay disabled.");
             }
+
+            // Noesis spike (branch spike/noesis-probe): registered unconditionally (no font dependency) so
+            // Key.K works whether or not a font was found above; a no-op every frame until Key.K sets Texture.
+            noesisSystem = new NoesisDemoRenderSystem(renderer);
+            orchestrator.Add(noesisSystem);
 
             // Contenu-2: the cooked-content catalog — recipes resolve models by AssetKey through it, no glTF at runtime.
             // A fully-procedural scene (planet*) needs no cooked content, so a missing manifest is a warning, not a
@@ -325,6 +335,54 @@ public static class AppHost
                     }
 
                     break;
+                case Key.K when device is not null && noesisSystem is not null:
+                    // Noesis spike demo (branch spike/noesis-probe, vertical slice): renders a solid-color
+                    // XAML through VulkanRenderDevice into its own offscreen GpuImage, then composites that
+                    // texture over the frame every tick via NoesisDemoRenderSystem. No Noesis.RenderContext
+                    // involved at all — CreateRenderTarget/SetRenderTarget (both public overrides on our own
+                    // device) are called directly, since there is no window/swapchain-specific context layer
+                    // standing in for "the default target" the way RenderContextWGL provided in the earlier
+                    // spike probe.
+                    try
+                    {
+                        if (noesisDevice is null)
+                        {
+                            global::Noesis.GUI.Init(); // process-global; safe to call once, guarded by noesisDevice.
+                            noesisDevice = new Ui.Noesis.VulkanRenderDevice(device, shaderDir);
+
+                            var target = (Ui.Noesis.VulkanRenderTarget)noesisDevice.CreateRenderTarget(
+                                "NoesisDemo", 800, 600, 1, false);
+                            noesisDevice.SetRenderTarget(target);
+
+                            const string xaml = """
+                                <Grid xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" Background="Red"/>
+                                """;
+                            var root = (global::Noesis.FrameworkElement)global::Noesis.GUI.ParseXaml(xaml);
+                            var view = global::Noesis.GUI.CreateView(root);
+                            view.SetSize(800, 600);
+                            view.Renderer.Init(noesisDevice);
+                            view.Update(0.0);
+                            view.Renderer.UpdateRenderTree();
+                            view.Renderer.RenderOffscreen();
+                            view.Renderer.Render();
+
+                            noesisTexture = target.Image;
+                            noesisSystem.Texture = noesisTexture;
+                            Log.Info("AppHost: [noesis] rendered demo Grid into an offscreen texture.");
+                        }
+                        else
+                        {
+                            // Toggle visibility on repeat presses — easy on/off for the visual-verdict check.
+                            noesisSystem.Texture = noesisSystem.Texture is null ? noesisTexture : null;
+                            Log.Info($"AppHost: [noesis] composite {(noesisSystem.Texture is null ? "hidden" : "shown")}.");
+                        }
+                    }
+                    catch (Exception ex) when (ex is not (OutOfMemoryException or StackOverflowException))
+                    {
+                        Log.Error($"AppHost: Key.K noesis demo failed — {ex.GetType().Name}: {ex.Message}");
+                    }
+
+                    break;
             }
 
             void LogSensitivity()
@@ -484,6 +542,10 @@ public static class AppHost
                         Log.Error("AppHost: AUDIO LEAK DETECTED — an OpenAL buffer/source was never released.");
                     }
                 },
+                // Noesis spike (branch spike/noesis-probe): disposes every GpuImage/pipeline/shader/buffer
+                // the demo's VulkanRenderDevice created, ahead of device.DeletionQueue.FlushAll() below so
+                // their deferred destroys (GpuImage.Dispose() is N+2-frame-deferred) actually get flushed.
+                DisposeNoesis = () => noesisDevice?.Dispose(),
             };
 
             // Each step is isolated: a throw in one (e.g. WaitIdle on a lost device) must not skip the leak
@@ -572,9 +634,11 @@ public static class AppHost
         var win = t.Window;
         var report = t.Report;
         var disposeAudio = t.DisposeAudio;
+        var disposeNoesis = t.DisposeNoesis;
         return
         [
             ("audioDevice.Dispose+ReportLeaks", disposeAudio ?? (static () => { })),
+            ("noesisDevice.Dispose", disposeNoesis ?? (static () => { })),
             ("frameRenderer.WaitIdle", () => fr?.WaitIdle()),
             ("frameRenderer.Dispose", () => fr?.Dispose()),
             ("world.Dispose", () => w?.Dispose()),
@@ -639,4 +703,9 @@ internal readonly record struct TeardownTargets(
     /// <summary>Audio-1 (spec D10): disposes the <c>AudioDevice</c> and folds <c>ReportLeaks()</c> into a
     /// caller-owned flag — <c>default</c> leaves it a no-op so a test can assert the label order unaffected.</summary>
     public Action? DisposeAudio { get; init; }
+
+    /// <summary>Noesis spike (branch spike/noesis-probe): disposes the <c>VulkanRenderDevice</c> (and the
+    /// GpuImage/pipeline/shader/buffer resources it owns) before <c>device.Dispose()</c> — <c>default</c>
+    /// leaves it a no-op so a test can assert the label order unaffected.</summary>
+    public Action? DisposeNoesis { get; init; }
 }

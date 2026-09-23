@@ -1,0 +1,26 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- Vulkan RenderDevice for Noesis (branch spike/noesis-probe, vertical slice — see the design plan
+       recorded in this session). References Agapanthe.Graphics directly (its GpuBuffer/GpuImage/
+       GraphicsPipeline/CommandList types are already Vk*-free, so this does not violate "aucun type
+       Vk* ne sort de Agapanthe.Graphics"). Never referenced by Agapanthe.Engine/World — same posture
+       as Agapanthe.Audio/Agapanthe.Net (EngineIsHeadlessTests allowlist + reflective "no Noesis type
+       leaks" gate + PackageReference allowlist gate, to be added alongside those precedents). -->
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\Agapanthe.Graphics\Agapanthe.Graphics.csproj" />
+    <ProjectReference Include="..\Agapanthe.Core\Agapanthe.Core.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Noesis.GUI" Version="4.0.0" />
+    <PackageReference Include="Noesis.App" Version="4.0.0" />
+  </ItemGroup>
+
+</Project>

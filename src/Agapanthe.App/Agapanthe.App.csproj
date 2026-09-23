@@ -20,6 +20,9 @@
   <ItemGroup>
     <ProjectReference Include="..\Agapanthe.Core\Agapanthe.Core.csproj" />
     <ProjectReference Include="..\Agapanthe.Audio\Agapanthe.Audio.csproj" />
+    <!-- Noesis spike (branch spike/noesis-probe): Key.N demo, mirrors Audio's precedent of a spike
+         dependency referenced directly from AppHost. -->
+    <ProjectReference Include="..\Agapanthe.Ui.Noesis\Agapanthe.Ui.Noesis.csproj" />
     <ProjectReference Include="..\Agapanthe.World\Agapanthe.World.csproj" />
     <ProjectReference Include="..\Agapanthe.Assets\Agapanthe.Assets.csproj" />
     <ProjectReference Include="..\Agapanthe.Graphics\Agapanthe.Graphics.csproj" />
