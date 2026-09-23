@@ -30,6 +30,7 @@
     <Project Path="tools/AotComponentProbe/AotComponentProbe.csproj" />
     <Project Path="tools/AssetCooker/AssetCooker.csproj" />
     <Project Path="tools/FontCooker/FontCooker.csproj" />
+    <Project Path="tools/NoesisAotProbe/NoesisAotProbe.csproj" />
     <Project Path="tools/ShaderPrecompiler/ShaderPrecompiler.csproj" />
   </Folder>
 </Solution>

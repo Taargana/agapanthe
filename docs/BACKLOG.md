@@ -809,6 +809,34 @@ pas fixe = source de vérité unique (prérequis netcode) — voir §Physique.
   camera-relative `Vector3` jamais `Double3` brut) · vocabulaire de leak-tracking encore ad-hoc par
   domaine (`ResourceTracker` Vulkan / `ReportLeaks` Audio / disposal `SystemScheduler`) — à unifier
   avant un 3ᵉ domaine natif, pas urgent maintenant.
+- ~~**UI riche — spike Noesis (faisabilité NativeAOT)**~~ ✅ **CLOS, PASS (branche `spike/noesis-probe`)** —
+  1ᵉʳ item du chantier UI riche pour le futur jeu Football-Manager-like (moteur d'UI swappable derrière
+  un `IUiHost`). CEF via CefGlue essayé en premier et abandonné (voir historique de la branche) : gratuit
+  et bindings C# mûrs, mais `CefGlue.Common` 120.6099.214 ne survit pas à un hébergement `.NET 10`, même
+  en JIT. **Noesis** retenu ensuite (XAML, payant — €195+/projet, aucun seuil gratuit, vérifié) :
+  packages NuGet **first-party** (`Noesis.GUI`, `Noesis.App`, render contexts D3D11/WGL/GLX/EGL/Metal),
+  évaluable sans licence (10 min/session, largement assez pour un spike). **Correction d'une affirmation
+  antérieure non vérifiée** : Noesis n'a **aucun backend Vulkan officiel** (D3D11/OpenGL/Metal
+  seulement — un ticket « Implement Vulkan Renderer » reste ouvert sur leur tracker) ; son architecture
+  expose une interface `RenderDevice` abstraite pensée exactement pour ce cas (des studios ont écrit
+  leur propre `RenderDevice` Vulkan), donc une vraie intégration Agapanthe demanderait d'écrire ce
+  backend nous-mêmes — un chantier réel mais borné et déjà précédenté par le SDK lui-même, différent de
+  la question tranchée ici.
+
+  **Résultat : PASS, sans aucun des déboires rencontrés sur CEF.** Nouveau `tools/NoesisAotProbe`
+  (isolé, ne référence ni `Engine` ni `World`, sans RID codé en dur dans le `.csproj` — miroir exact de
+  `tools/AotComponentProbe`) : `GUI.Init()` → `Win32Display` → `RenderContextWGL.Init` → `GUI.ParseXaml`
+  → `GUI.CreateView` → boucle de rendu → `CaptureRenderTarget` — tout s'exécute proprement et produit un
+  vrai buffer 800×600, d'abord en **JIT** (`dotnet build`/`dotnet exec`, sans RID), puis depuis un
+  **publish NativeAOT réel** (`dotnet publish -r win-x64 --self-contained -p:PublishAot=true` — sortie
+  = juste `Noesis.dll` + un exe de ~4 Mo, aucun fichier de runtime CoreCLR, la vraie preuve que c'est du
+  AOT authentique). Note méthodologique : `RuntimeFeature.IsDynamicCodeSupported` lit `False` **dans les
+  deux cas** (JIT et AOT) sur ce probe — effet de bord de `PublishAot=true` posé au niveau projet sur le
+  `runtimeconfig.json` généré même par `dotnet build`, pas un différenciateur JIT/AOT fiable à lui seul
+  (confirmé en inspectant le `runtimeconfig.json` réel) — le vrai signal reste le contenu du dossier
+  publié. **Prochaine étape** (non entamée, sur la branche `spike/noesis-probe`) : décider si on pousse
+  Noesis plus loin (écrire le `RenderDevice` Vulkan, poser `IUiHost`) ou si on compare encore avec
+  Ultralight/un système custom SkiaSharp maintenant que CEF et Noesis sont tous deux tranchés côté AOT.
 - 🟡 **Job-1 — churn de threads dans la suite de tests** : plusieurs classes de test (`SystemSchedulerParallelismTests`,
   `SystemSchedulerWaveGroupingTests`) créent et détruisent de vrais pools de threads OS pour prouver un
   parallélisme réel. Prouvé par A/B (`git stash`) : 23/23 propre sur la baseline pré-Job-1, ~1/10-15 flaky avec
