@@ -834,9 +834,45 @@ pas fixe = source de vérité unique (prérequis netcode) — voir §Physique.
   deux cas** (JIT et AOT) sur ce probe — effet de bord de `PublishAot=true` posé au niveau projet sur le
   `runtimeconfig.json` généré même par `dotnet build`, pas un différenciateur JIT/AOT fiable à lui seul
   (confirmé en inspectant le `runtimeconfig.json` réel) — le vrai signal reste le contenu du dossier
-  publié. **Prochaine étape** (non entamée, sur la branche `spike/noesis-probe`) : décider si on pousse
-  Noesis plus loin (écrire le `RenderDevice` Vulkan, poser `IUiHost`) ou si on compare encore avec
-  Ultralight/un système custom SkiaSharp maintenant que CEF et Noesis sont tous deux tranchés côté AOT.
+  publié.
+
+  **Vertical slice `VulkanRenderDevice` (même branche, clos, PASS)** — suite directe, scopée via un
+  cycle `/absolute-brainstorm` dédié (contrat `Noesis.RenderDevice`/`RenderTarget`/`Texture` vérifié
+  contre le vrai source `Noesis/Managed` via `gh api`, jamais deviné). **Portée réduite au remplissage
+  solide** (`Path_Solid`/`Path_AA_Solid` — pas de dégradés/images/texte/flou/stencil). Nouveau
+  `src/Agapanthe.Ui.Noesis` (référence `Agapanthe.Graphics` directement, ses types sont déjà
+  Vk*-free) : `VulkanTexture`/`VulkanRenderTarget` (contrats triviaux) + `VulkanRenderDevice`
+  (`DrawBatch` = le cœur). **Différence d'architecture découverte en route** : Noesis ne passe aucun
+  `CommandList` à `RenderDevice` (contrairement aux passes internes d'`Agapanthe.Rendering`) — chaque
+  `DrawBatch` ouvre son propre `GraphicsDevice.SubmitImmediate` (correctness-first, pas perf-first).
+  Composition via un nouveau `NoesisCompositePass`/`Renderer.DrawTexture` générique (`Agapanthe.Rendering`
+  ne référence jamais Noesis), démo `Key.K` (Sandbox).
+
+  **2 vrais bugs trouvés par diagnostic en direct, jamais devinés.** D'abord, layout des uniforms
+  reverse-engineé (documenté nulle part hors du SDK Native, jamais téléchargé) via un
+  `LoggingRenderDevice` jetable substitué au vrai backend dans `tools/NoesisAotProbe` : un seul batch
+  `Path_Solid` pour un `<Grid Background="Red"/>`, `VertexUniform0` = matrice de projection
+  orthographique 16 floats **row-major**. Puis, le vrai `VulkanRenderDevice` branché dans le Sandbox
+  ne produisait **rien** malgré des données 100% correctes (isolé via `GpuReadback` du pixel central,
+  séparant le `RenderDevice` de la passe de composition) : **(1)** `layout(push_constant, row_major)`
+  n'a aucun effet avec ce shaderc/glslang — corrigé par transposition CPU (`Matrix4x4.Transpose`) plutôt
+  que de faire confiance au qualifier GLSL ; **(2)** matrice corrigée, toujours rien — la ligne Z de
+  Noesis produit un NDC `[-1,1]` (convention OpenGL) que le volume de clip Vulkan `[0,1]` élimine
+  entièrement **avant le fragment shader** (clipping géométrique, un stage distinct du depth test —
+  `DepthTest=false` sans depth attachment ne le désactive pas) — corrigé en forçant `gl_Position.z = 0.0`
+  (le pipeline ne fait aucun depth test). Vérifié : `GpuReadback` = `(255,0,0,255)` centre et coin, puis
+  **verdict visuel humain PASS** (rectangle rouge plein écran). 1016/1016 tests verts, 0 leak, 0 validation.
+
+  **Dette explicitement versée** (branche non mergée) : `CreateTexture`/`UpdateTexture` lèvent pour tout
+  chemin non exercé par la démo (texture immuable, mise à jour de sous-région — `GpuUploader` n'a qu'un
+  chemin plein-image) · chaque `GpuImage` créée est trackée dans une liste plate et libérée en bloc à
+  `Dispose()` plutôt que raccrochée au refcounting natif de Noesis (`RenderTarget`/`Texture` sont
+  `BaseComponent`, un vrai hook existe, pas câblé) · `BeginTile`/`EndTile`/`ResolveRenderTarget` no-op
+  (rendu tuilé hors scope) · `DrawBatch` = un `SubmitImmediate` bloquant par batch (des dizaines de
+  batches réels feraient autant d'allers-retours GPU — perf différée, pas encore rencontrée en pratique).
+  **Prochaine étape** (non entamée) : dégradés/texte-SDF/images, le contrat `IUiHost` swappable, ou
+  comparaison Ultralight/SkiaSharp maintenant que AOT `.NET 10` et la faisabilité `RenderDevice` Vulkan
+  sont tous deux tranchés en faveur de Noesis.
 - 🟡 **Job-1 — churn de threads dans la suite de tests** : plusieurs classes de test (`SystemSchedulerParallelismTests`,
   `SystemSchedulerWaveGroupingTests`) créent et détruisent de vrais pools de threads OS pour prouver un
   parallélisme réel. Prouvé par A/B (`git stash`) : 23/23 propre sur la baseline pré-Job-1, ~1/10-15 flaky avec
