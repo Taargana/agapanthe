@@ -344,7 +344,7 @@ public sealed class AppHostContractTests
         Assert.Equal(
             new[]
             {
-                "audioDevice.Dispose+ReportLeaks", "noesisDevice.Dispose", "frameRenderer.WaitIdle", "frameRenderer.Dispose",
+                "audioDevice.Dispose+ReportLeaks", "uiHost.Dispose", "frameRenderer.WaitIdle", "frameRenderer.Dispose",
                 "world.Dispose", "registry.Dispose", "renderer.Dispose", "device.DeletionQueue.FlushAll", "swapchain.Dispose",
                 "device.Dispose", "ResourceTracker.Report", "window.Dispose",
             },

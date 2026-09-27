@@ -12,9 +12,22 @@ public sealed class VulkanRenderTarget : global::Noesis.RenderTarget
 {
     public GpuImage Image { get; }
 
-    /// <summary>Whether this target has been drawn into at least once (tracks the Undefined→ColorAttachment
-    /// layout transition and the Clear-vs-Load decision — see <see cref="VulkanRenderDevice.DrawBatch"/>).</summary>
+    /// <summary>Whether this target has been drawn into at least once (tracks the one-shot
+    /// Undefined→ColorAttachment layout transition — see <see cref="VulkanRenderDevice.DrawBatch"/>).</summary>
     internal bool EverRendered { get; set; }
+
+    /// <summary>Set by <see cref="RequestClear"/>, consumed (reset to false) by the next
+    /// <see cref="VulkanRenderDevice.DrawBatch"/> call. Separate from <see cref="EverRendered"/>: that flag is
+    /// permanent (drives the one-time layout transition), this one is per-frame (drives the Clear-vs-Load
+    /// decision) — a caller (e.g. <c>NoesisUiHost.Tick</c>) calls <see cref="RequestClear"/> once per frame so the
+    /// FIRST batch of that frame clears instead of accumulating over the previous frame's content.</summary>
+    internal bool PendingClear { get; set; }
+
+    /// <summary>Arms <see cref="PendingClear"/> for this target's next <see cref="VulkanRenderDevice.DrawBatch"/>
+    /// call — call once per frame, before rendering, so transparent/animated content does not accumulate across
+    /// frames (a bug found live: the vertical slice's demo never surfaced this because its content is solid
+    /// opaque red).</summary>
+    internal void RequestClear() => PendingClear = true;
 
     private readonly VulkanTexture _texture;
 

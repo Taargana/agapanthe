@@ -7,7 +7,12 @@
 > Règle de tri : chaque item dit **ce qui casse sans lui** et **à quelle échelle il devient obligatoire**. Un item sans
 > déclencheur clair est une idée, pas du backlog.
 
-Dernière mise à jour : 2026-09-11 (session 34 — **Contenu-3b LIVRÉ → domaine Contenu CLOS (3/3)** :
+Dernière mise à jour : 2026-09-27 (branche `spike/noesis-probe` — **`IUiHost` LIVRÉ, PASS** : contrat d'UI
+riche swappable, `Agapanthe.App` ne référence plus `Agapanthe.Ui.Noesis` ; un vrai hazard Vulkan
+`READ_AFTER_WRITE` trouvé en rendant l'UI automatique (jamais exercé par capture headless avant),
+`WaitIdle` masquait la cause sans la corriger, fermé par une vraie barrière + 5 autres bugs ; double audit
+convergent 3,3-3,7/5 PASS-with-concerns ; 1016/1016 tests, 0 leak, 0 validation ; voir §4quater UI riche) ·
+2026-09-11 (session 34 — **Contenu-3b LIVRÉ → domaine Contenu CLOS (3/3)** :
 `.agscene`/`.agprefab` TOML→blob cuit (Tomlyn cook-side) + `SceneLoader` GPU-free (`Agapanthe.Scene` =
 `{Core, World, Assets}`) — client et serveur partagent le peuplement, `HeadlessSim --scene <clé>` charge le
 même fichier que le Sandbox ; famille `model` devient data ; double audit ×2 4,1/5 PASS-with-concerns aucun
@@ -870,9 +875,48 @@ pas fixe = source de vérité unique (prérequis netcode) — voir §Physique.
   `BaseComponent`, un vrai hook existe, pas câblé) · `BeginTile`/`EndTile`/`ResolveRenderTarget` no-op
   (rendu tuilé hors scope) · `DrawBatch` = un `SubmitImmediate` bloquant par batch (des dizaines de
   batches réels feraient autant d'allers-retours GPU — perf différée, pas encore rencontrée en pratique).
-  **Prochaine étape** (non entamée) : dégradés/texte-SDF/images, le contrat `IUiHost` swappable, ou
-  comparaison Ultralight/SkiaSharp maintenant que AOT `.NET 10` et la faisabilité `RenderDevice` Vulkan
-  sont tous deux tranchés en faveur de Noesis.
+
+  **`IUiHost` — contrat d'UI riche swappable (même branche, clos, PASS)** — ferme la contrainte
+  verrouillée « le moteur d'UI doit pouvoir être changé », restée seulement affirmée depuis le vertical
+  slice ci-dessus. Spec construite via `/absolute-brainstorm` (9 décisions verrouillées) : le jeu décide
+  du moteur (`IGame.CreateUiHost(GraphicsDevice, shaderDir) → IUiHost?`, défaut `null`, mirror
+  `ISceneRecipe.Build`) ; contrat minimal `IUiHost : IDisposable { Tick(double); GpuImage? CurrentFrame; }`
+  — pas d'input/`LoadDocument`/`Resize` ce jalon (jamais devinable sans 2ᵉ moteur pour valider la forme) ;
+  `AppHost` possède `Tick` génériquement ; démo migrée — `Agapanthe.App` **perd** sa référence directe à
+  `Agapanthe.Ui.Noesis` (déplacée vers `samples/Sandbox`), rectangle automatique dès la frame 1 (fini le
+  toggle `Key.K`).
+
+  **Rendre l'UI automatique a immédiatement révélé un vrai hazard `READ_AFTER_WRITE`**, jamais exercé
+  par aucune capture headless avant (`Key.K` n'est jamais pressée sous `AGAPANTHE_MAX_FRAMES`). Premier
+  correctif (`vkDeviceWaitIdle()` en tête de `Tick`) faisait taire la validation layer sans corriger la
+  vraie cause — trouvé par le double audit (`csharp-lowlevel` 3,3/5 + `engine-architect` 3,7/5,
+  convergence totale) : la transition retour de `Renderer.DrawTexture` (`ShaderReadOnly→ColorAttachment`,
+  `TransitionImage` simple) a un accès destination **write-only** — le piège exact que le commentaire de
+  `CommandList.ColorAttachmentBarrier` documentait déjà. Corrigé par une vraie barrière
+  (`cmd.ColorAttachmentBarrier`) dans `VulkanRenderDevice.DrawBatch`, `WaitIdle` retiré (il stallait le
+  device entier à chaque frame, réduisant tout jeu avec UI à 1 frame en vol en permanence). **5 autres
+  bugs trouvés et corrigés** : `CurrentFrame` pouvait publier un layout `Undefined` (racine sans batch) ;
+  aucun clear par frame (`PendingClear` séparé de `EverRendered`) ; `Dispose()` sans
+  `_view.Renderer.Shutdown()`/`_view.Dispose()` ; `GUI.Init()` sans garde/refcount ; fuite si le ctor
+  throw à mi-chemin ; `Tick` recevait le `dt` wall-clock brut au lieu de `wallClockDt` (cassait la
+  reproductibilité `AGAPANTHE_MAX_FRAMES`, MP-0c). 1016/1016 tests verts, 0 leak, 0 validation sur 10
+  frames headless consécutives (contre 5 avant, jamais de hazard), verdict visuel humain PASS.
+
+  **2 recommandations de design non retenues ce jalon** (choix humain explicite : bugs seulement,
+  design versé en dette) : `IUiHost` déplacé vers `Agapanthe.Engine.Render` plutôt que `Agapanthe.App`
+  (le sens `Ui.Noesis → App` tire transitivement Audio/Scene/Engine/World, contraire au split
+  `App`/`App.Client` déjà au backlog — voir `docs/BACKLOG.md` dette S30) ; `CreateUiHost(GraphicsDevice,
+  string)` remplacé par un `UiHostContext` extensible (mirror `PresentationSceneContext`) pour que la
+  dette input/resize n'oblige pas à casser `IGame` à chaque ajout. YAGNI tant qu'un 2ᵉ moteur d'UI
+  n'existe pas pour valider la vraie forme. Autres 🟡 : pas de saut de passe quand `UpdateRenderTree`
+  signale « rien à rendre » (perf) · nommage `Noesis*` dans les couches génériques (`NoesisCompositePass`,
+  `shaders/noesis_composite.*`) — renommage en `TextureComposite*` différé · pas de gate réflexive
+  « la closure d'assemblies de `Agapanthe.App` ne contient aucun type Noesis » (l'allowlist statique ne
+  protège que la `ProjectReference`, pas un futur `PackageReference` posé directement sur `App`).
+
+  **Prochaine étape** (non entamée) : dégradés/texte-SDF/images, les 2 recommandations de design
+  ci-dessus, ou comparaison Ultralight/SkiaSharp maintenant que AOT `.NET 10`, la faisabilité
+  `RenderDevice` Vulkan et un contrat swappable minimal sont tous tranchés en faveur de Noesis.
 - 🟡 **Job-1 — churn de threads dans la suite de tests** : plusieurs classes de test (`SystemSchedulerParallelismTests`,
   `SystemSchedulerWaveGroupingTests`) créent et détruisent de vrais pools de threads OS pour prouver un
   parallélisme réel. Prouvé par A/B (`git stash`) : 23/23 propre sur la baseline pré-Job-1, ~1/10-15 flaky avec

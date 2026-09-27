@@ -59,11 +59,10 @@ public static class AppHost
         DebugOverlaySystem? debugOverlay = null;
         AudioDevice? audioDevice = null;
         AudioClip audioDemoClip = default;
-        // Noesis spike (branch spike/noesis-probe, vertical slice): Key.K renders a solid-color XAML
-        // through VulkanRenderDevice once, into noesisTexture; noesisSystem composites it every frame.
-        Ui.Noesis.VulkanRenderDevice? noesisDevice = null;
-        GpuImage? noesisTexture = null;
-        NoesisDemoRenderSystem? noesisSystem = null;
+        // IUiHost milestone: the game decides (IGame.CreateUiHost) whether a rich-UI engine backs this run — null
+        // for every game before this milestone. AppHost owns Tick (below, on window.Rendered) and disposal
+        // generically; it never names a concrete UI engine.
+        IUiHost? uiHost = null;
 
         var world = new GameWorld(GlobalIdRange.Default, ResolveUniverse(game, options));
         var camera = new Camera();
@@ -106,8 +105,16 @@ public static class AppHost
             orchestrator = FrameOrchestrator.CreateDefault(
                 simulation, world, renderer, registry, camera, renderList);
 
+            // IUiHost milestone: built right after the device exists (mirrors ISceneRecipe.Build's timing) and
+            // registered BEFORE the debug overlay below (audit finding: a full-screen game UI must render
+            // UNDER the debug tools, not over them — F3's overlay needs to stay visible/legible regardless of
+            // what the game's UI draws).
+            uiHost = game.CreateUiHost(device, shaderDir);
+            orchestrator.Add(new UiHostRenderSystem(renderer, uiHost));
+
             // The debug overlay (UI-2) is engine infrastructure, not a game concern: it records frame metrics every
-            // frame whether shown or not. Registered here so it runs after the scene view system.
+            // frame whether shown or not. Registered here so it runs after the scene view system AND after the
+            // game's UI host above, so it always draws on top.
             var fontPath = Path.Combine(AppContext.BaseDirectory, "fonts", "JetBrainsMono-Regular.agfont");
             if (File.Exists(fontPath))
             {
@@ -128,11 +135,6 @@ public static class AppHost
             {
                 Log.Warn($"AppHost: [ui] no cooked font at '{fontPath}' — text overlay disabled.");
             }
-
-            // Noesis spike (branch spike/noesis-probe): registered unconditionally (no font dependency) so
-            // Key.K works whether or not a font was found above; a no-op every frame until Key.K sets Texture.
-            noesisSystem = new NoesisDemoRenderSystem(renderer);
-            orchestrator.Add(noesisSystem);
 
             // Contenu-2: the cooked-content catalog — recipes resolve models by AssetKey through it, no glTF at runtime.
             // A fully-procedural scene (planet*) needs no cooked content, so a missing manifest is a warning, not a
@@ -335,54 +337,6 @@ public static class AppHost
                     }
 
                     break;
-                case Key.K when device is not null && noesisSystem is not null:
-                    // Noesis spike demo (branch spike/noesis-probe, vertical slice): renders a solid-color
-                    // XAML through VulkanRenderDevice into its own offscreen GpuImage, then composites that
-                    // texture over the frame every tick via NoesisDemoRenderSystem. No Noesis.RenderContext
-                    // involved at all — CreateRenderTarget/SetRenderTarget (both public overrides on our own
-                    // device) are called directly, since there is no window/swapchain-specific context layer
-                    // standing in for "the default target" the way RenderContextWGL provided in the earlier
-                    // spike probe.
-                    try
-                    {
-                        if (noesisDevice is null)
-                        {
-                            global::Noesis.GUI.Init(); // process-global; safe to call once, guarded by noesisDevice.
-                            noesisDevice = new Ui.Noesis.VulkanRenderDevice(device, shaderDir);
-
-                            var target = (Ui.Noesis.VulkanRenderTarget)noesisDevice.CreateRenderTarget(
-                                "NoesisDemo", 800, 600, 1, false);
-                            noesisDevice.SetRenderTarget(target);
-
-                            const string xaml = """
-                                <Grid xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" Background="Red"/>
-                                """;
-                            var root = (global::Noesis.FrameworkElement)global::Noesis.GUI.ParseXaml(xaml);
-                            var view = global::Noesis.GUI.CreateView(root);
-                            view.SetSize(800, 600);
-                            view.Renderer.Init(noesisDevice);
-                            view.Update(0.0);
-                            view.Renderer.UpdateRenderTree();
-                            view.Renderer.RenderOffscreen();
-                            view.Renderer.Render();
-
-                            noesisTexture = target.Image;
-                            noesisSystem.Texture = noesisTexture;
-                            Log.Info("AppHost: [noesis] rendered demo Grid into an offscreen texture.");
-                        }
-                        else
-                        {
-                            // Toggle visibility on repeat presses — easy on/off for the visual-verdict check.
-                            noesisSystem.Texture = noesisSystem.Texture is null ? noesisTexture : null;
-                            Log.Info($"AppHost: [noesis] composite {(noesisSystem.Texture is null ? "hidden" : "shown")}.");
-                        }
-                    }
-                    catch (Exception ex) when (ex is not (OutOfMemoryException or StackOverflowException))
-                    {
-                        Log.Error($"AppHost: Key.K noesis demo failed — {ex.GetType().Name}: {ex.Message}");
-                    }
-
-                    break;
             }
 
             void LogSensitivity()
@@ -405,15 +359,20 @@ public static class AppHost
 
             renderer.PollShaderReload();
 
+            // Tick OUTSIDE DrawFrame (P3-M2 D1.a). In capture/bench mode (maxFrames > 0) feed a constant equal to
+            // the fixed step so the run is reproducible tick-for-tick; an interactive session consumes the real dt.
+            var wallClockDt = maxFrames > 0 ? orchestrator.FixedTickDeltaSeconds : (float)dt;
+            // IUiHost milestone (audit finding): must use the SAME dt as the simulation tick below, not the raw
+            // wall-clock `dt` — an animated UI fed the real dt in capture/bench mode would break MP-0c's
+            // reproducibility guarantee (AGAPANTHE_MAX_FRAMES demands a synthetic constant dt for the whole frame).
+            uiHost?.Tick(wallClockDt);
+
             if (options.CullStats)
             {
                 benchAllocBefore = GC.GetAllocatedBytesForCurrentThread();
                 benchCpuStart = Stopwatch.GetTimestamp();
             }
 
-            // Tick OUTSIDE DrawFrame (P3-M2 D1.a). In capture/bench mode (maxFrames > 0) feed a constant equal to
-            // the fixed step so the run is reproducible tick-for-tick; an interactive session consumes the real dt.
-            var wallClockDt = maxFrames > 0 ? orchestrator.FixedTickDeltaSeconds : (float)dt;
             orchestrator.Tick(wallClockDt);
             frameRenderer.DrawFrame(orchestrator.RenderDelegate);
             orchestrator.EndFrame(); // AFTER DrawFrame: the bracket covers submit + present, and resize frames too
@@ -542,10 +501,10 @@ public static class AppHost
                         Log.Error("AppHost: AUDIO LEAK DETECTED — an OpenAL buffer/source was never released.");
                     }
                 },
-                // Noesis spike (branch spike/noesis-probe): disposes every GpuImage/pipeline/shader/buffer
-                // the demo's VulkanRenderDevice created, ahead of device.DeletionQueue.FlushAll() below so
-                // their deferred destroys (GpuImage.Dispose() is N+2-frame-deferred) actually get flushed.
-                DisposeNoesis = () => noesisDevice?.Dispose(),
+                // IUiHost milestone: disposes whatever the game's IUiHost owns (a VulkanRenderDevice's
+                // GpuImage/pipeline/shader/buffer resources, for Noesis) ahead of device.DeletionQueue.FlushAll()
+                // below so their deferred destroys (GpuImage.Dispose() is N+2-frame-deferred) actually get flushed.
+                DisposeUiHost = () => uiHost?.Dispose(),
             };
 
             // Each step is isolated: a throw in one (e.g. WaitIdle on a lost device) must not skip the leak
@@ -634,11 +593,11 @@ public static class AppHost
         var win = t.Window;
         var report = t.Report;
         var disposeAudio = t.DisposeAudio;
-        var disposeNoesis = t.DisposeNoesis;
+        var disposeUiHost = t.DisposeUiHost;
         return
         [
             ("audioDevice.Dispose+ReportLeaks", disposeAudio ?? (static () => { })),
-            ("noesisDevice.Dispose", disposeNoesis ?? (static () => { })),
+            ("uiHost.Dispose", disposeUiHost ?? (static () => { })),
             ("frameRenderer.WaitIdle", () => fr?.WaitIdle()),
             ("frameRenderer.Dispose", () => fr?.Dispose()),
             ("world.Dispose", () => w?.Dispose()),
@@ -704,8 +663,8 @@ internal readonly record struct TeardownTargets(
     /// caller-owned flag — <c>default</c> leaves it a no-op so a test can assert the label order unaffected.</summary>
     public Action? DisposeAudio { get; init; }
 
-    /// <summary>Noesis spike (branch spike/noesis-probe): disposes the <c>VulkanRenderDevice</c> (and the
-    /// GpuImage/pipeline/shader/buffer resources it owns) before <c>device.Dispose()</c> — <c>default</c>
-    /// leaves it a no-op so a test can assert the label order unaffected.</summary>
-    public Action? DisposeNoesis { get; init; }
+    /// <summary>IUiHost milestone: disposes the game's <see cref="IUiHost"/> (if any) before
+    /// <c>device.Dispose()</c> — <c>default</c> leaves it a no-op so a test can assert the label order
+    /// unaffected.</summary>
+    public Action? DisposeUiHost { get; init; }
 }

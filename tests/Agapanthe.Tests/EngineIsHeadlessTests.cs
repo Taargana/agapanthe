@@ -62,12 +62,13 @@ public sealed class EngineIsHeadlessTests
     // used to live in samples/Sandbox), not named here. The MSBuild cycle only catches half of this (a re-added
     // ProjectReference the compiler elides stays green until first use) — the same one-commit blind spot MP-0a's
     // static allowlist exists to close.
-    // Noesis spike (branch spike/noesis-probe): Agapanthe.Ui.Noesis referenced directly from AppHost
-    // (Key.K demo), same posture as Agapanthe.Audio's own direct reference above.
+    // IUiHost milestone: Agapanthe.App defines IUiHost/IGame.CreateUiHost but never names a concrete UI engine —
+    // Agapanthe.Ui.Noesis was removed from this allowlist (it now references App, not the reverse; see
+    // Sandbox.csproj, which wires the concrete NoesisUiHost via SandboxGame.CreateUiHost).
     [InlineData(
         "src/Agapanthe.App/Agapanthe.App.csproj",
         "Agapanthe.Assets", "Agapanthe.Audio", "Agapanthe.Core", "Agapanthe.Engine", "Agapanthe.Engine.Render",
-        "Agapanthe.Graphics", "Agapanthe.Rendering", "Agapanthe.Scene", "Agapanthe.Ui", "Agapanthe.Ui.Noesis",
+        "Agapanthe.Graphics", "Agapanthe.Rendering", "Agapanthe.Scene", "Agapanthe.Ui",
         "Agapanthe.World")]
     // Slice-2 (audit finding, both csharp-lowlevel and engine-architect): the one project a Platform reference AND
     // an App reference can meet without pulling Vulkan into App itself — its entire reason to exist is being that

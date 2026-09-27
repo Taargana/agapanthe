@@ -1,3 +1,4 @@
+using Agapanthe.Graphics;
 using Agapanthe.World;
 
 namespace Agapanthe.App;
@@ -30,4 +31,10 @@ public interface IGame
     /// <c>[[system]]</c> block needs no changes here. <see cref="SceneRecipe"/> dispatches by matching
     /// <see cref="ISceneSystemFactory.Kind"/> and throws for a kind with no registered factory.</summary>
     IReadOnlyList<ISceneSystemFactory> SceneSystems => [];
+
+    /// <summary>Builds this game's rich-UI engine, once the GPU device exists — null (the default) for a game with
+    /// no rich UI (every game before this milestone). Mirrors <see cref="ISceneRecipe.Build"/>'s shape: a factory
+    /// method taking GPU-dependent context, called once by <see cref="AppHost"/>. The game decides which concrete
+    /// <see cref="IUiHost"/> (Noesis today) is behind the contract — <see cref="AppHost"/> never names one.</summary>
+    IUiHost? CreateUiHost(GraphicsDevice device, string shaderDir) => null;
 }

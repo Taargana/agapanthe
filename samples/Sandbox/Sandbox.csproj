@@ -2,6 +2,9 @@
 
   <ItemGroup>
     <ProjectReference Include="..\..\src\Agapanthe.App\Agapanthe.App.csproj" />
+    <!-- IUiHost milestone: the Sandbox is the game that decides Noesis backs its rich UI (SandboxGame.CreateUiHost)
+         — Agapanthe.App itself never names a concrete UI engine (see IUiHost/IGame.CreateUiHost). -->
+    <ProjectReference Include="..\..\src\Agapanthe.Ui.Noesis\Agapanthe.Ui.Noesis.csproj" />
     <ProjectReference Include="..\..\src\Agapanthe.Platform.App\Agapanthe.Platform.App.csproj" />
     <ProjectReference Include="..\..\src\Agapanthe.Engine\Agapanthe.Engine.csproj" />
     <ProjectReference Include="..\..\src\Agapanthe.Engine.Render\Agapanthe.Engine.Render.csproj" />

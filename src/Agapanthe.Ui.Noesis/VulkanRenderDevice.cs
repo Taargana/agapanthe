@@ -251,13 +251,35 @@ public sealed class VulkanRenderDevice : global::Noesis.RenderDevice
                 cmd.TransitionImage(target.Image, ImageLayoutState.Undefined, ImageLayoutState.ColorAttachment);
                 target.EverRendered = true;
             }
+            else
+            {
+                // Cross-submission hazard, found live (headless capture) once the UI started compositing every
+                // frame instead of once per keypress: Renderer.DrawTexture's trailing transition back to
+                // ColorAttachment (a PLAIN TransitionImage) only grants COLOR_ATTACHMENT_WRITE on its destination
+                // access — see CommandList.ColorAttachmentBarrier's own doc comment, which names this exact
+                // pitfall ("its destination access is write-only, which misses the read half of the hazard").
+                // This BeginRendering's LoadOp=Load then READS the attachment, a READ_AFTER_WRITE the plain
+                // transition never covered — reported by synchronization validation as a hazard between this
+                // SubmitImmediate and the PREVIOUS frame's own (semaphore-gated) composite submission on the
+                // same queue. A pipeline barrier's first synchronization scope includes every command submitted
+                // earlier on the same queue, even from an earlier vkQueueSubmit2 call — no semaphore or host wait
+                // needed, unlike the vkDeviceWaitIdle() this replaces (which only masked the symptom and stalled
+                // the whole device, collapsing frame pipelining, every single frame).
+                cmd.ColorAttachmentBarrier(new RenderTargetView(target.Image));
+            }
+
+            // PendingClear (armed once per frame by the caller, e.g. NoesisUiHost.Tick) is independent of
+            // firstTouch: firstTouch is permanent (this image's one-time layout transition), PendingClear is
+            // per-frame (Clear-vs-Load for the first batch of THIS frame specifically).
+            var clear = firstTouch || target.PendingClear;
+            target.PendingClear = false;
 
             cmd.BeginRendering(new RenderingAttachments
             {
                 Color = new ColorAttachmentInfo
                 {
                     Target = new RenderTargetView(target.Image),
-                    LoadOp = firstTouch ? AttachmentLoadAction.Clear : AttachmentLoadAction.Load,
+                    LoadOp = clear ? AttachmentLoadAction.Clear : AttachmentLoadAction.Load,
                     ClearColor = (0f, 0f, 0f, 0f),
                 },
                 Width = target.Image.Width,

@@ -16,6 +16,10 @@
   <ItemGroup>
     <ProjectReference Include="..\Agapanthe.Graphics\Agapanthe.Graphics.csproj" />
     <ProjectReference Include="..\Agapanthe.Core\Agapanthe.Core.csproj" />
+    <!-- IUiHost lives in Agapanthe.App (alongside IGame/ISceneRecipe/IWindow) — NoesisUiHost implements it.
+         No cycle: Agapanthe.App no longer references Agapanthe.Ui.Noesis (the game, e.g. Sandbox, wires the
+         concrete type instead — see IGame.CreateUiHost). -->
+    <ProjectReference Include="..\Agapanthe.App\Agapanthe.App.csproj" />
   </ItemGroup>
 
   <ItemGroup>

@@ -1,5 +1,7 @@
 using Agapanthe.App;
+using Agapanthe.Graphics;
 using Agapanthe.Platform.App.Systems;
+using Agapanthe.Ui.Noesis;
 
 namespace Sandbox;
 
@@ -36,4 +38,13 @@ internal sealed class SandboxGame : IGame
     // Contenu-3c: the scene-system factory registry.
     public IReadOnlyList<ISceneSystemFactory> SceneSystems { get; } =
         [new ProbeDropSystemFactory(), new LandingChallengeSystemFactory(), new DriveControlSystemFactory()];
+
+    // IUiHost milestone (branch spike/noesis-probe): the Sandbox is the one game that wires a rich UI. Renders
+    // automatically from frame 1 — no toggle key — proving the contract needs nothing app-specific beyond
+    // AppHost's generic Tick + composite.
+    private const string DemoXaml = """
+        <Grid xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" Background="Red"/>
+        """;
+
+    public IUiHost CreateUiHost(GraphicsDevice device, string shaderDir) => new NoesisUiHost(device, shaderDir, DemoXaml);
 }
