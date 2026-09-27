@@ -1,0 +1,15 @@
+<Project>
+  <!-- Club Architect packaging (D10) — corrected during execution verification: NuGet's `contentFiles`
+       convention only auto-flows for a DIRECTLY referenced package (verified empirically: Club
+       Architect references Agapanthe.Platform.App directly, Agapanthe.Graphics only transitively,
+       and the packaged shaders/**  never reached its output directory despite a correct nuspec).
+       `buildTransitive/{PackageId}.targets` is the mechanism NuGet actually auto-imports for EVERY
+       consumer regardless of reference depth — packed via the ItemGroup in
+       Agapanthe.Graphics.csproj (PackagePath="buildTransitive/"), it re-copies the same files this
+       package already ships under contentFiles/any/any/shaders/ into the consumer's own output. -->
+  <ItemGroup>
+    <Content Include="$(MSBuildThisFileDirectory)..\contentFiles\any\any\shaders\**"
+             CopyToOutputDirectory="PreserveNewest"
+             Link="shaders\%(RecursiveDir)%(Filename)%(Extension)" />
+  </ItemGroup>
+</Project>

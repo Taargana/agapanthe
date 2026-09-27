@@ -40,6 +40,9 @@
              Pack="true"
              PackagePath="contentFiles/any/any/shaders/"
              PackageCopyToOutput="true" />
+    <!-- buildTransitive companion (see the .targets file's own comment) — the actual mechanism that
+         makes a package's data files reach a consumer that only references it transitively. -->
+    <None Include="build\Agapanthe.Graphics.targets" Pack="true" PackagePath="buildTransitive/" />
   </ItemGroup>
 
 </Project>

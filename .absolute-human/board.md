@@ -30,12 +30,12 @@ AW-006 ClubArch scaffold  ──┤   AW-003 IsPackable×12        ──┼─�
 
 | ID | Title | Type | Size | Deps | Status |
 |---|---|---|---|---|---|
-| AW-001 | Agapanthe: branch off `main` (`feat/package-separation`) | infra | S | — | pending |
-| AW-006 | Club Architect: repo scaffold (git init, slnx, NuGet.config, Directory.Build.props) | infra | S | — | pending |
-| AW-002 | Agapanthe: NBGV wiring (Directory.Build.props + version.json) | config | S | AW-001 | pending |
-| AW-003 | Agapanthe: IsPackable=true + metadata on 12/13 projects (all but Graphics) | config | M | AW-001 | pending |
-| AW-004 | Agapanthe: Agapanthe.Graphics.csproj — IsPackable=true + shaders contentFiles | config | S | AW-001 | pending |
-| AW-005 | Agapanthe: commit, pack -c Debug, verify 13 nupkg + full test suite green | verify | gate | AW-002,003,004 | pending |
+| AW-001 | Agapanthe: branch off `main` (`feat/package-separation`) | infra | S | — | **done** |
+| AW-006 | Club Architect: repo scaffold (git init, slnx, NuGet.config, Directory.Build.props) | infra | S | — | **done** |
+| AW-002 | Agapanthe: NBGV wiring (Directory.Build.props + version.json) | config | S | AW-001 | **done** |
+| AW-003 | Agapanthe: IsPackable=true + metadata on 12/13 projects (all but Graphics) | config | M | AW-001 | **done** |
+| AW-004 | Agapanthe: Agapanthe.Graphics.csproj — IsPackable=true + shaders contentFiles | config | S | AW-001 | **done** |
+| AW-005 | Agapanthe: commit, pack -c Debug, verify 13 nupkg + full test suite green | verify | gate | AW-002,003,004 | **done** (commit `dc30ffc`, 13 nupkg at `0.1.1-gdc30ffc6b9`, 1014/1014 tests) |
 | AW-007 | Club Architect: minimal executable (csproj + IGame + Program.cs) | code | S | AW-005,006 | pending |
 | AW-008 | Club Architect: restore/build/run/publish-AOT verification | verify | gate | AW-007 | pending |
 | AW-009 | Self Code Review | tail | — | AW-008 | pending |
