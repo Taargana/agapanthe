@@ -13,6 +13,9 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <IsAotCompatible>true</IsAotCompatible>
+    <!-- Club Architect packaging (D5): opt-in override of Directory.Build.props' default. -->
+    <IsPackable>true</IsPackable>
+    <Description>Agapanthe engine — shared windowed-client glue (EngineWindowAdapter).</Description>
   </PropertyGroup>
 
   <ItemGroup>

@@ -8,6 +8,9 @@
          TreatWarningsAsErrors, any AOT-unsafe pattern in our own code becomes a build error here — the
          permanent AOT gate, enforced per-library rather than only at the Sandbox's publish step. -->
     <IsAotCompatible>true</IsAotCompatible>
+    <!-- Club Architect packaging (D5): opt-in override of Directory.Build.props' default. -->
+    <IsPackable>true</IsPackable>
+    <Description>Agapanthe engine — core value types and utilities shared by every layer.</Description>
   </PropertyGroup>
 
 </Project>

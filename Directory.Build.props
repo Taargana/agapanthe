@@ -6,5 +6,17 @@
     <LangVersion>latest</LangVersion>
     <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
     <InvariantGlobalization>true</InvariantGlobalization>
+    <!-- Club Architect packaging (docs/plans/2026-09-27-club-architect-package-separation-design.md,
+         D5): explicit per-project opt-in only — mirrors this repo's allowlist culture
+         (EngineIsHeadlessTests). A project must set IsPackable=true itself to ever be packed. -->
+    <IsPackable>false</IsPackable>
   </PropertyGroup>
+
+  <ItemGroup>
+    <!-- Nerdbank.GitVersioning (D4): every packable project gets the same commit-derived version,
+         with ProjectReference->PackageReference rewritten to the matching version automatically by
+         the standard NuGet pack task. PrivateAssets="all" — a build-time-only tool, never a runtime
+         or transitive dependency of anything this repo ships. -->
+    <PackageReference Include="Nerdbank.GitVersioning" Version="3.10.85" PrivateAssets="all" />
+  </ItemGroup>
 </Project>

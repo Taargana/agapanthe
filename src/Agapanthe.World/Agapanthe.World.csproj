@@ -21,6 +21,9 @@
     <!-- Phase 2 rule 1: AOT analyzers on. Arch is exercised only through blittable component structs and
          non-reflection generic calls (validated AOT-viable in P2-M0). -->
     <IsAotCompatible>true</IsAotCompatible>
+    <!-- Club Architect packaging (D5): opt-in override of Directory.Build.props' default. -->
+    <IsPackable>true</IsPackable>
+    <Description>Agapanthe engine — the ECS world model (GameWorld, entities, components).</Description>
   </PropertyGroup>
 
 </Project>

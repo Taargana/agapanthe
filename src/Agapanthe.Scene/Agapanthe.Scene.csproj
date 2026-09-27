@@ -7,6 +7,9 @@
     <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
     <!-- Phase 2 rule 1: trim/AOT analyzers at build time (permanent gate). -->
     <IsAotCompatible>true</IsAotCompatible>
+    <!-- Club Architect packaging (D5): opt-in override of Directory.Build.props' default. -->
+    <IsPackable>true</IsPackable>
+    <Description>Agapanthe engine — GPU-free declarative scene/prefab loader.</Description>
   </PropertyGroup>
 
   <!-- Contenu-3b: the GPU-free scene runtime. Reads a cooked .agscene (Agapanthe.Assets), spawns entities into a

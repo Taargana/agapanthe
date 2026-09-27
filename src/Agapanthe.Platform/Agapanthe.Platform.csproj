@@ -21,6 +21,9 @@
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
     <!-- Phase 2 rule 1: trim/AOT analyzers at build time (permanent gate, see Agapanthe.Core.csproj). -->
     <IsAotCompatible>true</IsAotCompatible>
+    <!-- Club Architect packaging (D5): opt-in override of Directory.Build.props' default. -->
+    <IsPackable>true</IsPackable>
+    <Description>Agapanthe engine — window and input backend (GLFW via Silk.NET).</Description>
   </PropertyGroup>
 
 </Project>

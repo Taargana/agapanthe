@@ -19,6 +19,27 @@
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
     <!-- Phase 2 rule 1: trim/AOT analyzers at build time (permanent gate, see Agapanthe.Core.csproj). -->
     <IsAotCompatible>true</IsAotCompatible>
+    <!-- Club Architect packaging (D5): opt-in override of Directory.Build.props' default. -->
+    <IsPackable>true</IsPackable>
+    <Description>Agapanthe engine — the mono-backend Vulkan layer (no Vk* type leaves this assembly).</Description>
   </PropertyGroup>
+
+  <!-- Club Architect packaging (D10): the engine's own GLSL shaders are engine PAYLOAD (versioned with
+       Agapanthe, compiled at runtime by ShaderCompiler in a Debug-configured package — see D7), not
+       game-authored cooked content (that stays deferred with D8). Packed via NuGet's contentFiles
+       convention so a bare PackageReference copies them to the consumer's output directory.
+       PackageCopyToOutput="true" is required — PackagePath alone defaults copyToOutput to false, which
+       would leave the files as inert Content items in the consumer's project without ever landing in
+       bin/ (found in spec review round 2). Deliberately NO CopyToOutputDirectory here: that would ALSO
+       copy these files into every existing in-repo ProjectReference consumer's own output (Sandbox,
+       TopDown, the test project), which already link shaders/** from the repo root themselves
+       (Sandbox.csproj) — a second, conflicting source for the same output path trips NETSDK1152 under
+       this repo's TreatWarningsAsErrors. -->
+  <ItemGroup>
+    <Content Include="..\..\shaders\**"
+             Pack="true"
+             PackagePath="contentFiles/any/any/shaders/"
+             PackageCopyToOutput="true" />
+  </ItemGroup>
 
 </Project>

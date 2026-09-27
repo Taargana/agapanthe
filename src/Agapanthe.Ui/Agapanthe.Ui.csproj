@@ -7,6 +7,9 @@
     <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
     <!-- Phase 2 rule 1: trim/AOT analyzers at build time (permanent gate, see Agapanthe.Core.csproj). -->
     <IsAotCompatible>true</IsAotCompatible>
+    <!-- Club Architect packaging (D5): opt-in override of Directory.Build.props' default. -->
+    <IsPackable>true</IsPackable>
+    <Description>Agapanthe engine — GPU-free UI toolkit (text shaping, layout, draw list).</Description>
   </PropertyGroup>
 
   <!-- Ui is GPU-FREE by design (UI-1): text shaping, layout and the draw list are pure logic, unit-testable with no
