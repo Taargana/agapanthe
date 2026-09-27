@@ -1,6 +1,6 @@
 # Board — Club Architect packaged separation
 
-Status: **in-progress** (DECOMPOSE & PLAN done, EXECUTE starting)
+Status: **completed** (2026-09-27)
 Spec: `docs/plans/2026-09-27-club-architect-package-separation-design.md` (approved, 3 review rounds, final 4.40/5 PASS)
 
 ## Project Conventions
@@ -36,11 +36,31 @@ AW-006 ClubArch scaffold  ──┤   AW-003 IsPackable×12        ──┼─�
 | AW-003 | Agapanthe: IsPackable=true + metadata on 12/13 projects (all but Graphics) | config | M | AW-001 | **done** |
 | AW-004 | Agapanthe: Agapanthe.Graphics.csproj — IsPackable=true + shaders contentFiles | config | S | AW-001 | **done** |
 | AW-005 | Agapanthe: commit, pack -c Debug, verify 13 nupkg + full test suite green | verify | gate | AW-002,003,004 | **done** (commit `dc30ffc`, 13 nupkg at `0.1.1-gdc30ffc6b9`, 1014/1014 tests) |
-| AW-007 | Club Architect: minimal executable (csproj + IGame + Program.cs) | code | S | AW-005,006 | pending |
-| AW-008 | Club Architect: restore/build/run/publish-AOT verification | verify | gate | AW-007 | pending |
-| AW-009 | Self Code Review | tail | — | AW-008 | pending |
-| AW-010 | Requirements Validation (D1-D11) | tail | — | AW-009 | pending |
-| AW-011 | Full Project Verification | tail | — | AW-010 | pending |
+| AW-007 | Club Architect: minimal executable (csproj + IGame + Program.cs) | code | S | AW-005,006 | **done** |
+| AW-008 | Club Architect: restore/build/run/publish-AOT verification | verify | gate | AW-007 | **done** (2 real bugs found+fixed live, see below; AOT link blocked by env, not code) |
+| AW-009 | Self Code Review | tail | — | AW-008 | **done** — diff matches spec exactly, no drift |
+| AW-010 | Requirements Validation (D1-D11) | tail | — | AW-009 | **done** — all 11 hold, verified against evidence |
+| AW-011 | Full Project Verification | tail | — | AW-010 | **done** — 1014/1014 tests, final run |
+
+## Bugs found live during AW-008 (not caught by 3 spec review rounds)
+
+1. **`contentFiles` don't flow transitively** — Club Architect references only `Agapanthe.Platform.App`
+   directly (by design, D9); `Agapanthe.Graphics` (owner of the shader `contentFiles`) is several
+   levels transitive, and NuGet's `contentFiles` convention only auto-applies to a package a project
+   references *directly*. Verified empirically: `dotnet build` succeeded, but zero shader files ever
+   reached `bin/`. Fixed with a `buildTransitive/Agapanthe.Graphics.targets` (NuGet auto-imports
+   `buildTransitive` for every consumer regardless of depth) that re-copies the same
+   already-packaged files — commit `7990fcc`. Re-verified: 19/19 shader files land in
+   `bin/Debug/net10.0/shaders/`, including `mesh.frag`.
+2. **`Renderer.DrawScene` requires `SetEnvironment` unconditionally** — a truly empty scene recipe
+   (D8/D9's "spawn nothing") crashed on the very first frame (`InvalidOperationException: Renderer
+   has no environment`). Every existing Agapanthe host ships an HDR file; nothing in the spec
+   anticipated a scene with *zero* setup at all. Fixed by calling the engine's own existing
+   payload-free `Agapanthe.App.BlackEnvironment.Build()` (already used by the planet-family scenes)
+   in `EmptySceneRecipe.Build` — no new content to package, no design change needed.
+
+Both were caught only by actually running the software end-to-end, not by any of the 3 independent
+spec reviews (all read code, none executed `dotnet run`).
 
 ## Per-task detail
 
