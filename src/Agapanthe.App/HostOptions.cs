@@ -76,6 +76,31 @@ public sealed class HostOptions
     /// <see cref="HostOptions"/>.</summary>
     public bool AudioEnabled { get; init; } = true;
 
+    /// <summary>
+    /// Scene management spec, D12: a copy of this instance with <see cref="LoadPath"/>/<see cref="SavePath"/>
+    /// cleared, everything else unchanged. Used for every scene switch after the very first load — a switch must
+    /// never re-trigger <c>AGAPANTHE_SAVE</c> or re-apply a pending <c>AGAPANTHE_LOAD</c> restore. <c>HostOptions</c>
+    /// is a plain <c>sealed class</c>, not a <c>record</c>, so a <c>with</c> expression does not compile here —
+    /// this method enumerates every property explicitly instead.
+    /// </summary>
+    public HostOptions WithoutStartupOnlyPaths() => new()
+    {
+        Scene = Scene,
+        Universe = Universe,
+        MaxFrames = MaxFrames,
+        CapturePath = CapturePath,
+        CaptureUiPath = CaptureUiPath,
+        SavePath = null,
+        LoadPath = null,
+        ContentRoot = ContentRoot,
+        OverlayVisible = OverlayVisible,
+        CullStats = CullStats,
+        VerifyCull = VerifyCull,
+        ShaderReloadTest = ShaderReloadTest,
+        GpuTimestampsEnabled = GpuTimestampsEnabled,
+        AudioEnabled = AudioEnabled,
+    };
+
     /// <summary>Builds options from the environment. <paramref name="read"/> is the accessor (defaults to
     /// <see cref="Environment.GetEnvironmentVariable(string)"/>); a test passes a dictionary lookup so it never
     /// mutates process state. A malformed <c>AGAPANTHE_UNIVERSE</c> logs a warning and leaves

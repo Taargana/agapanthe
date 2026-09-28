@@ -70,4 +70,34 @@ public sealed class SimSceneContext
         using var stream = File.OpenRead(p.Path);
         return World.Load(stream, p.Policy, resolve);
     }
+
+    // --- Scene switch request (scene management spec, D4) --------------------------------------------------------
+
+    private string? _pendingSceneSwitch;
+
+    /// <summary>
+    /// Records a request to switch to <paramref name="sceneName"/>. <b>Only records it</b> — never spawns a
+    /// thread, calls <c>GraphicsDevice.SetSanctionedLoaderThread</c>, or blocks. This may legitimately be called
+    /// from inside a <c>Tick</c>, which can run on a non-owner thread under Job-1's scheduler; doing real
+    /// orchestration here would trip <c>AssertOwnerThreadStrict</c> or block inside a simulation wave. All actual
+    /// orchestration runs from <c>AppHost</c>'s <c>window.Rendered</c> poll, which drains this via
+    /// <see cref="DrainPendingSceneSwitch"/> — never from here.
+    /// </summary>
+    public void RequestSceneSwitch(string sceneName)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(sceneName);
+        _pendingSceneSwitch = sceneName;
+    }
+
+    /// <summary>True while a scene switch has been requested and not yet drained.</summary>
+    internal bool HasPendingSceneSwitch => _pendingSceneSwitch is not null;
+
+    /// <summary>Atomically reads and clears the pending scene-switch request, or <c>null</c> if none is pending
+    /// (mirrors <see cref="ApplyPendingRestore"/>'s clear-before-use pattern).</summary>
+    internal string? DrainPendingSceneSwitch()
+    {
+        var token = _pendingSceneSwitch;
+        _pendingSceneSwitch = null;
+        return token;
+    }
 }

@@ -6,10 +6,11 @@ using Agapanthe.Core;
 namespace Agapanthe.App;
 
 /// <summary>
-/// Contenu-3b — the presentation tail of loading a cooked scene on a client: upload each referenced model to the
-/// GPU, resolve every drawable's <c>MeshRef</c> render cache from its <c>AssetRef</c> identity, then apply the
-/// scene's lights, environment and camera. The world was already populated (GPU-free) by
-/// <see cref="Agapanthe.Scene.SceneMaterializer"/>; this only adds what needs a device.
+/// Contenu-3b — the presentation tail of loading a cooked scene on a client: resolve every drawable's
+/// <c>MeshRef</c> render cache from its <c>AssetRef</c> identity, then apply the scene's lights, environment and
+/// camera. The world was already populated (GPU-free) by <see cref="Agapanthe.Scene.SceneMaterializer"/>; every
+/// referenced model was already uploaded to the GPU by <see cref="ISceneRecipe.PrefetchBackground"/> (scene
+/// management spec, D7) before this runs — this only adds what needs a device and was not already prefetched.
 /// </summary>
 public static class ClientScenePresenter
 {
@@ -19,13 +20,6 @@ public static class ClientScenePresenter
         ArgumentNullException.ThrowIfNull(result);
         ArgumentNullException.ThrowIfNull(sim);
         ArgumentNullException.ThrowIfNull(p);
-
-        // Upload once per distinct model; the returned specs are ignored — only the GPU upload + key registration
-        // side effects matter (the world already holds the entities, keyed by AssetRef).
-        foreach (var (key, model) in result.Models)
-        {
-            p.Registry.Load(p.Device, model, p.Renderer.MaterialSetLayout, key);
-        }
 
         sim.World.ResolveMeshRefs(p.Registry.ResolveMeshRef);
 

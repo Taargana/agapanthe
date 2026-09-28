@@ -57,6 +57,7 @@ public static class AppHost
         FrameRenderer? frameRenderer = null;
         FrameOrchestrator? orchestrator = null;
         DebugOverlaySystem? debugOverlay = null;
+        UiRenderSystem? uiSystem = null;
         AudioDevice? audioDevice = null;
         AudioClip audioDemoClip = default;
 
@@ -65,6 +66,30 @@ public static class AppHost
         var controller = new FreeCameraController();
         var renderList = new RenderList();
         var resizePending = false;
+
+        // Scene management spec, D9/D13: the profiler survives every switch (one FrameStats for the whole
+        // process, threaded into every SimulationHost.CreateDefault call, first load included).
+        var sharedFrameStats = new FrameStats();
+
+        // Scene management spec, D9: `sim` and the scoped window are the only NEW hoisted locals (D9's own
+        // hoisting note) — `world`/`registry`/`orchestrator` above are already top-level, reassigned by the
+        // switch machinery below exactly like `resizePending` already reassigns `swapchain`'s state. `catalog`
+        // is hoisted too: PrefetchBackground needs it on every switch, not just the first load.
+        SimSceneContext? sim = null;
+        ScopedWindow? scopedWindow = null;
+        AssetCatalog? catalog = null;
+        string? currentSceneName = null;
+
+        // Scene management spec, D9.1-D9.6: the in-flight switch state machine. `loaderThread`/`loaderCts`/
+        // `loaderRegistry`/`loaderPrefetched`/`loaderFailure` describe AT MOST ONE in-flight background load;
+        // `nextPendingSwitch` is the D9.2 case — a second request arrived while one was already running.
+        Thread? loaderThread = null;
+        CancellationTokenSource? loaderCts = null;
+        ResourceRegistry? loaderRegistry = null;
+        object? loaderPrefetched = null;
+        Exception? loaderFailure = null;
+        string? nextPendingSwitch = null;
+        ISceneRecipe? pendingRecipe = null;
 
         // Bench (AGAPANTHE_CULL_STATS): measure the whole per-frame cost (tick + draw) and log every 60 frames.
         var benchFrame = 0;
@@ -97,7 +122,7 @@ public static class AppHost
             // The orchestrator is built BEFORE the recipe so the recipe can register its systems on it. It composes
             // a SimulationHost bound to the fixed-step single definition; SceneViewSystem is the only render system
             // it registers itself.
-            var simulation = SimulationHost.CreateDefault(world, SimulationSettings.Default);
+            var simulation = SimulationHost.CreateDefault(world, SimulationSettings.Default, sharedFrameStats);
             orchestrator = FrameOrchestrator.CreateDefault(
                 simulation, world, renderer, registry, camera, renderList);
 
@@ -108,7 +133,7 @@ public static class AppHost
             {
                 var uiFont = FontAssetFormat.Read(File.ReadAllBytes(fontPath));
                 renderer.LoadFont(uiFont);
-                var uiSystem = new UiRenderSystem(renderer);
+                uiSystem = new UiRenderSystem(renderer);
                 orchestrator.Add(Stage.Input, uiSystem);   // clears last frame's quads before any system draws
                 orchestrator.Add(uiSystem);                 // render stage
                 debugOverlay = new DebugOverlaySystem(
@@ -127,7 +152,6 @@ public static class AppHost
             // Contenu-2: the cooked-content catalog — recipes resolve models by AssetKey through it, no glTF at runtime.
             // A fully-procedural scene (planet*) needs no cooked content, so a missing manifest is a warning, not a
             // fatal — LoadModel on the empty catalog then fails with an actionable message only if a scene asks.
-            AssetCatalog catalog;
             try
             {
                 catalog = AssetCatalog.Open(ResolveContentRoot(options));
@@ -141,7 +165,7 @@ public static class AppHost
             // The game builds its scene: spawn entities, register systems, frame the camera, wire input.
             // Contenu-3a: the context is split — a sim half (headless-safe) + a presentation half.
             var recipe = SelectRecipe(game, options.Scene);
-            var sim = new SimSceneContext
+            sim = new SimSceneContext
             {
                 World = world,
                 Simulation = orchestrator.Simulation,
@@ -149,6 +173,7 @@ public static class AppHost
                 Args = args,
                 Options = options,
             };
+            scopedWindow = new ScopedWindow(window);
             var presentation = new PresentationSceneContext
             {
                 Device = device,
@@ -156,12 +181,24 @@ public static class AppHost
                 Renderer = renderer,
                 Camera = camera,
                 Controller = controller,
-                Window = window,
+                Window = scopedWindow,
                 RenderList = renderList,
                 Orchestrator = orchestrator,
                 SceneSystemFactories = game.SceneSystems,
             };
-            recipe.Build(sim, presentation);
+
+            // Scene management spec, D14: the first load uses the same two-phase mechanism a later switch does —
+            // PrefetchBackground then Build, synchronously here (no thread for the very first scene).
+            var background = new BackgroundPresentationContext
+            {
+                Device = device,
+                Registry = registry,
+                MaterialSetLayout = renderer.MaterialSetLayout,
+                CancellationToken = CancellationToken.None,
+            };
+            var prefetched = recipe.PrefetchBackground(catalog, background);
+            recipe.Build(prefetched, sim, presentation);
+            currentSceneName = recipe.Name;
             WarnIfDrawablesMissingIdentity(world);
 
             // Contenu-3a: apply a restore the recipe requested (AGAPANTHE_LOAD) — after Build, so every asset the
@@ -325,6 +362,22 @@ public static class AppHost
                     }
 
                     break;
+                case Key.K:
+                    // Scene management spec demo: cycles between the two simplest cooked scenes so a switch is
+                    // exercisable live without depending on any particular IGame's own scene list beyond "at
+                    // least one ISceneRecipe.Name it can name". Harmless if the game has no matching recipe —
+                    // RequestSceneSwitch only records the request, SelectRecipe's own throw surfaces at the next
+                    // poll, exactly like an unresolvable AGAPANTHE_SCENE does today.
+                    if (sim is not null)
+                    {
+                        var next = string.Equals(currentSceneName, "grid", StringComparison.OrdinalIgnoreCase)
+                            ? "model"
+                            : "grid";
+                        sim.RequestSceneSwitch(next);
+                        Log.Info($"AppHost: [scene switch] requested '{next}'.");
+                    }
+
+                    break;
             }
 
             void LogSensitivity()
@@ -337,6 +390,73 @@ public static class AppHost
             if (frameRenderer is null || swapchain is null || orchestrator is null || renderer is null)
             {
                 return;
+            }
+
+            // Scene management spec, D9: the switch-orchestration poll — same frame boundary resizePending
+            // already uses, never from inside Tick (D4's correction: RequestSceneSwitch may be called from a
+            // non-owner thread under Job-1, so no orchestration can safely live there).
+            if (sim is not null)
+            {
+                // Step 1: finish an in-flight load that has already completed, if any — checked FIRST, before
+                // looking at any new request, so a request arriving the same poll a load finishes never cancels
+                // work that is already done (self-review finding: doing it the other way round would hand off
+                // the about-to-be-superseded scene anyway, then immediately switch again — harmless but wasteful).
+                if (loaderThread is { IsAlive: false })
+                {
+                    loaderThread.Join();
+                    device!.ClearSanctionedLoaderThread();
+                    loaderThread = null;
+                    loaderCts?.Dispose();
+                    loaderCts = null;
+
+                    if (loaderFailure is not null)
+                    {
+                        // D9.2's cancellation surfaces here too (PrefetchBackground's CancellationToken.
+                        // ThrowIfCancellationRequested throws OperationCanceledException, caught by StartLoad's
+                        // thread body like any other exception) — distinguish it in the log, but the cleanup is
+                        // identical either way: keep the current scene running (D9.4), dispose the never-
+                        // activated registry.
+                        if (loaderFailure is OperationCanceledException)
+                        {
+                            Log.Info("AppHost: [scene switch] load canceled — a newer request superseded it.");
+                        }
+                        else
+                        {
+                            Log.Error($"AppHost: [scene switch] PrefetchBackground failed — {loaderFailure}");
+                        }
+
+                        loaderRegistry?.Dispose(); // never activated — no WaitIdle needed
+                        loaderRegistry = null;
+                        loaderPrefetched = null;
+                        loaderFailure = null;
+                        pendingRecipe = null;
+                    }
+                    else
+                    {
+                        PerformHandOff();
+                    }
+                }
+
+                // Step 2/3: a load is still running (a new request cancels it, D9.2, queued for once it exits and
+                // never blocking a frame) OR nothing is running (start the next queued/fresh request, if any).
+                if (loaderThread is not null)
+                {
+                    var incoming = sim.DrainPendingSceneSwitch();
+                    if (incoming is not null)
+                    {
+                        loaderCts?.Cancel();
+                        nextPendingSwitch = incoming;
+                    }
+                }
+                else
+                {
+                    var token = nextPendingSwitch ?? sim.DrainPendingSceneSwitch();
+                    nextPendingSwitch = null;
+                    if (token is not null)
+                    {
+                        StartLoad(token);
+                    }
+                }
             }
 
             if (resizePending)
@@ -428,6 +548,125 @@ public static class AppHost
 
                 window.Close();
             }
+
+            // Scene management spec, D9.1: resolves the recipe, spawns the sanctioned loader thread and calls
+            // PrefetchBackground on it. Sanctions BEFORE Start() — never after, or the loader could submit
+            // before GraphicsDevice recognizes it.
+            void StartLoad(string token)
+            {
+                ISceneRecipe recipeToLoad;
+                try
+                {
+                    recipeToLoad = SelectRecipe(game, token);
+                }
+                catch (Exception ex)
+                {
+                    Log.Error($"AppHost: [scene switch] '{token}' — {ex.Message}");
+                    return;
+                }
+
+                pendingRecipe = recipeToLoad;
+                loaderFailure = null;
+                loaderPrefetched = null;
+                loaderRegistry = new ResourceRegistry();
+                loaderCts = new CancellationTokenSource();
+                var background = new BackgroundPresentationContext
+                {
+                    Device = device!,
+                    Registry = loaderRegistry,
+                    MaterialSetLayout = renderer!.MaterialSetLayout,
+                    CancellationToken = loaderCts.Token,
+                };
+
+                var thread = new Thread(() =>
+                {
+                    try
+                    {
+                        loaderPrefetched = recipeToLoad.PrefetchBackground(catalog!, background);
+                    }
+                    catch (Exception ex)
+                    {
+                        loaderFailure = ex;
+                    }
+                });
+                loaderThread = thread;
+                device!.SetSanctionedLoaderThread(thread.ManagedThreadId);
+                thread.Start();
+                Log.Info($"AppHost: [scene switch] loading '{token}'.");
+            }
+
+            // Scene management spec, D9.3: the hand-off, run once PrefetchBackground finished successfully.
+            // frameRenderer.WaitIdle() first — ResourceRegistry.Dispose frees DescriptorAllocator pools
+            // synchronously (not through the deferred DeletionQueue), so disposing the active registry without
+            // this first would be a use-after-free on in-flight frames' descriptor sets.
+            void PerformHandOff()
+            {
+                frameRenderer!.WaitIdle();
+
+                scopedWindow?.Dispose();
+                orchestrator!.Simulation.Dispose();
+                registry?.Dispose();
+                world.Dispose();
+
+                world = new GameWorld(GlobalIdRange.Default, ResolveUniverse(game, options));
+                var simulation = SimulationHost.CreateDefault(world, SimulationSettings.Default, sharedFrameStats);
+
+                registry = loaderRegistry;
+                loaderRegistry = null;
+
+                orchestrator = FrameOrchestrator.CreateDefault(simulation, world, renderer!, registry!, camera, renderList);
+                if (uiSystem is not null)
+                {
+                    orchestrator.Add(Stage.Input, uiSystem);
+                    orchestrator.Add(uiSystem);
+                }
+
+                if (debugOverlay is not null)
+                {
+                    orchestrator.Add(Stage.PostSimulation, debugOverlay);
+                }
+
+                // Module-boundary correction (BlackEnvironment lives in Agapanthe.App, Renderer must not
+                // reference App): ResetSceneState only clears Rendering's own bookkeeping; the environment
+                // reset happens here, right after it.
+                renderer!.ResetSceneState();
+                renderer.SetEnvironment(BlackEnvironment.Build());
+
+                scopedWindow = new ScopedWindow(window);
+                sim = new SimSceneContext
+                {
+                    World = world,
+                    Simulation = orchestrator.Simulation,
+                    Catalog = catalog!,
+                    Args = args,
+                    // D12: never re-trigger AGAPANTHE_SAVE/re-apply AGAPANTHE_LOAD on a switch.
+                    Options = options.WithoutStartupOnlyPaths(),
+                };
+                var presentation = new PresentationSceneContext
+                {
+                    Device = device!,
+                    Registry = registry!,
+                    Renderer = renderer,
+                    Camera = camera,
+                    Controller = controller,
+                    Window = scopedWindow,
+                    RenderList = renderList,
+                    Orchestrator = orchestrator,
+                    SceneSystemFactories = game.SceneSystems,
+                };
+
+                var recipeToBuild = pendingRecipe!;
+                pendingRecipe = null;
+                var prefetchedForBuild = loaderPrefetched;
+                loaderPrefetched = null;
+
+                // D9.5: fatal by design if this throws — the old scene is already torn down, there is nothing
+                // to fall back to. Propagates to RunClient's own top-level catch (failed = true, strict teardown).
+                recipeToBuild.Build(prefetchedForBuild, sim, presentation);
+                currentSceneName = recipeToBuild.Name;
+                WarnIfDrawablesMissingIdentity(world);
+                Log.Info($"AppHost: [scene switch] now on '{recipeToBuild.Name}'.");
+            }
         };
 
         var clean = false;
@@ -461,6 +700,26 @@ public static class AppHost
                     Log.Info(clean
                         ? "AppHost: clean shutdown, no GPU resource leaks."
                         : "AppHost: LEAKS DETECTED (see above).");
+                },
+                // Scene management spec, D9.6: the window closed while a background load was in flight. Blocking
+                // here is acceptable — this is shutdown, not a frame-budget-sensitive path. Must run before
+                // device.Dispose(): the thread-safety spec's Dispose() throws if a loader is still sanctioned.
+                DisposeInFlightLoader = () =>
+                {
+                    if (loaderThread is null)
+                    {
+                        return;
+                    }
+
+                    if (loaderThread.IsAlive)
+                    {
+                        loaderCts?.Cancel();
+                        loaderThread.Join();
+                    }
+
+                    loaderRegistry?.Dispose();
+                    loaderRegistry = null;
+                    device?.ClearSanctionedLoaderThread();
                 },
                 // Audio-1 (spec D10): disposed FIRST (cheapest, most independent resource — each step's own
                 // isolated try/catch below means exact position has no correctness consequence either way).
@@ -572,11 +831,15 @@ public static class AppHost
         var win = t.Window;
         var report = t.Report;
         var disposeAudio = t.DisposeAudio;
+        var disposeInFlightLoader = t.DisposeInFlightLoader;
         return
         [
             ("audioDevice.Dispose+ReportLeaks", disposeAudio ?? (static () => { })),
             ("frameRenderer.WaitIdle", () => fr?.WaitIdle()),
             ("frameRenderer.Dispose", () => fr?.Dispose()),
+            // Scene management spec, D9.6: stop any in-flight background load before device.Dispose() below —
+            // the thread-safety spec's Dispose() throws if a loader thread is still sanctioned.
+            ("scene switch: dispose in-flight loader", disposeInFlightLoader ?? (static () => { })),
             ("world.Dispose", () => w?.Dispose()),
             ("registry.Dispose", () => reg?.Dispose()),
             ("renderer.Dispose", () => r?.Dispose()),
@@ -639,4 +902,9 @@ internal readonly record struct TeardownTargets(
     /// <summary>Audio-1 (spec D10): disposes the <c>AudioDevice</c> and folds <c>ReportLeaks()</c> into a
     /// caller-owned flag — <c>default</c> leaves it a no-op so a test can assert the label order unaffected.</summary>
     public Action? DisposeAudio { get; init; }
+
+    /// <summary>Scene management spec, D9.6: cancels/joins an in-flight background scene load and disposes its
+    /// never-activated registry — <c>default</c> leaves it a no-op so a test can assert the label order
+    /// unaffected.</summary>
+    public Action? DisposeInFlightLoader { get; init; }
 }

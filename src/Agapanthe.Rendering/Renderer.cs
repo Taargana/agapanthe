@@ -681,6 +681,32 @@ public sealed class Renderer : IDisposable
     }
 
     /// <summary>
+    /// Scene management spec, D3: clears the structural-version bookkeeping <see cref="_sceneCandidates"/> retains
+    /// across a scene switch. A new scene's <c>SceneCandidateSet</c> starts its own version counter independently;
+    /// without this, a coincidental match against the previous scene's last-written version would make
+    /// <c>PersistentInstanceBuffer.Sync</c> wrongly conclude "already current" and skip the copy — the GPU cull
+    /// would then read the OLD scene's candidate data against the NEW scene's batch/handle tables. Call this at
+    /// scene hand-off, before the new scene's first frame.
+    /// <para>
+    /// <b>Does not reset the IBL environment, <see cref="Lights"/> or <see cref="ShadowDistance"/></b> — resetting
+    /// the environment specifically cannot live here: the trivial "black" environment asset is owned by
+    /// <c>Agapanthe.App</c> (<c>BlackEnvironment</c>), and this project's module graph forbids <c>Rendering</c>
+    /// referencing <c>App</c>. The caller (<c>AppHost</c>) calls <see cref="SetEnvironment"/> with a black
+    /// environment immediately after this, at the same hand-off point. <see cref="Lights"/>.<c>Directional</c> and
+    /// <see cref="ShadowDistance"/> have no well-defined "empty" value (a scene omitting a light has nothing
+    /// meaningful to fall back to) — they are, by contract, inherited from the previous scene unless the new
+    /// scene's <c>Build</c> explicitly overwrites them. Every shipped <c>SceneRecipe</c>-driven scene declares both
+    /// unconditionally today, so this is a documented latent gap for a hypothetical future recipe that omits them,
+    /// not a live bug.
+    /// </para>
+    /// </summary>
+    public void ResetSceneState()
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        _sceneCandidates.ResetSync();
+    }
+
+    /// <summary>
     /// The four reloadable passes (M8-04 seam) for the shader hot reloader (M8-05): it maps a changed source
     /// file to the passes whose <see cref="IReloadablePipeline.SourceFiles"/> contain it and calls
     /// <see cref="IReloadablePipeline.Reload"/> on each, at the frame boundary before recording. Internal —

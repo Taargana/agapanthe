@@ -50,6 +50,22 @@ internal sealed class PersistentInstanceBuffer : IDisposable
     public PersistentInstanceBuffer(GraphicsDevice device) => _device = device;
 
     /// <summary>
+    /// Scene management spec, D3: forces every pair to full-rewrite on its first use after a scene switch.
+    /// Resetting <see cref="CopySyncState"/> alone already achieves this via <see cref="Sync"/>'s
+    /// <c>_sync.PlanFrame(...) || _bufferVersion[frameSlot] != set.StructuralVersion</c> OR — a real structural
+    /// version can never equal <see cref="CopySyncState"/>'s post-reset <c>uint.MaxValue</c> sentinel, so the left
+    /// side of that OR is already true. <see cref="_bufferVersion"/> is reset here anyway so correctness does not
+    /// silently depend on that OR's left operand always winning — a board finding (scene-management spec BW-001),
+    /// not something the design doc names, but the same class of "close a latent gap even where not exploitable
+    /// today" this project has applied before (e.g. Contenu-3c-3's <c>world_origin</c> fix).
+    /// </summary>
+    internal void ResetSync()
+    {
+        Array.Fill(_bufferVersion, uint.MaxValue);
+        _sync.Reset();
+    }
+
+    /// <summary>
     /// Brings the pair for <paramref name="frameSlot"/> up to the set's current state and returns the
     /// <b>device-local</b> buffer to bind at the culls' candidate binding. Folds this frame's dirty patches into the
     /// mirror (staging), writes the fresh bytes, records the staging→device-local copy on <paramref name="cmd"/>, and

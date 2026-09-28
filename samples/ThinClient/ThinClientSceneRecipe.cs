@@ -38,7 +38,7 @@ internal sealed class ThinClientSceneRecipe : ISceneRecipe
 {
     public string Name => "thin-client";
 
-    public void Build(SimSceneContext sim, PresentationSceneContext? presentationOrNull)
+    public void Build(object? prefetched, SimSceneContext sim, PresentationSceneContext? presentationOrNull)
     {
         var presentation = presentationOrNull
             ?? throw new InvalidOperationException("ThinClient has no headless mode — it only ever renders.");

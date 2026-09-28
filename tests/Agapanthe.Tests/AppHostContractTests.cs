@@ -37,7 +37,7 @@ public sealed class AppHostContractTests
                 && familyPrefixes.Any(p => sceneToken.StartsWith(p + ":", StringComparison.OrdinalIgnoreCase));
         }
 
-        public void Build(SimSceneContext sim, PresentationSceneContext? presentation)
+        public void Build(object? prefetched, SimSceneContext sim, PresentationSceneContext? presentation)
             => throw new NotSupportedException("not built in these tests");
     }
 
@@ -230,7 +230,7 @@ public sealed class AppHostContractTests
         public string Name => "headless-fixture";
         public CountingSystem? System { get; private set; }
 
-        public void Build(SimSceneContext sim, PresentationSceneContext? presentation)
+        public void Build(object? prefetched, SimSceneContext sim, PresentationSceneContext? presentation)
         {
             // Populate a world and register a sim system — no presentation touched.
             for (var i = 0; i < 3; i++)
@@ -259,7 +259,7 @@ public sealed class AppHostContractTests
         };
 
         var recipe = new HeadlessFixtureRecipe();
-        recipe.Build(sim, presentation: null); // must not throw
+        recipe.Build(prefetched: null, sim, presentation: null); // must not throw
 
         Assert.Equal(3, world.LiveEntityCount);
 
@@ -344,7 +344,8 @@ public sealed class AppHostContractTests
         Assert.Equal(
             new[]
             {
-                "audioDevice.Dispose+ReportLeaks", "frameRenderer.WaitIdle", "frameRenderer.Dispose", "world.Dispose",
+                "audioDevice.Dispose+ReportLeaks", "frameRenderer.WaitIdle", "frameRenderer.Dispose",
+                "scene switch: dispose in-flight loader", "world.Dispose",
                 "registry.Dispose", "renderer.Dispose", "device.DeletionQueue.FlushAll", "swapchain.Dispose",
                 "device.Dispose", "ResourceTracker.Report", "window.Dispose",
             },

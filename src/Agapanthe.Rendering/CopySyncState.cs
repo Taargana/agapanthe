@@ -34,9 +34,23 @@ internal sealed class CopySyncState
         ArgumentOutOfRangeException.ThrowIfLessThan(framesInFlight, 1);
         _framesInFlight = framesInFlight;
         _copyVersion = new uint[framesInFlight];
+        Reset();
+    }
+
+    /// <summary>
+    /// Scene management spec, D3: restores exactly the state the constructor sets — clearing every copy's version
+    /// back to the "never seen a real version" sentinel (forcing a full rewrite on its next use, since a real
+    /// structural version can never equal it) and dropping all outstanding replay bookkeeping. The constructor now
+    /// delegates here too, so "freshly reset" has exactly one definition, not two independently-maintained ones.
+    /// </summary>
+    public void Reset()
+    {
         // Sentinel: no copy has seen a real version yet (the first Rebuild bumps to 1), so the first use of each copy
         // full-rewrites. uint.MaxValue can never collide with a real version at these counts.
         Array.Fill(_copyVersion, uint.MaxValue);
+        Array.Clear(_countdown);
+        _active.Clear();
+        _replay.Clear();
     }
 
     /// <summary>The slots to write into the consumed copy this frame when <see cref="PlanFrame"/> returned

@@ -1,3 +1,5 @@
+using Agapanthe.Assets;
+
 namespace Agapanthe.App;
 
 /// <summary>
@@ -21,9 +23,23 @@ public interface ISceneRecipe
     bool Matches(string? sceneToken)
         => sceneToken is not null && string.Equals(sceneToken, Name, StringComparison.OrdinalIgnoreCase);
 
+    /// <summary>
+    /// Scene management spec, D7: the part of loading this scene that is safe to run on the sanctioned loader
+    /// thread (or inline on the main thread, for a synchronous load) — GPU-free content decode plus GPU upload
+    /// into <paramref name="background"/>'s fresh, isolated registry. Must observe
+    /// <c>background?.CancellationToken</c> between per-model iterations. Never touches
+    /// <c>GameWorld</c>/<c>SimulationHost</c>/<c>Renderer</c> — none of those are reachable from
+    /// <paramref name="background"/>. Returns whatever <see cref="Build"/> needs to avoid re-decoding what this
+    /// already did (e.g. a <c>Dictionary&lt;AssetKey, ModelAsset&gt;</c>); default implementation returns
+    /// <c>null</c>, for the common case of a recipe with nothing to prefetch.
+    /// </summary>
+    object? PrefetchBackground(AssetCatalog catalog, BackgroundPresentationContext? background) => null;
+
     /// <summary>Builds the scene. Called ONCE, after <see cref="AppHost"/> has built the simulation (and, for a
-    /// client run, the GPU stack + orchestrator + debug overlay), before the first tick.
-    /// <paramref name="presentation"/> is <c>null</c> for a headless build — a client-only recipe guards with
-    /// <c>?? throw</c>.</summary>
-    void Build(SimSceneContext sim, PresentationSceneContext? presentation);
+    /// client run, the GPU stack + orchestrator + debug overlay), before the first tick. MUST run on the
+    /// owner/main thread — <c>GameWorld</c>/<c>SimulationHost</c> are constructed fresh immediately before this
+    /// call, never handed across threads. <paramref name="prefetched"/> is whatever <see cref="PrefetchBackground"/>
+    /// returned (or <c>null</c> if it was never called or returned nothing). <paramref name="presentation"/> is
+    /// <c>null</c> for a headless build — a client-only recipe guards with <c>?? throw</c>.</summary>
+    void Build(object? prefetched, SimSceneContext sim, PresentationSceneContext? presentation);
 }

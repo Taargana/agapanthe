@@ -15,6 +15,52 @@ namespace Agapanthe.Scene;
 /// </summary>
 public static class SceneMaterializer
 {
+    /// <summary>
+    /// Scene management spec ("Reused prefetch" section): every distinct model key <paramref name="def"/>
+    /// references — its entities' <c>.Model</c> plus its systems' <c>.ProbeModel</c> — with the same
+    /// <c>DriveControl</c>/<see cref="AssetKey.IsNone"/> validation <see cref="Materialize"/> itself applies.
+    /// Extracted so a client's <c>ISceneRecipe.PrefetchBackground</c> (decoding + uploading on a background
+    /// thread) and <see cref="Materialize"/> (spawning entities on the main thread) share one definition of
+    /// "which keys does this scene need" instead of maintaining the guard logic in two places.
+    /// </summary>
+    /// <exception cref="AssetException">A system other than <see cref="SceneSystemKind.DriveControl"/> declares
+    /// <see cref="AssetKey.IsNone"/> as its probe model.</exception>
+    public static IReadOnlyCollection<AssetKey> CollectModelKeys(SceneDefinition def)
+    {
+        ArgumentNullException.ThrowIfNull(def);
+
+        var keys = new HashSet<AssetKey>();
+        foreach (var entity in def.Entities)
+        {
+            keys.Add(entity.Model);
+        }
+
+        foreach (var system in def.Systems)
+        {
+            // Contenu-3c-3: DriveControl spawns nothing at runtime and authors no probe model (ProbeModel
+            // relaxed from `required` specifically so this kind never has to fake one) — AssetKey.None must
+            // never reach loadModel, which expects a real catalog key. But for every OTHER kind, None was
+            // `required` through 3c-2 and is only reachable now via a forged/corrupt v4 blob (audit finding,
+            // csharp-lowlevel, 🟡): silently skipping it here would defer the failure to a much-later, less
+            // legible `MissingKeyException` deep in a client factory's `result.Models[spec.ProbeModel]` lookup.
+            if (system.ProbeModel.IsNone)
+            {
+                if (system.Kind != SceneSystemKind.DriveControl)
+                {
+                    throw new AssetException(
+                        $"scene '{def.Name}' declares a '{system.Kind}' system with no probe model — only "
+                        + $"{SceneSystemKind.DriveControl} may omit one.");
+                }
+            }
+            else
+            {
+                keys.Add(system.ProbeModel);
+            }
+        }
+
+        return keys;
+    }
+
     /// <summary>Production entry point: models come from the cooked catalog.</summary>
     public static MaterializeResult Materialize(
         SceneDefinition def, AssetCatalog catalog, GameWorld world, float fixedDeltaSeconds, bool spawnEntities = true)
@@ -43,35 +89,9 @@ public static class SceneMaterializer
         // in MaterializeResult.Models, and a runtime-dropped probe needs an uploaded model to resolve its
         // MeshRef against.
         var models = new Dictionary<AssetKey, ModelAsset>();
-        foreach (var entity in def.Entities)
+        foreach (var key in CollectModelKeys(def))
         {
-            if (!models.ContainsKey(entity.Model))
-            {
-                models[entity.Model] = loadModel(entity.Model);
-            }
-        }
-
-        foreach (var system in def.Systems)
-        {
-            // Contenu-3c-3: DriveControl spawns nothing at runtime and authors no probe model (ProbeModel
-            // relaxed from `required` specifically so this kind never has to fake one) — AssetKey.None must
-            // never reach loadModel, which expects a real catalog key. But for every OTHER kind, None was
-            // `required` through 3c-2 and is only reachable now via a forged/corrupt v4 blob (audit finding,
-            // csharp-lowlevel, 🟡): silently skipping it here would defer the failure to a much-later, less
-            // legible `MissingKeyException` deep in a client factory's `result.Models[spec.ProbeModel]` lookup.
-            if (system.ProbeModel.IsNone)
-            {
-                if (system.Kind != SceneSystemKind.DriveControl)
-                {
-                    throw new AssetException(
-                        $"scene '{def.Name}' declares a '{system.Kind}' system with no probe model — only "
-                        + $"{SceneSystemKind.DriveControl} may omit one.");
-                }
-            }
-            else if (!models.ContainsKey(system.ProbeModel))
-            {
-                models[system.ProbeModel] = loadModel(system.ProbeModel);
-            }
+            models[key] = loadModel(key);
         }
 
         // Contenu-3c-3: parallel to def.Entities — the EntityRef a body-entity's SpawnBody returned (null for a

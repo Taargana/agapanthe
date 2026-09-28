@@ -45,8 +45,9 @@ public sealed class SimulationHost : IDisposable
 
     private readonly SimCommandHandler _discard;
 
-    private SimulationHost(GameWorld world, SimulationSettings settings)
+    private SimulationHost(GameWorld world, SimulationSettings settings, FrameStats? stats = null)
     {
+        Stats = stats ?? new();
         // The structural barrier the scheduler runs at the end of every stage IS the world's deferred-change flush
         // (P3-M2 D2): a system enqueues spawns/despawns, the barrier applies them before the next stage iterates.
         // The sanctioned-thread callback (Job-1 D2) fires at most once, only if Stage.Simulation ever needs a real
@@ -73,12 +74,12 @@ public sealed class SimulationHost : IDisposable
     /// <c>Agapanthe.App</c> milestone) that owns the fixed step passes it here so
     /// <see cref="FrameOrchestrator"/> and the application's physics both read one value.
     /// </summary>
-    public static SimulationHost CreateDefault(GameWorld world, SimulationSettings settings)
+    public static SimulationHost CreateDefault(GameWorld world, SimulationSettings settings, FrameStats? stats = null)
     {
         ArgumentNullException.ThrowIfNull(world);
         ArgumentNullException.ThrowIfNull(settings);
 
-        var host = new SimulationHost(world, settings);
+        var host = new SimulationHost(world, settings, stats);
         host._scheduler.Add(Stage.PostSimulation, new PropagateSystem(world));
         return host;
     }
@@ -289,7 +290,7 @@ public sealed class SimulationHost : IDisposable
     /// made them depend on a cooked font being present on disk — no font, no measurements at all.
     /// </para>
     /// </summary>
-    public FrameStats Stats { get; } = new();
+    public FrameStats Stats { get; }
 
     /// <summary>
     /// Managed bytes the ENGINE allocated during the last completed frame — tick plus everything up to

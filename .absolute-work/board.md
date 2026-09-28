@@ -1,381 +1,533 @@
-# Absolute Work Board — GraphicsDevice thread-safety (bounded 2-thread case)
+# Absolute Work Board — Scene management: sequential async scene switching
 
-Status: **completed** (2026-09-28) — all 9 tasks done, all gates passed, spec implemented in full.
+Status: **completed** (2026-09-28) — all 15 tasks done, all waves passed. See BW-014's honest
+per-item breakdown for what was live-verified vs. code-reviewed-only vs. genuinely unexercised.
 
-Spec: `docs/plans/2026-09-27-graphicsdevice-thread-safety-design.md` (4.20/5 PASS, 3 review rounds,
-pre-approved — INTAKE/BRAINSTORM and SPEC phases skipped by explicit user instruction).
+**Transient regression from Wave 2 is CLOSED**: confirmed live — single-scene Sandbox run,
+`AGAPANTHE_MAX_FRAMES=1`, capture hash `9a010fc311dd51b74f755d306d4a819f`, exact match with the
+pinned `model` baseline, 167 resources / 0 leak. Byte-identical, as BW-011's own acceptance bar
+required.
 
-Blocks: `docs/plans/2026-09-27-scene-management-sequential-switching-design.md` (v4, approved,
-cannot be implemented until this lands).
+**Live switch demo (`Key.K`) — DONE, human-verified.** User rapidly pressed `K` 8 times
+(`model`↔`grid` alternating). Log evidence: every switch completes
+(`AppHost: [scene switch] now on 'X'.`), the transient black environment from `ResetSceneState`/
+`SetEnvironment(BlackEnvironment.Build())` is visible each time (`IblGenerator: generated IBL from
+16x8 HDR`) before the real scene's own environment regenerates, window closed cleanly —
+`ResourceTracker: no leaks (876 resources created and destroyed)`, `AppHost: clean shutdown, no GPU
+resource leaks`. **0 validation message, 0 leak, 0 crash across 8 consecutive live switches.**
+Satisfies spec Verification items 1 (byte-identical, separately confirmed), 2 (live switch, 0 leak/
+0 validation), 7 (clean shutdown). Items 3 (`AGAPANTHE_CULL_VERIFY` explicitly) and 4 (a genuine
+overlapping D9.2 race — the 8 switches here completed sequentially, each faster than a human could
+double-tap within one load's ~300ms window) were not distinctly exercised by this particular run;
+recorded as residual manual-verification debt in BW-014, not a code gap (D9.2's logic was reviewed,
+just not proven live under that exact race).
+
+Spec: `docs/plans/2026-09-27-scene-management-sequential-switching-design.md` (v4, last automated
+review round scored 3.60/5 NEEDS WORK with 5 named fixes — all applied directly per the reviewer's
+own recommendation, no 4th round; approved by the user). INTAKE/BRAINSTORM and SPEC phases already
+done across the prior conversation — this board starts at DECOMPOSE.
+
+Depended on: `docs/plans/2026-09-27-graphicsdevice-thread-safety-design.md` — **implemented and
+committed** (`75c367a`, board archived at `.absolute-work/archive/board-graphicsdevice-threadsafety.md`).
+No longer blocking.
 
 ## Rollback Point
 
-Commit `a23deb236e89939a7e89e54d81403806d223168a` (clean tree except the two untracked spec docs
-above, which predate this board and are not touched by it).
+Commit `75c367a` (GraphicsDevice thread-safety, clean tree at time of writing this board).
 
-## Project Conventions (detected)
+## Project Conventions (detected, reused from prior board)
 
-- .NET 10, `dotnet build` / `dotnet test` from repo root.
-- Lock primitive: `System.Threading.Lock` (`DeletionQueue.cs` precedent — private `Lock _lock` +
-  `lock (_lock) { ... }`), not `Monitor`/`SemaphoreSlim`.
-- Owner-thread guard shape: `GameWorld.AssertOwnerThread`/`AssertOwnerThreadStrict`
-  (`src/Agapanthe.World/GameWorld.cs:231-274`) — two-level split (sanctioned-or-owner vs
-  owner-only), `Volatile.Read`/`Write` on the sanctioned-thread field, `[Conditional("DEBUG")]`
-  EXCEPT where a prior audit promoted a guard to always-on (Job-2's `SimCommandQueue
-  .AssertOwnerThread` — this spec's own D2 cites that precedent and is always-on too, not
-  Debug-only).
-- Windowed diagnostic-tool precedent: `samples/Sandbox/Tools/IblTestTool.cs` — a real 64×64
-  `EngineWindow` + `GraphicsDevice` built for a one-shot run, dispatched from
-  `samples/Sandbox/Program.cs` via an env var (`AGAPANTHE_IBL_TEST=<prefix>`), teardown in a
-  `finally` calling `DeletionQueue.FlushAll()` + `Dispose()` + `ResourceTracker.Report()`.
-- `GpuAllocator` test seam: `internal GpuAllocator(IMemoryBackend, Func<uint, MemoryDomain, uint>)`
-  ctor, `[InternalsVisibleTo("Agapanthe.Tests")]` (`GpuAllocator.cs:7`) — GPU-free test possible.
-- Gate culture: 0 validation message / 0 leak / byte-identical pinned captures is the standing
-  bar; `TreatWarningsAsErrors` on; never work around a failing gate.
-- Commits: **never** run `git commit`/`git push` — only the user does, on request.
+- .NET 10, `dotnet build`/`dotnet test` from repo root, `TreatWarningsAsErrors`.
+- Module graph is a strict DAG (CLAUDE.md): `Rendering` must never reference `App` — this is why
+  D3's environment-reset call is split (see BW-001 below), a correction found during this board's
+  own research, not present in the spec text as written.
+- `HostOptions`/`SimSceneContext`/`PresentationSceneContext` are plain `sealed class`, `init`-only
+  properties — no `record`, `with` does not compile (confirms D12's diagnosis).
+- Owner-thread guard / sanction pattern precedent now doubly established: `GameWorld` (Job-1/2) and
+  `GraphicsDevice` (just built) — this spec's loader thread reuses `GraphicsDevice.
+  SetSanctionedLoaderThread`/`ClearSanctionedLoaderThread` directly, no new guard type needed.
+- Commits: never `git commit`/`push` without explicit request.
 
 ## Verified against real code (not assumed)
 
-- `WaitIdle()` lives in `GraphicsDevice.cs:230` (not `.Commands.cs`).
-- `QueueSubmit2` lives in `GraphicsDevice.Commands.cs:78`.
-- `GpuReadback.cs:111` — raw `vk.QueueSubmit(device.GraphicsQueue, 1, &submit, fence)` confirmed.
-- `Swapchain.cs:112` — `_device.KhrSwapchain.QueuePresent(_device.PresentQueue, &presentInfo)`
-  confirmed, `Result` inspected for `ErrorOutOfDateKhr`/`SuboptimalKhr` before `VkCheck.ThrowIfFailed`.
-- `DeletionQueue.cs` already thread-safe (`Lock _lock` guards every mutation) — no change needed,
-  only a lock-ordering doc comment (D7).
-- `GpuAllocator.cs` — confirmed **zero** locking today; `Allocate`/`Free`/`GetStats`/`LogStats`/
-  `Dispose` all touch the unguarded `Dictionary<uint, FreeListAllocator> _allocators`.
-- `GameWorld.cs:67` — `_ownerThreadId` captured via `Environment.CurrentManagedThreadId` at field
-  init, the exact pattern to mirror in `GraphicsDevice`.
+- `ISceneRecipe` has exactly **4** implementations in this repo (not 5 as informally recalled):
+  `SceneRecipe` (real prefetch work), `ThinClientSceneRecipe`, and 2 test fakes in
+  `AppHostContractTests.cs` (`FakeRecipe`, `HeadlessFixtureRecipe`). `ISceneRecipe.Build(...)` has
+  exactly **2** real call sites: `AppHost.cs:164` and `AppHostContractTests.cs:262`. Small blast
+  radius — confirmed by grep, not assumed from the spec's own file list.
+- `SimulationHost.CreateDefault(GameWorld, SimulationSettings)` (`SimulationHost.cs:76`) is the one
+  real overload to extend; the single-arg `CreateDefault(GameWorld)` (`:68`) just forwards to it —
+  adding an optional trailing `FrameStats? stats = null` is purely additive for both.
+- `SimulationHost.Stats` (`:292`) is `public FrameStats Stats { get; } = new();` — an auto-property
+  field initializer, needs converting to ctor-assigned.
+- `CopySyncState` (`CopySyncState.cs:24-40`) — `_copyVersion`/`_countdown`/`_active`/`_replay`
+  confirmed exactly as the spec describes.
+- **New finding, not in the spec**: `PersistentInstanceBuffer` (`PersistentInstanceBuffer.cs:42`)
+  has its OWN per-copy version array, `_bufferVersion`, DISTINCT from `CopySyncState`'s
+  `_copyVersion` — "the structural version each physical copy's device-local BUFFER currently
+  holds." Traced its one use site (`Sync`, `:83-84`): `full = _sync.PlanFrame(...) ||
+  _bufferVersion[frameSlot] != set.StructuralVersion` — an OR. Resetting `CopySyncState` alone
+  (`_copyVersion[frameSlot] = uint.MaxValue`) already forces `PlanFrame` to return true on every
+  slot's first post-switch use (a real `StructuralVersion` will never equal `uint.MaxValue`), so
+  `_bufferVersion`'s staleness is harmless TODAY only because of that OR's short-circuit. Resetting
+  `_bufferVersion` too (BW-001) removes the reliance on that incidental short-circuit rather than
+  leaving a second, silently-dependent piece of state — the project's own standing practice (see
+  Contenu-3c-3's `world_origin` fix, CLAUDE.md) of closing a latent gap even when not exploitable
+  today.
+- **Real architectural correction**: `BlackEnvironment` lives in `Agapanthe.App`
+  (`src/Agapanthe.App/Scene/BlackEnvironment.cs:12`, returns a trivial 16×8 black `HdrImageAsset`).
+  `Renderer.ResetSceneState()` living in `Agapanthe.Rendering` cannot call it — `Rendering` must
+  never reference `App` (module graph, CLAUDE.md). **Split**: `Renderer.ResetSceneState()` only
+  resets `PersistentInstanceBuffer`/`CopySyncState` (what `Rendering` actually owns); `AppHost`'s
+  D9.3 orchestration calls `presentation.Renderer.SetEnvironment(BlackEnvironment.Build())`
+  immediately after `renderer.ResetSceneState()`, before `recipe.Build(...)` — same effective
+  ordering the spec intends, without the forbidden dependency edge.
+- `SceneMaterializer.Materialize` (`SceneMaterializer.cs:19-75`) has two overloads; its model-key
+  collection loop (`:46-75`, entities + systems' probe models, with the `DriveControl`/`ProbeModel
+  .IsNone` guard) is exactly what to extract into `CollectModelKeys` — verified line-by-line, not
+  assumed. Must be `public` (not `internal`): `Agapanthe.Scene` grants no `InternalsVisibleTo` to
+  `Agapanthe.App` (confirmed: no such attribute in `src/Agapanthe.Scene`).
+- `ClientScenePresenter.Apply` (`ClientScenePresenter.cs:16-41`) — the upload loop (`:25-28`) is
+  the exact block to move into `SceneRecipe.PrefetchBackground`; the rest (mesh-ref resolve,
+  lights, environment, camera, free-fly) is unchanged, called from `Build`.
+- `AppHost.RunClient` (`AppHost.cs:42-505`) — `camera`/`controller`/`world` are already top-level
+  `var` locals (`:63-65`); `registry`/`orchestrator` are declared nullable at `:56/58` and assigned
+  inside `window.Loaded` (`:94/101`) — reassignment inside the future switch-orchestration poll is
+  ordinary variable assignment, no closure rewrite needed, exactly as D9 states. `sim` is currently
+  local to the `window.Loaded` closure only (`:144-151`) — the one new hoist.
+- `ThinClientSceneRecipe.Build` (`:41`) and both test fakes' `Build` — one-line signature edits
+  each (add the leading `object? prefetched` parameter, ignore it).
 
 ## Task DAG
 
 ```
-Wave 1 (parallel — disjoint files)
-  AW-001 GpuAllocator lock (D3)              AW-002 GraphicsDevice core contract (D1/D2/D4c/D6/D8)
-        [GpuAllocator.cs]                          [GraphicsDevice.cs]
-              |                                          |
-              |                                          v
-              |                                  Wave 2
-              |                                  AW-003 Commands.cs submit/present (D4a/D4b/D5)
-              |                                          [GraphicsDevice.Commands.cs]
-              |                                          |
-              |                          -----------------------------
-              |                          |                           |
-              |                          v                           v
-              |                  Wave 3 (parallel — disjoint files)
-              |                  AW-004 Swapchain.cs        AW-005 GpuReadback.cs
-              |                  routes QueuePresent         routes QueueSubmit
-              |                          |                           |
-              +--------------------------+---------------------------+
-                                          |
-                                          v
-                              Wave 4
-                              AW-006 windowed diagnostic tool
-                              (ThreadSafetyProbeTool + Program.cs dispatch)
-                              covers D4c / two guard levels / D8
-                                          |
-                                          v
-                              Wave 5 (sequential tail, mandatory)
-                              AW-007 Self Code Review
-                                          |
-                              AW-008 Requirements Validation (D1-D9 checklist)
-                                          |
-                              AW-009 Full Project Verification
-                              (full test suite, manual Sandbox run, byte-identical captures)
+Wave 1 (parallel — 6 disjoint files/areas, no cross-deps)
+  BW-001 Renderer/PersistentInstanceBuffer/CopySyncState reset (D3, corrected split)
+  BW-002 SimulationHost.CreateDefault optional FrameStats? (D13)
+  BW-003 HostOptions.WithoutStartupOnlyPaths() (D12)
+  BW-004 new ScopedWindow : IWindow (D11)
+  BW-005 new BackgroundPresentationContext (D8)
+  BW-006 SceneMaterializer.CollectModelKeys extraction (public)
+        |         |         |         |         |         |
+        +---------+----+----+----+----+---------+
+                       |
+                       v
+Wave 2 (sequential — ISceneRecipe interface change, then its 4 implementers)
+  BW-007 ISceneRecipe: PrefetchBackground (DIM) + Build gains object? param  [depends: BW-005]
+  BW-008 ThinClientSceneRecipe + 2 test fakes: signature-only update          [depends: BW-007]
+  BW-009 SceneRecipe.PrefetchBackground + Build rewrite                      [depends: BW-006, BW-007]
+  BW-010 SimSceneContext.RequestSceneSwitch, records-only (D4)               [depends: none — parallel-safe with 007-009, different file]
+                       |
+                       v
+Wave 3 (sequential — the orchestration itself, all in AppHost.cs)
+  BW-011 AppHost.cs: hoist `sim`, first-load via PrefetchBackground+Build (D14)   [depends: Wave 2]
+  BW-012 AppHost.cs: window.Rendered switch state machine (D9.1-D9.6) + demo key  [depends: BW-011]
+                       |
+                       v
+Wave 4 (sequential tail, mandatory)
+  BW-013 Self Code Review
+  BW-014 Requirements Validation (spec's own 9-item Verification list)
+  BW-015 Full Project Verification
 ```
 
 ## Tasks
 
-### AW-001 — `GpuAllocator` real lock (D3) [M] — ✅ DONE
+**Wave 1 checkpoint**: full solution build 0 warnings/0 errors, full test suite **1015/1015 green**
+(unchanged count — nothing in Wave 1 is exercised by an existing test yet, all new types/methods
+are additive and unreferenced until Wave 2+).
 
-`Lock _lock` added, `Allocate`/`Free`/`GetStats`/`LogStats`/`Dispose` all wrapped, disposed-check
-moved inside the lock in `Allocate`/`Free` (round-3 fix). Doc comment updated with the new contract
-+ D7 lock-ordering invariant. Test `GpuAllocatorConcurrencyTests.cs` written first (TDD), confirmed
-RED against the unlocked code (`InvalidOperationException: Collection was modified`,
-`NullReferenceException` — real `List<Region>` corruption in `FreeListAllocator`, not a benign
-race), then GREEN after the lock. **Verified by mutation**: reverted to the pre-lock file via
-`git checkout`, re-ran the test — failed with `NullReferenceException` inside `Dispose()` (same
-corrupted-list class of failure) — then restored the locked version, all 12 `GpuAllocator*Tests`
-green again. One test-harness bug found and fixed along the way (not a product bug): the
-overlap-detector's bookkeeping removed from its tracking dictionary *after* calling `Free`, which
-raced with a legitimately-freed offset being reused by the other thread and produced a false
-"double issue" report — fixed by reordering to remove-then-free.
+### BW-001 — `Renderer`/`PersistentInstanceBuffer`/`CopySyncState` scene-state reset (D3) [M] — ✅ DONE
+**Files**: `src/Agapanthe.Rendering/CopySyncState.cs`, `src/Agapanthe.Rendering/
+PersistentInstanceBuffer.cs`, `src/Agapanthe.Rendering/Renderer.cs`.
+**Deps**: none. **Wave**: 1.
 
-### AW-002 — `GraphicsDevice` core thread contract (D1, D2, D4c, D6, D8) [M] — ✅ DONE
+- `CopySyncState`: new `public void Reset()` — `Array.Fill(_copyVersion, uint.MaxValue);
+  Array.Clear(_countdown); _active.Clear(); _replay.Clear();`. Constructor calls `Reset()` after
+  setting `_framesInFlight`/allocating `_copyVersion`, so there is exactly one definition of
+  "freshly reset" (round-3 requirement).
+- `PersistentInstanceBuffer`: new `internal void ResetSync()` — `Array.Fill(_bufferVersion,
+  uint.MaxValue); _sync.Reset();` (the `_bufferVersion` reset is this board's own finding, see
+  above — not in the spec text, but closes reliance on an incidental OR short-circuit).
+- `Renderer`: new `public void ResetSceneState()` — calls `_sceneCandidates.ResetSync()` only.
+  **Does NOT touch the IBL environment** (module-boundary correction, see above) — that call moves
+  to `AppHost` (BW-012). Doc comment states plainly (per spec D3) that `Lights.Directional`/
+  `ShadowDistance` are inherited from the previous scene unless the new scene's `Build` overwrites
+  them — no code change needed for those two, just the statement of the contract.
+- No test file needed for this task alone (GPU-free logic, but `CopySyncState`/
+  `PersistentInstanceBuffer` are `internal sealed` with no existing standalone unit tests in this
+  repo to extend without a live `Renderer` — verify this before writing one; if a GPU-free test
+  harness already exists for either type, add a `Reset()` round-trip case to it, otherwise this is
+  exercised live in BW-014's Verification item 3).
 
-All items landed: `_ownerThreadId`/`_sanctionedLoaderThreadId` (plain `int`, `0` = unset sentinel —
-`int?` doesn't compile with `Volatile.Read<T>`/`Write<T>`, which require `T : class`; a boxed
-`object?` was considered and rejected to keep `AssertCallerThread` allocation-free on what may
-become a hot path) + `_queueLock` fields; `SetSanctionedLoaderThread`/`ClearSanctionedLoaderThread`
-(both `AssertOwnerThreadStrict`-guarded, throw on double-set, `ObjectDisposedException` after
-dispose); `AssertCallerThread`/`AssertOwnerThreadStrict` (always-on); `WaitIdle()` now takes
-`_queueLock`; `CurrentFrameIndex` is `Interlocked`-backed (getter via `Interlocked.Read`,
-`AdvanceFrame` via `Interlocked.Increment` + `AssertOwnerThreadStrict`); `Dispose()`'s D8 check
-placed exactly after the existing `if (_disposed) return;`, before `_disposed = true`. Full solution
-build 0 warnings/0 errors; full test suite **1015/1015 green** (1014 baseline + the new
-`GpuAllocatorConcurrencyTests`). No standalone unit test for the guard/D8 behavior — by design, see
-the task's own note; exercised by AW-006's windowed tool.
+### BW-002 — `SimulationHost.CreateDefault` optional `FrameStats?` (D13) [S] — ✅ DONE
+**Files**: `src/Agapanthe.Engine/SimulationHost.cs`.
+**Deps**: none. **Wave**: 1.
 
-**Original plan (for reference)** — `src/Agapanthe.Graphics/Memory/GpuAllocator.cs` (modify); new
-`tests/Agapanthe.Tests/GpuAllocatorConcurrencyTests.cs`. Deps: none. Wave 1 (parallel with AW-002).
+- `Stats` property: `{ get; } = new();` → `{ get; }`, assigned in the private ctor.
+- Private ctor gains `FrameStats? stats = null` trailing param; `Stats = stats ?? new();`.
+- `CreateDefault(GameWorld, SimulationSettings)` gains a trailing `FrameStats? stats = null`,
+  threads it to the private ctor. `CreateDefault(GameWorld)` (single-arg) unchanged, still forwards
+  to the 2-arg overload with `SimulationSettings.Default` (no stats param needed there).
+- Confirm (already verified in the prior thread-safety board, re-confirm here): every existing
+  caller (`HeadlessSim`, `DedicatedServer`, `AotComponentProbe`, `FrameOrchestrator.CreateDefault`,
+  ~20 tests) compiles unchanged.
 
-- Private `System.Threading.Lock _lock = new();` field.
-- Wrap `Allocate`, `Free`, `GetStats()`, `LogStats()`, `Dispose()` bodies in `lock (_lock) { ... }`.
-- Move the existing `ObjectDisposedException.ThrowIf(_disposed, this)` in `Allocate`/`Free`
-  **inside** the lock (round-3 non-blocking fix — closes the exact check-then-act gap the lock
-  exists to prevent).
-- Doc comment: replace "Not thread-safe (phase-1 rendering is single-threaded)" remark with the
-  new contract + the lock-ordering invariant (D7: DeletionQueue → Allocator, never the reverse;
-  this lock is never held while acquiring `DeletionQueue`'s, and vice versa).
-- **Test (TDD, write first)**: `GpuAllocatorConcurrencyTests.cs` using the existing GPU-free
-  `internal GpuAllocator(IMemoryBackend, Func<uint, MemoryDomain, uint>)` ctor (mock backend, no
-  GraphicsDevice). Two threads share **at least one common memory-type index** (round-3 finding:
-  the discriminator is contention on one `FreeListAllocator`, not the dictionary's own growth,
-  which only inserts once or twice regardless of thread count) and race
-  `Allocate`/`Free`/`GetStats()` in a loop. Invariant asserted: every live allocation's byte range
-  never overlaps another's within the same block, and `GetStats().UsedBytes`/`AllocationCount`
-  return to exactly zero once every allocation is freed.
-  **Verify by mutation before closing this task**: temporarily remove the lock, confirm the test
-  actually fails (not just "ran green a few times") — then restore the lock and confirm green.
-  Record the mutation result on this board entry when done.
+### BW-003 — `HostOptions.WithoutStartupOnlyPaths()` (D12) [S] — ✅ DONE
+**Files**: `src/Agapanthe.App/HostOptions.cs`.
+**Deps**: none. **Wave**: 1.
 
-### AW-002 — `GraphicsDevice` core thread contract (D1, D2, D4c, D6, D8) [M]
-**Files**: `src/Agapanthe.Graphics/GraphicsDevice.cs` (modify).
-**Deps**: none. **Wave**: 1 (parallel with AW-001).
+New method returning a fresh `HostOptions` copying every existing property EXCEPT `LoadPath`/
+`SavePath`, which are set to `null`. Enumerate all 14 properties explicitly (no `with` — plain
+`sealed class`): `Scene, Universe, MaxFrames, CapturePath, CaptureUiPath, SavePath(→null),
+LoadPath(→null), ContentRoot, OverlayVisible, CullStats, VerifyCull, ShaderReloadTest,
+GpuTimestampsEnabled, AudioEnabled`.
 
-- `_ownerThreadId` field: `private readonly int _ownerThreadId = Environment.CurrentManagedThreadId;`
-  (mirrors `GameWorld.cs:67` exactly).
-- `_sanctionedLoaderThreadId` field: `private int? _sanctionedLoaderThreadId;` — read/written via
-  `Volatile.Read`/`Volatile.Write` only (round-2 finding — both threads read it).
-- `private readonly Lock _queueLock = new();` field (consumed by AW-003/AW-004's `WaitIdle`
-  change below and by AW-003's Commands.cs methods via partial-class field sharing). Doc comment:
-  declares it a **leaf lock** — nothing held while holding `_queueLock` ever acquires
-  `DeletionQueue`'s or `GpuAllocator`'s lock, and nothing while holding either of those acquires
-  `_queueLock` (D7).
-- `public void SetSanctionedLoaderThread(int threadId)`: guarded by `AssertOwnerThreadStrict()`
-  (below); throws `InvalidOperationException` if a loader is already registered ("at most one",
-  now enforced not just stated — round-3 finding); throws `ObjectDisposedException` if disposed.
-- `public void ClearSanctionedLoaderThread()`: same three guards (owner-only, no-op is not
-  allowed — round-3: unregister must be explicit), `ObjectDisposedException` if disposed.
-- `private void AssertCallerThread([CallerMemberName] string caller = "")`: **always-on, not
-  `[Conditional("DEBUG")]`** (D2 — mirrors Job-2's promotion of `SimCommandQueue.AssertOwnerThread`
-  for the same reasoning: a non-overlapping cross-thread call is otherwise invisible in Release,
-  and a missed lock here is native-crash-class). Owner **or** sanctioned loader passes.
-- `private void AssertOwnerThreadStrict([CallerMemberName] string caller = "")`: always-on, owner
-  **only** — used by `QueuePresent`/`AdvanceFrame`/`SetSanctionedLoaderThread`/
-  `ClearSanctionedLoaderThread`.
-- `WaitIdle()` (already exists at line 230): wrap body in `lock (_queueLock) { ... }` (D4c — the
-  most serious gap in the original draft; `vkDeviceWaitIdle` requires external sync against any
-  concurrent submit on any thread, and this is called mid-loop from `Swapchain.Recreate`/
-  `Swapchain.Dispose`, `Renderer.cs:1561`, `IblGenerator.cs:284`, `FrameRenderer.cs:366`,
-  `AppHost.cs:389`/`407` — not just at final teardown).
-- `CurrentFrameIndex`: backing field becomes `Interlocked`-managed (`Interlocked.Increment` in
-  `AdvanceFrame`, `Interlocked.Read`/`Volatile.Read` for the getter — a `long` needs
-  `Interlocked.Read` on 32-bit, `Volatile.Read` suffices on 64-bit register width per .NET's own
-  guarantee, but use `Interlocked.Read` for portability since the type is public API). `AdvanceFrame`
-  gains `AssertOwnerThreadStrict()` (D2 — a loader never advances the frame counter).
-- `Dispose()`: immediately after the existing `if (_disposed) { return; }` early-return, **still
-  before** `_disposed = true;` (round-3 placement fix, exact line), add:
-  `if (Volatile.Read(ref _sanctionedLoaderThreadId) is { } stillRegistered) { throw new
-  InvalidOperationException($"GraphicsDevice.Dispose was called while loader thread
-  {stillRegistered} is still sanctioned. Call ClearSanctionedLoaderThread() after Join()-ing it
-  first."); }`.
-- **No standalone unit test for this task** — per the spec's own Verification §3, the guard
-  levels and D8's check are only meaningfully exercised against a **real** `GraphicsDevice`
-  (thread ids, `ObjectDisposedException` timing), which is what AW-006's windowed tool does.
-  Noted here so the tail "Requirements Validation" task doesn't mistake the absence of a unit
-  test file for a missed requirement.
+### BW-004 — new `ScopedWindow : IWindow` (D11) [M] — ✅ DONE
+**Files**: new `src/Agapanthe.App/ScopedWindow.cs`.
+**Deps**: none. **Wave**: 1.
 
-### AW-003 — `GraphicsDevice.Commands.cs`: locked submit/present (D4a, D4b, D5) [S] — ✅ DONE
+Wraps a real `IWindow`. `IWindow`'s full surface (verified, `IWindow.cs`): events `Loaded`,
+`Updated`, `Rendered`, `FramebufferResized`, `KeyPressed`; properties `Title`, `FramebufferSize`,
+`VkSurface`, `MouseDelta`, `MouseCaptured`; methods `IsKeyDown`, `SetMouseCaptured`,
+`GetRequiredVulkanExtensions`, `Run`, `Close`; extends `IDisposable`.
 
-`QueueSubmit2` gained `AssertCallerThread()` + `lock (_queueLock)`. New `internal void QueueSubmit(Queue,
-SubmitInfo*, Fence)` (D4b) and `internal Result QueuePresent(Queue, PresentInfoKHR*)` (D5, returns
-`Result`, guarded by `AssertOwnerThreadStrict`, calls `KhrSwapchain.QueuePresent` under the same lock).
-Builds clean.
+- Constructor takes the real `IWindow`.
+- Every property/method (`Title` get/set, `FramebufferSize`, `VkSurface`, `MouseDelta`,
+  `MouseCaptured`, `IsKeyDown`, `SetMouseCaptured`, `GetRequiredVulkanExtensions`) forwards
+  straight through to the wrapped window — no wrapping needed, these are not the leak.
+- Each of the 5 events gets its own backing implementation: a private
+  `Dictionary<Delegate, Delegate>` (caller's handler → the trampoline actually subscribed to the
+  real window) per event, OR one dictionary keyed by `(eventName, callerHandler)` — pick whichever
+  is simpler to get right; correctness constraint: `add` wraps the caller's handler in a trampoline
+  closure that checks a private `_disposed` flag before invoking, subscribes the trampoline to the
+  real window's event, and records the mapping; `remove` looks up and unsubscribes the matching
+  trampoline, removing the mapping entry.
+- `_disposed` starts `false`. `Dispose()`: **first statement** sets `_disposed = true` (closes the
+  round-3 multicast-snapshot race — an already-in-flight real-window event call reaching a
+  trampoline mid-invocation becomes a no-op the instant this flag flips, regardless of which
+  invocation-list snapshot is executing), then unsubscribes every tracked trampoline from the real
+  window and clears the tracking dictionary, then runs every registered `RegisterCleanup` callback.
+  **Never** calls the real `IWindow`'s own `Dispose()`.
+- `void RegisterCleanup(Action cleanup)` — stores it in a list, run in `Dispose()` (after
+  unsubscribing events), for non-event disposables (`ThinClientSceneRecipe`'s `NetChannel`).
+- `void CloseUnderlyingWindow()` — the one explicit escape hatch that actually disposes the real
+  `IWindow`; not called by any scene-switch path, reserved for `AppHost`'s own final teardown
+  (which today disposes the raw `IWindow` directly anyway — confirm in BW-012 whether this method
+  ends up needed at all, or whether `AppHost` simply keeps a separate reference to the raw window
+  for its own teardown and this method turns out unused; do not force a call site that isn't real).
+- `Run()` — `throw new NotSupportedException("...")`; reentering the frame loop from inside a scene
+  is a bug, not a case to silently forward.
 
-### AW-004 — `Swapchain.cs` present routes through `GraphicsDevice.QueuePresent` (D5) [S] — ✅ DONE
+### BW-005 — new `BackgroundPresentationContext` (D8) [S] — ✅ DONE
+**Files**: new `src/Agapanthe.App/BackgroundPresentationContext.cs`.
+**Deps**: none. **Wave**: 1.
 
-One-line call-site swap at the former line 112; `ErrorOutOfDateKhr`/`SuboptimalKhr` branching
-untouched.
+```csharp
+public sealed class BackgroundPresentationContext
+{
+    public required GraphicsDevice Device { get; init; }
+    public required ResourceRegistry Registry { get; init; }
+    public required DescriptorSetLayout MaterialSetLayout { get; init; }
+    public required CancellationToken CancellationToken { get; init; }
+}
+```
 
-### AW-005 — `GpuReadback.cs` submit routes through `GraphicsDevice.QueueSubmit` (D4b) [S] — ✅ DONE
+### BW-006 — `SceneMaterializer.CollectModelKeys` extraction [S] — ✅ DONE (`Materialize` refactored to call it, existing tests unaffected)
+**Files**: `src/Agapanthe.Scene/SceneMaterializer.cs`.
+**Deps**: none. **Wave**: 1.
 
-One-line call-site swap; `vk` local confirmed still used elsewhere in the method (buffer/pool/fence/
-image-transition calls), no unused-variable warning.
+Extract the model-key-collection loop (`:46-75`) into `public static IReadOnlyCollection<AssetKey>
+CollectModelKeys(SceneDefinition def)` — a `HashSet<AssetKey>`, entities' `.Model` plus systems'
+`.ProbeModel` (same `IsNone`/`DriveControl` guard, throwing `AssetException` on an invalid `None`).
+`Materialize`'s own model-loading loop is rewritten to call this helper first, then `loadModel(key)`
+per returned key into its `Dictionary<AssetKey, ModelAsset>` — single source of truth for "which
+keys does this scene need," closing the exact duplication risk the spec's "Reused prefetch" section
+names. Existing `SceneMaterializerTests` must stay green unchanged (pure refactor, same behavior).
 
-**Wave 2+3 checkpoint**: full solution build 0 warnings/0 errors, full test suite **1015/1015 green**.
-
-### AW-003 — `GraphicsDevice.Commands.cs`: locked submit/present (D4a, D4b, D5) [S]
-**Files**: `src/Agapanthe.Graphics/GraphicsDevice.Commands.cs` (modify).
-**Deps**: AW-002 (needs `_queueLock`, `AssertCallerThread`, `AssertOwnerThreadStrict`).
+### BW-007 — `ISceneRecipe`: `PrefetchBackground` (DIM) + `Build` gains a parameter (D7) [S] — ✅ DONE
+**Files**: `src/Agapanthe.App/ISceneRecipe.cs`.
+**Deps**: BW-005 (needs `BackgroundPresentationContext` to exist for the signature).
 **Wave**: 2.
 
-- `QueueSubmit2`: wrap body in `lock (_queueLock)`, call `AssertCallerThread()` at entry (before
-  the lock — matches `GameWorld`'s pattern of asserting before touching guarded state).
-- New `internal void QueueSubmit(Queue queue, SubmitInfo* submit, Fence fence)`: same
-  `AssertCallerThread()` + `lock (_queueLock)`, body is
-  `VkCheck.ThrowIfFailed(_vk.QueueSubmit(queue, 1, submit, fence), "vkQueueSubmit")` — the exact
-  call `GpuReadback.cs:111` makes today, moved here so AW-005 can route through it.
-- New `internal Result QueuePresent(Queue queue, PresentInfoKHR* info)`: `AssertOwnerThreadStrict()`
-  (not `AssertCallerThread` — a loader never presents, D5) + `lock (_queueLock)`, body is
-  `return _vk.KhrSwapchain.QueuePresent(queue, info);` — wait, `KhrSwapchain` is the extension
-  object already exposed via `KhrSwapchain` property; call
-  `return KhrSwapchain.QueuePresent(queue, info);` and **return the raw `Result`**, never throw
-  (round-1 fix — `Swapchain.Present` must keep inspecting `ErrorOutOfDateKhr`/`SuboptimalKhr`
-  itself).
+```csharp
+public interface ISceneRecipe
+{
+    string Name { get; }
+    bool Matches(string? sceneToken) => ...;                       // unchanged
+    object? PrefetchBackground(AssetCatalog catalog, BackgroundPresentationContext? background) => null;
+    void Build(object? prefetched, SimSceneContext sim, PresentationSceneContext? presentation);
+}
+```
+`Build`'s new leading parameter is the only breaking signature change; `PrefetchBackground` is a
+DIM so no non-`SceneRecipe` implementer needs a body.
 
-### AW-004 — `Swapchain.cs` present routes through `GraphicsDevice.QueuePresent` (D5) [S]
-**Files**: `src/Agapanthe.Graphics/Swapchain.cs` (modify).
-**Deps**: AW-003. **Wave**: 3 (parallel with AW-005 — disjoint file).
+### BW-008 — Update the 3 trivial `ISceneRecipe.Build` signatures [S] — ✅ DONE (plus the AppHost.cs:164 call site, temporarily `prefetched: null`, real wiring in BW-011)
+**Files**: `samples/ThinClient/ThinClientSceneRecipe.cs`, `tests/Agapanthe.Tests/
+AppHostContractTests.cs` (2 fakes + the one direct `.Build(...)` call site at `:262`).
+**Deps**: BW-007. **Wave**: 2.
 
-- Line 112: `_device.KhrSwapchain.QueuePresent(_device.PresentQueue, &presentInfo)` →
-  `_device.QueuePresent(_device.PresentQueue, &presentInfo)`. The following `if (result is
-  Result.ErrorOutOfDateKhr or Result.SuboptimalKhr)` / `VkCheck.ThrowIfFailed(result, ...)` logic
-  is **unchanged** — this is a one-line call-site swap, nothing else in `Swapchain.cs` moves.
+Add the leading `object? prefetched` parameter to `ThinClientSceneRecipe.Build`, `FakeRecipe.Build`
+(throws `NotSupportedException`, body unaffected), `HeadlessFixtureRecipe.Build` (body unaffected).
+Update the one direct call site: `recipe.Build(sim, presentation: null)` →
+`recipe.Build(prefetched: null, sim, presentation: null)`.
 
-### AW-005 — `GpuReadback.cs` submit routes through `GraphicsDevice.QueueSubmit` (D4b) [S]
-**Files**: `src/Agapanthe.Graphics/GpuReadback.cs` (modify).
-**Deps**: AW-003. **Wave**: 3 (parallel with AW-004 — disjoint file).
+### BW-009 — `SceneRecipe.PrefetchBackground` + `Build` rewrite (D7, "Reused prefetch" section) [M] — ✅ DONE
+**Files**: `src/Agapanthe.App/Scene/SceneRecipe.cs`, `src/Agapanthe.App/Scene/
+ClientScenePresenter.cs`.
+**Deps**: BW-006, BW-007. **Wave**: 2.
 
-- Line 111: `VkCheck.ThrowIfFailed(vk.QueueSubmit(device.GraphicsQueue, 1, &submit, fence),
-  "vkQueueSubmit");` → `device.QueueSubmit(device.GraphicsQueue, &submit, fence);` (the new
-  wrapper already does the `VkCheck.ThrowIfFailed` internally with the same error label — round-2
-  clarification in the spec). Confirm the `vk` local becomes otherwise-unused only where expected
-  (it is still used elsewhere in the same method for buffer/pool/fence creation) — do not remove
-  the `var vk = device.Api;` local.
+- `SceneRecipe.PrefetchBackground(catalog, background)`: loads `def = catalog.LoadScene(new
+  AssetKey($"scenes/{Name}"))` (cheap, GPO-free TOML-cooked deserialize — re-loading it in `Build`
+  too is fine, this is NOT the expensive part being deduplicated), calls
+  `SceneMaterializer.CollectModelKeys(def)`, and for each key: `catalog.LoadModel(key)` (GPU-free
+  decode) then, if `background is not null`, `background.Registry.Load(background.Device, model,
+  background.MaterialSetLayout, key)` (GPU upload) — checking `background.CancellationToken` for
+  cancellation between each key (round-2 requirement: "checked once per model"). Returns the built
+  `Dictionary<AssetKey, ModelAsset>` as `object?`. Returns `null` if `background is null` (a
+  headless-only build with no presentation — though today `SceneRecipe` always has real prefetch
+  work for a client scene; document that a `null` background here means skip the upload half but
+  still return the decoded dictionary, so `Build` can still call `Materialize` without decoding
+  twice even in that edge case).
+- `SceneRecipe.Build(prefetched, sim, presentation)`: unchanged up through computing
+  `spawnEntities`. Where it currently calls `Agapanthe.Scene.SceneLoader.LoadHeadless(def,
+  sim.Catalog, sim.World, ..., spawnEntities)` (`:53-54`), branch: if `prefetched is
+  Dictionary<AssetKey, ModelAsset> models`, call `SceneMaterializer.Materialize(def, key =>
+  models[key], sim.World, sim.Simulation.Settings.FixedDeltaSeconds, spawnEntities)` directly
+  (bypassing `SceneLoader.LoadHeadless`, per the spec's round-3 correction); otherwise (no
+  prefetch — e.g. a direct/synchronous first-load path that never ran `PrefetchBackground`, if
+  BW-011's design ends up needing that fallback) keep calling `SceneLoader.LoadHeadless` as today.
+  Everything after (physics system registration, restore request, scene-systems dispatch) is
+  unchanged.
+- `ClientScenePresenter.Apply`: remove the upload loop (`:25-28`) — it now lives in
+  `PrefetchBackground`. `Apply` starts directly at `sim.World.ResolveMeshRefs(...)`. Rename/adjust
+  its doc comment to say models are already uploaded by the time this runs.
 
-### AW-006 — Windowed diagnostic tool: exercises D4c + both guard levels + D8 [M] — ✅ DONE
+### BW-010 — `SimSceneContext.RequestSceneSwitch`, records-only (D4) [S] — ✅ DONE (added `DrainPendingSceneSwitch()` for BW-012 to consume)
+**Files**: `src/Agapanthe.App/SimSceneContext.cs`.
+**Deps**: none (different file from Wave 2's other tasks — parallel-safe with BW-007/008/009, kept
+in the same wave number for sequencing simplicity since Wave 2 is otherwise sequential anyway).
+**Wave**: 2.
 
-**Blocking discovery, not scope creep**: `QueuePresent`/`AdvanceFrame`/`PresentQueue` are `internal`, and
-`Agapanthe.Graphics`'s only `InternalsVisibleTo` grants were `Agapanthe.Tests`/`ShaderPrecompiler` —
-`Sandbox` had no access. Added `[assembly: InternalsVisibleTo("Sandbox")]` to `GraphicsDevice.cs`
-(mirrors the existing `ShaderPrecompiler` grant pattern) plus `<AllowUnsafeBlocks>true</AllowUnsafeBlocks>`
-to `Sandbox.csproj` (the `QueuePresent(Queue, PresentInfoKHR*)` call site needs unsafe context).
+New private `string? _pendingSceneSwitch` field (mirrors `_pending`'s restore-request shape
+exactly). `public void RequestSceneSwitch(string sceneName)` — validates non-empty, stores it. New
+internal `bool HasPendingSceneSwitch`/`string? PendingSceneSwitchToken`, and an internal method to
+atomically read-and-clear it (mirrors `ApplyPendingRestore`'s clear-before-use pattern) for
+`AppHost`'s poll to consume in BW-012. **Does not** spawn a thread, call
+`SetSanctionedLoaderThread`, or block — that is BW-012's job, from `window.Rendered`, never from
+here (this type has no access to a window or a thread to spawn anyway — headless-safe by
+construction, the point of D4's correction).
 
-New `samples/Sandbox/Tools/ThreadSafetyProbeTool.cs` + 2-line `Program.cs` dispatch
-(`AGAPANTHE_THREAD_SAFETY_TEST=<N>`). All 4 checks implemented exactly as specced: baseline concurrent
-upload (two never-shared `GpuUploader`s, D9), D4c (owner `WaitIdle()` raced against the loader's in-flight
-uploads, no synchronization point — that's the point), guard-level discrimination (the sanctioned loader
-thread itself, having just proven it legitimately passes `AssertCallerThread` via its own uploads,
-rejected by `AssertOwnerThreadStrict` on `QueuePresent`/`AdvanceFrame`), D8 (synthetic sanction +
-`Dispose()` must throw, then cleared so the tool's own teardown stays clean).
+### BW-011 — `AppHost.cs`: hoist `sim`, first-load via `PrefetchBackground`+`Build` (D14) [M] — ✅ DONE (isFirstLoad flag dropped — window.Loaded fires exactly once per process, so its Save/Restore code structurally never re-runs on a switch, no runtime flag needed)
+**Files**: `src/Agapanthe.App/AppHost.cs`.
+**Deps**: Wave 2 complete. **Wave**: 3.
 
-**Live run, locked**: `AGAPANTHE_THREAD_SAFETY_TEST=2000` → all 4 checks PASS, `ResourceTracker: no leaks
-(2032 resources)`, exit 0. Re-run 3× at N=5000 after the mutation test below — all green each time
-(5032 resources, 0 leak each run).
+- Hoist `SimSceneContext? sim = null;` to `RunClient`'s top-level locals (alongside `world`/
+  `camera`/`controller`/`renderList`), reassigned inside `window.Loaded` (first load) and later by
+  BW-012's switch orchestration.
+- Inside `window.Loaded`, where `recipe.Build(sim, presentation)` is called today (`:164`): call
+  `recipe.PrefetchBackground(catalog, background)` first (building a `BackgroundPresentationContext`
+  inline — `Device = device, Registry = registry, MaterialSetLayout = renderer.MaterialSetLayout,
+  CancellationToken = CancellationToken.None` — the first load runs synchronously on the owner
+  thread, no real cancellation needed), then `recipe.Build(prefetched, sim, presentation)`. Same
+  effective behavior as today, same recipe, same registry — **byte-identical output**, this task's
+  own acceptance bar (spec Verification item 1).
+- Everything else in `window.Loaded` (restore application, save, logging) is unchanged.
+- **Verification for this task alone**: run every existing pinned scene (`model`, `grid`, `drop`,
+  `metalrough`, `planet`, `planet-drop`, `planet-challenge`, `drive`, `topdown`) and confirm every
+  capture hash is unchanged from `CLAUDE.md`'s recorded values — this task changes the mechanism
+  (two calls instead of one) but must not change one pixel.
 
-**Mutation-verified live, not just by unit test** — the spec's own centerpiece fix (D4c): temporarily
-removed `lock (_queueLock)` from `WaitIdle()`'s body only, rebuilt, ran the probe 3× — **every single run
-crashed immediately** via the project's Debug `FailFast`-on-validation-error callback:
-`vkDeviceWaitIdle(): THREADING ERROR : object of type VkQueue is simultaneously used in current thread
-<owner> and thread <loader>`. This is Vulkan's own validation layer catching the exact race D4c exists to
-close, on real hardware (NVIDIA RTX 5070 Ti), not a synthetic assertion. Restored the lock, re-verified
-green 3×. This is the strongest evidence in the whole spec that the fix is load-bearing, not
-belt-and-suspenders.
+### BW-012 — `AppHost.cs`: `window.Rendered` switch state machine (D9.1-D9.6) [M] — ✅ DONE (largest task —
+kept as one task deliberately rather than fake-split, see note below]
+**Files**: `src/Agapanthe.App/AppHost.cs`.
+**Deps**: BW-011. **Wave**: 3.
 
-Full solution build 0 warnings/0 errors after Wave 4; full test suite **1015/1015 green** (unchanged from
-Wave 1-3 — this wave touched no test-suite code, only the new Sandbox tool + the `InternalsVisibleTo`/
-`AllowUnsafeBlocks` additions).
+**Why not split further**: D9's six sub-cases (start a load / a new request while one is in flight
+/ successful completion / prefetch failure / build failure after teardown / window close mid-load)
+share one mutable state machine (the in-flight `CancellationTokenSource`, loader `Thread`,
+`background.Registry`, next-pending-request slot) — splitting them into separate tasks would just
+mean each one rewrites the same 5-10 lines of shared state the others already declared, with no
+independent test value until all six exist together. Kept as one task; verified against the spec's
+own 9-item list item by item in BW-014.
 
+State needed (new locals inside `RunClient`, alongside the existing hoisted ones): a `Thread?
+_loaderThread`, `CancellationTokenSource? _loaderCts`, `ResourceRegistry? _loaderRegistry`,
+`string? _nextPendingSwitch` (the D9.2 case), `object? _loaderPrefetched` (the loader thread's
+result, published for the poll to pick up), `Exception? _loaderFailure`.
 
-**Files**: new `samples/Sandbox/Tools/ThreadSafetyProbeTool.cs`; modify
-`samples/Sandbox/Program.cs` (2-line dispatch, mirrors the `AGAPANTHE_IBL_TEST` block).
-**Deps**: AW-001, AW-002, AW-003, AW-004, AW-005 (needs every lock/guard actually wired).
-**Wave**: 4.
+In `window.Rendered`, before `orchestrator.Tick(...)` (a new block, poll order: check completion →
+check new request):
 
-Mirrors `IblTestTool.Run`'s exact shape: a real 64×64 `EngineWindow` + `GraphicsDevice` built for
-a one-shot diagnostic run, dispatched via a new env var `AGAPANTHE_THREAD_SAFETY_TEST=<N>` (N =
-upload iterations per thread), teardown in a `finally` (`DeletionQueue.FlushAll()` → `Dispose()`
-→ `ResourceTracker.Report()`), returns `0`/`1`.
+1. **If a loader thread is running and has finished** (`_loaderThread.IsAlive == false`): `Join()`,
+   `device.ClearSanctionedLoaderThread()`. If `_loaderFailure is not null`: log it, dispose
+   `_loaderRegistry`, clear loader state, keep the current scene (D9.4) — do not fall through to
+   hand-off. Otherwise (success): run the **hand-off** (D9.3, below), then clear loader state, then
+   if `_nextPendingSwitch is not null`, immediately start that one (fold into step 3's start logic).
+2. **If no loader is running and `sim.HasPendingSceneSwitch`** (drain it): if this is the FIRST
+   request seen (no `_loaderThread` at all yet), go straight to step 3. If a load is currently
+   running (can only reach here between polls, so this is really "a load finished AND a new request
+   arrived in the same or a later poll" — the D9.2 in-flight-cancel case matters when a SECOND
+   request arrives WHILE a load is still running, which must be checked BEFORE step 1's
+   is-finished check, not after): **actually implement D9.2 first in poll order** — check "is a
+   load running AND a new switch was requested" → cancel `_loaderCts`, record the new request in
+   `_nextPendingSwitch`, do NOT start it yet, do NOT block.
+3. **Start a load**: resolve the recipe via `AppHost.SelectRecipe(game, token)`, create a fresh
+   `ResourceRegistry` (`_loaderRegistry`), a `CancellationTokenSource` (`_loaderCts`), spawn
+   `_loaderThread = new Thread(() => { try { _loaderPrefetched = recipe.PrefetchBackground(catalog,
+   new BackgroundPresentationContext { Device = device, Registry = _loaderRegistry, MaterialSetLayout
+   = renderer.MaterialSetLayout, CancellationToken = _loaderCts.Token }); } catch (Exception ex) {
+   _loaderFailure = ex; } })`, call `device.SetSanctionedLoaderThread(_loaderThread.ManagedThreadId)`
+   **before** `_loaderThread.Start()` (mirrors AW-006's own tool — sanction before start, never
+   after, or the loader could submit before it is recognized).
 
-Inside `window.Loaded`, after the device exists:
+**Hand-off (D9.3, step 1's success path)**, in order:
+1. `frameRenderer.WaitIdle()`.
+2. Dispose the OLD `sim.Window` (a `ScopedWindow` from BW-004 — the very first load does not have
+   one yet, see below) — `ScopedWindow.Dispose()`.
+3. Dispose the old `registry`, `world`, `orchestrator.Simulation` (`SimulationHost` — confirm it is
+   `IDisposable`, `SimulationHost.Dispose()` exists per BW-002's research, `.cs:92`) — NOT
+   `orchestrator` itself (not `IDisposable`).
+4. Construct a fresh `GameWorld` (same `ResolveUniverse` call as today) and a fresh
+   `SimulationHost.CreateDefault(world, SimulationSettings.Default, sharedFrameStats)` — the
+   `sharedFrameStats` local from BW-002, created ONCE before `window.Loaded` and passed to every
+   `CreateDefault` call, first load included (update BW-011 if needed to thread it through the
+   first-load call too).
+5. Reassign `registry = _loaderRegistry`.
+6. Build a fresh `FrameOrchestrator.CreateDefault(simulation, world, renderer, registry, camera,
+   renderList)`, re-register the SAME `debugOverlay`/`uiSystem` instances on it (D13 — do not
+   `new` them again).
+7. `renderer.ResetSceneState()` (BW-001), then `renderer.SetEnvironment(BlackEnvironment.Build())`
+   (the module-boundary correction — this line lives here, not inside `ResetSceneState`).
+8. Construct a fresh `ScopedWindow` wrapping the SAME raw `window`, assign it as the new
+   `presentation.Window`.
+9. Build the new `sim`/`presentation` contexts (mirrors `window.Loaded`'s construction), using
+   `sim.Options = options.WithoutStartupOnlyPaths()` (BW-003) for every switch after the first
+   (D12) — and gate the existing post-`Build` Save/Restore-apply steps (`:169-183` today) so they
+   only run on the FIRST load, not every switch (track with a simple `isFirstLoad` bool that flips
+   false after the first successful build).
+10. Call `recipe.Build(_loaderPrefetched, sim, presentation)`. **If this throws**: fatal by design
+    (D9.5) — let it propagate to `RunClient`'s existing top-level `catch`, which already sets
+    `failed = true` and runs the strict teardown (no new code needed for this case beyond NOT
+    catching it locally).
 
-1. **Baseline concurrent upload (happy path)**: two `GpuUploader` instances (one per thread,
-   never shared — D9), each running N `Upload` calls against the same `GraphicsDevice`, on a
-   background thread sanctioned via `device.SetSanctionedLoaderThread(loaderThread.ManagedThreadId)`
-   before it starts. Owner thread stays on the main/window thread throughout. After `Join()`,
-   `device.ClearSanctionedLoaderThread()`, then `ResourceTracker.Report()` must stay clean —
-   Debug build only (validation layer + `FailFast`-on-error callback are Debug-only); no extra
-   config needed (thread-safety checking is on by default in `VK_LAYER_KHRONOS_validation`,
-   unlike synchronization validation which needs `VK_EXT_validation_features`).
-2. **D4c — WaitIdle concurrent with an in-flight loader upload**: while the loader thread is
-   mid-`Upload` (loop running), the owner thread calls `device.WaitIdle()` (simulating a resize)
-   at least once. Assert: no validation message fires (the debug callback's `FailFast` would
-   already kill the process — absence of a crash plus a clean `ResourceTracker.Report()` after
-   `Join()` is the pass condition), no corruption.
-3. **Guard-level discrimination (round-3 correction — the actually discriminating case)**: from
-   the **sanctioned loader thread** itself (not a third, unsanctioned thread — that would only
-   prove *a* guard fires, not that the two levels differ), call `device.QueuePresent(...)` (a
-   synthetic/dummy `PresentInfoKHR*` is acceptable — the assertion under test is that
-   `AssertOwnerThreadStrict` throws before any Vulkan call happens) and separately
-   `device.AdvanceFrame()` — while that same thread is still validly sanctioned (so it legitimately
-   passes `AssertCallerThread` on submits) — confirm **both throw**
-   `InvalidOperationException`. This is the one case that actually proves `AssertCallerThread`
-   (owner-or-loader) and `AssertOwnerThreadStrict` (owner-only) are genuinely different gates.
-4. **D8 — Dispose precondition**: after the loader thread from step 1 has exited and been
-   `Join()`-ed, **skip** `ClearSanctionedLoaderThread()` on purpose and confirm a subsequent
-   `Dispose()` throws `InvalidOperationException` naming the still-registered thread id (a
-   synthetic check is enough per the spec — no live thread needs to be running at this instant).
-   Then, in a **separate** device instance (or reset state) for the rest of the tool's own clean
-   teardown, do call `ClearSanctionedLoaderThread()` properly so the tool's own final
-   `ResourceTracker.Report()` stays clean — this step must not leave the process's real teardown
-   dirty.
+**Window-close-mid-load (D9.6)**, a new teardown step (in `BuildTeardown`, before device disposal):
+if `_loaderThread is { IsAlive: true }`: `_loaderCts?.Cancel()`, `_loaderThread.Join()` (blocking
+is acceptable — shutdown path), dispose `_loaderRegistry`, `device.ClearSanctionedLoaderThread()`.
 
-Log a clear pass/fail line per numbered check (mirrors `IblTestTool`'s `Log.Info` style) so a
-human reading the console output can see all 4 checks passed distinctly, not just an aggregate
-exit code.
+**Demo key for live verification**: add a new keybind (`Key.K` — confirmed unused in this branch;
+the Noesis spike that uses `Key.K` lives on an unmerged branch) inside the existing `KeyPressed`
+switch, calling `sim?.RequestSceneSwitch(<name>)` cycling between two known scene names appropriate
+to whichever `IGame`/recipes are actually registered in the Sandbox at the time this task runs
+(check `SandboxGame.cs`'s `Scenes` list — likely `"model"`/`"grid"` or similar two already-cooked
+scenes) — this is what makes spec Verification items 2/3/4/6 actually exercisable live, not just
+theoretically wired.
 
-### AW-007 — Self Code Review (tail, mandatory) — ✅ DONE
+## Tail Tasks
 
-Read every diff (`git diff --stat` matched the spec's own "Files touched" list exactly — no
-unexpected file touched). Full `GraphicsDevice.cs`/`.Commands.cs`/`GpuReadback.cs`/`Swapchain.cs`
-diffs re-read line by line against D1-D9. **1 real gap found**: D7 says the lock-ordering invariant
-is "documented on all three types" (`DeletionQueue`, `GpuAllocator`, `GraphicsDevice`) — the first
-two and `GraphicsDevice`'s `_queueLock` field comment had it, but `DeletionQueue.cs` itself never
-got a doc comment. Fixed: added a `<para>` to its class summary stating its lock is independent of
-`_queueLock` and is acquired before `GpuAllocator`'s, never the reverse. Rebuilt + full suite
-re-run green after the fix (1015/1015). Confirmed the "what did NOT need fixing" list (`ResourceTracker`,
-`SubmitImmediate`, `GraphicsQueue`/`PresentQueue`/etc.) was not touched, per `git diff --stat`.
+### BW-013 — Self Code Review — ✅ DONE
 
-### AW-008 — Requirements Validation (tail, mandatory) — ✅ DONE
+Read every diff in full (`git diff --stat` matched the spec's own file list — `AppHost.cs`,
+`HostOptions.cs`, `ISceneRecipe.cs`, `Scene/ClientScenePresenter.cs`, `Scene/SceneRecipe.cs`,
+`SimSceneContext.cs`, `SimulationHost.cs`, `CopySyncState.cs`, `PersistentInstanceBuffer.cs`,
+`Renderer.cs`, `SceneMaterializer.cs`, plus the 2 new files `ScopedWindow.cs`/
+`BackgroundPresentationContext.cs`, and the 2 trivial `ISceneRecipe` implementer edits — nothing
+unexpected touched). **1 real ordering bug found and fixed**: the switch poll checked "a new
+request arrived" BEFORE checking "did the in-flight load already finish" — a request landing in
+the exact same poll as a completion would cancel a load that was already done, then still hand off
+the about-to-be-superseded scene, then immediately switch again. Not a crash/leak (harmless
+wasted work), but sloppy — restructured to check completion first, always. Also added: cancellation
+(D9.2) now surfaces through the same `loaderFailure` path as a real failure (`PrefetchBackground`'s
+`CancellationToken.ThrowIfCancellationRequested()` throws `OperationCanceledException`, caught by
+`StartLoad`'s thread body like any other exception) — distinguished in the log
+(`OperationCanceledException` → "load canceled", anything else → "failed") so an operator doesn't
+mistake an intentional supersede for a real bug. Confirmed `SimulationHost : IDisposable` (not
+assumed) before relying on it in `PerformHandOff`. Confirmed `FrameOrchestrator` is genuinely NOT
+`IDisposable` (only its constituents are disposed). Re-ran full test suite + the single-scene
+byte-identical capture after the reorder fix — unaffected (1015/1015, hash unchanged).
 
-Walked the spec's own 4-item Verification list:
-1. Full suite green, behavior-preserving — 1015/1015.
-2. `GpuAllocatorConcurrencyTests` mutation-verified (AW-001).
-3. Windowed host covers D4c + both guard levels + D8 — all 4 checks pass live (AW-006), D4c
-   additionally mutation-verified on real hardware (see AW-006 entry — `THREADING ERROR`
-   reproduced 3/3 without the lock, RTX 5070 Ti).
-4. Manual Sandbox run: 0 validation, 0 leak (167 resources), **capture hash
-   `9a010fc311dd51b74f755d306d4a819f`** matches the pinned `model` baseline exactly (`CLAUDE.md`'s
-   Audio-1 entry: `9a010fc3…`) — confirms this spec's changes are invisible to the rendered pixel
-   output, as expected for a pure thread-safety hardening pass.
+### BW-014 — Requirements Validation — ✅ DONE
+**Deps**: BW-013. **Wave**: 4.
+Walked the spec's own 9-item Verification list:
 
-AW-002's "no standalone test" note confirmed intentional — the guard/D8 behavior IS exercised, by
-AW-006, not skipped.
+1. **✅ DONE** — single-scene startup byte-identical: `model` capture hash
+   `9a010fc311dd51b74f755d306d4a819f`, exact match with the pinned baseline, re-confirmed after
+   every wave including the final self-review fix. `grid`/`drop`/`metalrough`/`drive`/
+   `planet-challenge` also spot-checked live: 0 error, 0 leak each.
+2. **✅ DONE, human-verified live** — 8 consecutive `model`↔`grid` switches, 0 leak (876 resources),
+   0 validation message, clean shutdown. The hand-off's `WaitIdle` and the loader thread's upload
+   ran under real contention every one of those 8 switches (this IS the thread-safety spec's first
+   real exercise in a real feature, not a synthetic probe).
+3. **Not explicitly run** (`AGAPANTHE_CULL_VERIFY` combined with the demo switch) — the 8 live
+   switches were structurally-static scenes (`model` 1 entity, `grid` 100 entities, matching
+   structural versions each rebuild) and rendered correctly with no visible corruption, which is
+   the behavior `ResetSceneState` exists to guarantee, but the specific GPU==CPU log assertion
+   was not separately captured. Residual manual-verification debt, not a code gap — recorded below.
+4. **Not distinctly exercised** — the 8 switches completed sequentially (each faster than a human
+   double-tap within one ~300 ms load), so the D9.2 cancel-and-queue path was reviewed at the code
+   level (BW-013's reorder fix) but not proven live under that exact race. Residual debt.
+5. **✅ DONE, human-verified live** — generated a real snapshot (`AGAPANTHE_SAVE`), relaunched with
+   `AGAPANTHE_SCENE=model AGAPANTHE_LOAD=<path>`: log shows `[scene 'model'] 0 entities from cooked
+   data` (spawn suppressed) → `[Contenu-3a] world restored from '<path>' — 1 entities` — restore
+   applied exactly once, at startup. Then 9 more `model`↔`grid` switches followed, live — the
+   restore log line **never reappeared**, confirming `WithoutStartupOnlyPaths()` (D12) actually
+   prevents a switch from re-triggering `AGAPANTHE_LOAD`, not just in theory.
+6. **Attempted live** (`F3` toggled, switches performed) — no crash, no visible artifact, consistent
+   with the mechanism, but overlay continuity is a visual property with no log signal either way —
+   not independently confirmable from the log evidence alone. Code-reviewed (BW-013): `debugOverlay`
+   is never reconstructed, `sharedFrameStats` is the same instance across every
+   `SimulationHost.CreateDefault` call. Residual: a screenshot-based check would close this fully.
+7. **✅ DONE, human-verified live, and it caught the real path** — the final switch of the same live
+   session: `[scene switch] requested 'model'` → `[scene switch] loading 'model'` → **window closed
+   before that load's completion log ever printed** (no `[scene 'model'] N entities`/`now on
+   'model'` line followed) — straight into the shutdown sequence:
+   `ResourceTracker: no leaks (1866 resources created and destroyed)`, `AppHost: clean shutdown, no
+   GPU resource leaks`. This is `BW-012`'s `DisposeInFlightLoader` teardown step exercising its real
+   cancel/Join/dispose body against an actually-still-running loader thread, not the no-op path —
+   the strongest possible evidence for D9.6, found by accident (the user's close happened to land
+   mid-load) rather than by careful timing.
+8. **Not reproduced this session** — no `PrefetchBackground` failure was triggered live (e.g. an
+   unresolvable scene token via the demo key). The code path (`loaderFailure is not null` branch,
+   D9.4) is identical to the D9.2 cancellation path already reviewed in BW-013, and mirrors the
+   existing, already-proven "keep running on error" shape used elsewhere in this codebase.
+9. **Not reproduced this session** — no `Build` failure after teardown was triggered. Stated as
+   fatal by design (D9.5); the code simply does not catch it locally, letting it propagate to
+   `RunClient`'s existing top-level catch — the same path already proven for a startup `Build`
+   failure (item 1's family of scenarios), not a new code path introduced by this spec.
 
-### AW-009 — Full Project Verification (tail, mandatory) — ✅ DONE
+**Honest summary (updated after a second live session)**: items **1, 2, 5, 7 are fully verified**
+(automated + live human verification, item 7 exercising the real cancel/Join path, not a no-op).
+Item 6 was attempted live with no negative signal but no independent confirmation either (a visual
+property, no log evidence). Items 3, 4, 8, 9 remain code-reviewed-but-not-live-proven — none
+introduce a mechanism beyond what 1/2/5/7 already exercise (3 needs a code addition outside this
+spec's scope to observe live; 4/8/9 need either finer timing than a human can reliably hit or a
+deliberate fault injection not attempted this session). None of these are known bugs.
+
+### BW-015 — Full Project Verification — ✅ DONE
 
 - `dotnet build` (full solution): 0 warnings, 0 errors.
-- `dotnet test` (full solution): **1015/1015 green**.
-- Manual Sandbox run (`MetalRoughSpheres.glb`, `AGAPANTHE_MAX_FRAMES=1`): 0 validation messages,
-  `ResourceTracker: no leaks`, `AppHost: clean shutdown, no GPU resource leaks`, capture
-  byte-identical to the pinned baseline (see AW-008 item 4).
-- `AGAPANTHE_THREAD_SAFETY_TEST=3000` run **3× consecutively**: all 4 checks PASS every time, 0
-  leak every time (3032 resources each run).
+- `dotnet test` (full solution): **1015/1015 green**, same count as before this spec — every new
+  behavior is exercised by live/manual verification (BW-014) rather than new automated tests, since
+  the spec's own nature (a real window, real threads, real GPU contention) isn't unit-testable the
+  way the prerequisite `GraphicsDevice` thread-safety spec's lock logic was. One existing test
+  updated for the new teardown step (`BuildTeardown_LabelsAreInStrictM4Order`).
+- Manual Sandbox run, `model` scene, single frame: 0 validation, `ResourceTracker: no leaks (167
+  resources)`, capture `9a010fc311dd51b74f755d306d4a819f` — **exact match** with the pinned
+  baseline recorded in `CLAUDE.md`.
+- 5 more scenes spot-checked live (`grid`, `drop`, `metalrough`, `drive`, `planet-challenge` — the
+  last two exercise `DriveControl`/`LandingChallenge` scene systems through the new
+  `PrefetchBackground`/`Build` split): all load and shut down cleanly, 0 error, 0 leak.
+- Live interactive switch demo: 8 consecutive `model`↔`grid` switches, 0 leak (876 resources), 0
+  validation, clean shutdown (full detail above, under "Live switch demo").
+- **Not run**: the remaining 3 Sandbox scenes (`planet`, `planet-drop`, `topdown`) and `HeadlessSim`/
+  `DedicatedServer`/`ThinClient` binaries were not individually re-verified this session — none of
+  them are touched by this spec's mechanism (they don't go through `ISceneRecipe.Build`'s new
+  parameter in any way that changes their behavior; `HeadlessSim`/`DedicatedServer` never call
+  `ISceneRecipe` at all), and the full test suite passing is the actual gate for them. Flagged as a
+  narrower verification surface than the prerequisite spec's own BW-015-equivalent, by nature of
+  this spec being interactive/live rather than automatable end-to-end.
 
-**No regressions, no deferred fixes, no known gaps left in this spec's own scope.** The three items
-in the spec's own "Deferred" section (background-loader lifecycle/abstraction, arbitrary N-thread
-access, a second-pass audit of remaining touchpoints) remain explicitly out of scope, as designed —
-the first is `scene-management`'s own job now that this prerequisite is built.
+## Deferred Work (per spec's own "Deferred" section — out of scope for this board)
 
-## Deferred Work (out of scope, per spec's own "Deferred" section)
-
-- Background-loader lifecycle/abstraction (thread creation, completion signaling, result hand-off)
-  — the scene-management spec's own job (`docs/plans/2026-09-27-scene-management-sequential-switching-design.md`).
-- Arbitrary N-thread concurrent access (no driver exists today).
-- A full second-pass audit of every remaining `GraphicsQueue`/`GpuAllocator` touchpoint beyond
-  `SubmitImmediate`/`GpuUploader`/`GpuReadback` (spec's own recommendation, flagged as a distinct
-  future task, not silently absorbed here).
-- A thread-affinity guard on `ResourceRegistry` itself (D9's noted future need, explicitly out of
-  scope for this spec).
+Simultaneous scene coexistence. Server-side scene/map switching. Sub-model cancellation granularity
+finer than "once per model." A generic loading-screen UI. Recovering from a `Build` failure after
+teardown (fatal by design).

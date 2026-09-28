@@ -1,4 +1,6 @@
 using System.Linq;
+using Agapanthe.Assets;
+using Agapanthe.Assets.Model;
 using Agapanthe.Assets.Scene;
 using Agapanthe.Core;
 using Agapanthe.Engine;
@@ -22,7 +24,34 @@ public sealed class SceneRecipe : ISceneRecipe
 
     public string Name { get; }
 
-    public void Build(SimSceneContext sim, PresentationSceneContext? presentation)
+    /// <summary>
+    /// Scene management spec, D7/"Reused prefetch": decodes every model this scene references (GPU-free) and, if
+    /// <paramref name="background"/> is not null, uploads each into its fresh, isolated registry — safe to run on
+    /// the sanctioned loader thread. Returns the decoded dictionary so <see cref="Build"/> never re-decodes a
+    /// model that was already inflated here (a 21 MB Deflate-compressed model, inflated twice, would defeat the
+    /// whole point of backgrounding it).
+    /// </summary>
+    public object? PrefetchBackground(AssetCatalog catalog, BackgroundPresentationContext? background)
+    {
+        ArgumentNullException.ThrowIfNull(catalog);
+
+        var def = catalog.LoadScene(new AssetKey($"scenes/{Name}"));
+        var models = new Dictionary<AssetKey, ModelAsset>();
+        foreach (var key in Agapanthe.Scene.SceneMaterializer.CollectModelKeys(def))
+        {
+            background?.CancellationToken.ThrowIfCancellationRequested();
+            var model = catalog.LoadModel(key);
+            models[key] = model;
+            if (background is not null)
+            {
+                background.Registry.Load(background.Device, model, background.MaterialSetLayout, key);
+            }
+        }
+
+        return models;
+    }
+
+    public void Build(object? prefetched, SimSceneContext sim, PresentationSceneContext? presentation)
     {
         var def = sim.Catalog.LoadScene(new AssetKey($"scenes/{Name}"));
 
@@ -50,8 +79,16 @@ public sealed class SceneRecipe : ISceneRecipe
                 + "spawn is suppressed until the restore is applied. Do not combine AGAPANTHE_LOAD with this scene.");
         }
 
-        var result = Agapanthe.Scene.SceneLoader.LoadHeadless(
-            def, sim.Catalog, sim.World, sim.Simulation.Settings.FixedDeltaSeconds, spawnEntities);
+        // Scene management spec (round-3 correction): when PrefetchBackground already decoded/uploaded this
+        // scene's models, materialize directly against that dictionary — bypassing SceneLoader.LoadHeadless
+        // (which only wraps the AssetCatalog overload) avoids decoding every model a second time on the main
+        // thread. No prefetch (e.g. HeadlessSim/DedicatedServer never call PrefetchBackground) falls back to the
+        // catalog path, unchanged.
+        var result = prefetched is Dictionary<AssetKey, ModelAsset> models
+            ? Agapanthe.Scene.SceneMaterializer.Materialize(
+                def, key => models[key], sim.World, sim.Simulation.Settings.FixedDeltaSeconds, spawnEntities)
+            : Agapanthe.Scene.SceneLoader.LoadHeadless(
+                def, sim.Catalog, sim.World, sim.Simulation.Settings.FixedDeltaSeconds, spawnEntities);
 
         if (result.Physics is { } ps)
         {
