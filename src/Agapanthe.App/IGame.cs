@@ -41,4 +41,14 @@ public interface IGame
     /// existing game (Sandbox, TopDown, ThinClient) keeps that behavior unchanged by not overriding this.
     /// </summary>
     string? FontPath => null;
+
+    /// <summary>
+    /// ImGui debug-overlay spec, D3: builds this game's debug tooling for one presentation lifetime (first load, or
+    /// a scene-switch hand-off) and returns whatever must be disposed when that lifetime ends — <see cref="AppHost"/>
+    /// invokes this at both <c>PresentationSceneContext</c> construction sites and owns disposing the previous
+    /// result before invoking again. Defaults to <c>null</c> (no debug tooling) — <see cref="AppHost"/> never
+    /// references <c>Agapanthe.DebugUi</c> itself; only a game that opts in (and references that package itself,
+    /// excluded from its own <c>Master</c> configuration) ever sees this called meaningfully.
+    /// </summary>
+    Func<SimSceneContext, PresentationSceneContext, IDisposable?>? ConfigureDebugTools => null;
 }

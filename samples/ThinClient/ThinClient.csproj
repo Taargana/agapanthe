@@ -121,7 +121,7 @@
 
   <!-- Same shaderc-strip as Sandbox.csproj/TopDown.csproj. -->
   <Target Name="StripShadercFromRelease"
-          Condition="'$(Configuration)' == 'Release'"
+          Condition="'$(Configuration)' != 'Debug'"
           AfterTargets="CopyFilesToOutputDirectory;Publish">
     <ItemGroup>
       <_ShadercNativeToStrip Include="$(OutDir)shaderc_shared.dll;$(OutDir)libshaderc_shared.so*;$(OutDir)libshaderc_shared.dylib" />

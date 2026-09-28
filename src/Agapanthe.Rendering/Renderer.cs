@@ -217,6 +217,11 @@ public sealed class Renderer : IDisposable
     /// </summary>
     public bool SupportsGpuTimestamps { get; }
 
+    /// <summary>The swapchain's color attachment format — a consumer building its own pipeline against the
+    /// swapchain (ImGui debug overlay, D4) needs this the same way <c>UiPass</c>/<c>TonemapPass</c> receive it
+    /// internally at construction; nothing stored it for external use before this.</summary>
+    public PixelFormat SwapchainColorFormat { get; }
+
     /// <summary>Per-region GPU time for the frame whose timestamps most recently became available (UI-3)
     /// — typically ~2 frames behind the current frame (<see cref="GraphicsDevice.FramesInFlight"/>). A
     /// field is <see langword="null"/> when its region did not run that cycle (e.g. <c>UI</c> with
@@ -347,6 +352,7 @@ public sealed class Renderer : IDisposable
 
         _device = device;
         SupportsGpuTimestamps = device.SupportsGpuTimestamps && gpuTimestampsRequested;
+        SwapchainColorFormat = swapchain.ColorFormat;
         _sceneTransforms = new InstanceBufferRing(device);
         _shadowTransforms = new InstanceBufferRing(device);
         _sceneArgs = new IndirectArgsRing(device);

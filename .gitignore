@@ -23,3 +23,7 @@ skills-lock.json
 # stray test snapshots
 *.save
 !tests/**/*.save
+
+# ImGui persistence explicitly disabled (io.IniFilename = null) — a stray one should never appear, but ignore
+# it defensively rather than let an older binary's leftover file get committed.
+imgui.ini

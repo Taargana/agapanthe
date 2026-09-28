@@ -51,8 +51,31 @@ public interface IWindow : IDisposable
     /// <summary>True while the cursor is captured for FPS-style look (hidden + locked).</summary>
     bool MouseCaptured { get; }
 
+    /// <summary>Absolute cursor position, framebuffer pixels. Valid regardless of capture state (unlike
+    /// <see cref="MouseDelta"/>, which is capture-relative and zero otherwise).</summary>
+    Vector2 MousePosition { get; }
+
+    /// <summary>Scroll wheel motion accumulated this frame. Reset to zero right after <see cref="Rendered"/> fires
+    /// (not <see cref="Updated"/> — a debug-overlay render pass consumes it during <c>Render</c>, which runs after
+    /// <c>Updated</c>'s own reset of <see cref="MouseDelta"/>).</summary>
+    Vector2 ScrollDelta { get; }
+
+    /// <summary>Fires once per Unicode codepoint typed — for a future text-entry widget (ImGui debug overlay).</summary>
+    event Action<char>? CharInput;
+
     /// <summary>Convenience keyboard poll; false when no keyboard is present.</summary>
     bool IsKeyDown(Key key);
+
+    /// <summary>Convenience mouse-button poll; false when no mouse is present.</summary>
+    bool IsMouseButtonDown(MouseButton button);
+
+    /// <summary>
+    /// When <c>true</c> (the default), a click anywhere on the window captures the mouse for FPS-style look.
+    /// A debug overlay sets this to <c>false</c> while it wants mouse input for itself (<c>ImGuiIO.
+    /// WantCaptureMouse</c>), and restores <c>true</c> on hide/dispose — promoted from
+    /// <c>EngineWindow</c>-only (ImGui debug-overlay spec, D5/D6) now that a second consumer exists.
+    /// </summary>
+    bool CaptureMouseOnClick { get; set; }
 
     /// <summary>Captures or releases the cursor for FPS-style look.</summary>
     void SetMouseCaptured(bool captured);

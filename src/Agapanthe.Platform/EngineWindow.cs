@@ -31,6 +31,7 @@ public sealed class EngineWindow : IDisposable
     private bool _mouseCaptured;
     private bool _recenterCapture;
     private bool _disposed;
+    private Vector2 _scrollDelta;
 
     static EngineWindow()
     {
@@ -62,7 +63,13 @@ public sealed class EngineWindow : IDisposable
             _mouseDelta = Vector2.Zero;
             RecenterCursor();
         };
-        _window.Render += dt => Rendered?.Invoke(dt);
+        _window.Render += dt =>
+        {
+            Rendered?.Invoke(dt);
+            // ImGui debug-overlay spec (D5): reset AFTER Rendered, not Updated — a debug-overlay render pass
+            // consumes ScrollDelta from inside Render, which runs after Updated's own reset of _mouseDelta.
+            _scrollDelta = Vector2.Zero;
+        };
         _window.FramebufferResize += size => FramebufferResized?.Invoke(size.X, size.Y);
         _window.FocusChanged += OnFocusChanged;
         _window.Closing += () => Closing?.Invoke();
@@ -82,6 +89,9 @@ public sealed class EngineWindow : IDisposable
 
     /// <summary>Edge-triggered key press (fires once per physical press, unlike <see cref="IsKeyDown"/> polling).</summary>
     public event Action<Key>? KeyPressed;
+
+    /// <summary>Fires once per Unicode codepoint typed — for a future text-entry widget (ImGui debug overlay).</summary>
+    public event Action<char>? CharInput;
 
     /// <summary>
     /// The window's title-bar text. Settable at runtime — GLFW updates the OS title bar immediately, so an
@@ -134,6 +144,29 @@ public sealed class EngineWindow : IDisposable
     /// <summary>True while the cursor is captured for FPS-style look (hidden + locked).</summary>
     public bool MouseCaptured => _mouseCaptured;
 
+    /// <summary>Absolute cursor position, framebuffer pixels — scaled from Silk.NET's window-coordinate
+    /// <c>IMouse.Position</c> (differs from framebuffer size on HiDPI displays). Valid regardless of capture.</summary>
+    public Vector2 MousePosition
+    {
+        get
+        {
+            if (_mouse is null)
+            {
+                return Vector2.Zero;
+            }
+
+            var windowSize = _window.Size;
+            var framebufferSize = _window.FramebufferSize;
+            var scaleX = windowSize.X > 0 ? framebufferSize.X / (float)windowSize.X : 1f;
+            var scaleY = windowSize.Y > 0 ? framebufferSize.Y / (float)windowSize.Y : 1f;
+            return new Vector2(_mouse.Position.X * scaleX, _mouse.Position.Y * scaleY);
+        }
+    }
+
+    /// <summary>Scroll wheel motion accumulated this frame. Reset to zero right after <see cref="Rendered"/>
+    /// fires (see the ctor's <c>_window.Render</c> handler).</summary>
+    public Vector2 ScrollDelta => _scrollDelta;
+
     /// <summary>
     /// When true (default), clicking inside the window captures the cursor. Release stays
     /// explicit (<see cref="SetMouseCaptured"/>) or automatic on focus loss.
@@ -142,6 +175,9 @@ public sealed class EngineWindow : IDisposable
 
     /// <summary>Convenience keyboard poll; false when no keyboard is present.</summary>
     public bool IsKeyDown(Key key) => _keyboard?.IsKeyPressed(key) ?? false;
+
+    /// <summary>Convenience mouse-button poll; false when no mouse is present.</summary>
+    public bool IsMouseButtonDown(MouseButton button) => _mouse?.IsButtonPressed(button) ?? false;
 
     /// <summary>
     /// Captures or releases the cursor. Capture prefers <see cref="CursorMode.Raw"/>
@@ -230,12 +266,14 @@ public sealed class EngineWindow : IDisposable
         if (_keyboard is not null)
         {
             _keyboard.KeyDown += OnKeyDown;
+            _keyboard.KeyChar += OnKeyChar;
         }
 
         if (_mouse is not null)
         {
             _mouse.MouseMove += OnMouseMove;
             _mouse.MouseDown += OnMouseDown;
+            _mouse.Scroll += OnMouseScroll;
         }
 
         // No capture here: grabbing the cursor before the window has focus is unreliable
@@ -244,6 +282,10 @@ public sealed class EngineWindow : IDisposable
     }
 
     private void OnKeyDown(IKeyboard keyboard, Key key, int scancode) => KeyPressed?.Invoke(key);
+
+    private void OnKeyChar(IKeyboard keyboard, char c) => CharInput?.Invoke(c);
+
+    private void OnMouseScroll(IMouse mouse, ScrollWheel wheel) => _scrollDelta += new Vector2(wheel.X, wheel.Y);
 
     private void OnMouseDown(IMouse mouse, MouseButton button)
     {
@@ -322,12 +364,14 @@ public sealed class EngineWindow : IDisposable
         if (_keyboard is not null)
         {
             _keyboard.KeyDown -= OnKeyDown;
+            _keyboard.KeyChar -= OnKeyChar;
         }
 
         if (_mouse is not null)
         {
             _mouse.MouseMove -= OnMouseMove;
             _mouse.MouseDown -= OnMouseDown;
+            _mouse.Scroll -= OnMouseScroll;
         }
 
         // Native GLFW teardown. This is where a rare, non-reproducible Silk.NET access violation can occur

@@ -17,6 +17,9 @@
     <ProjectReference Include="..\..\src\Agapanthe.Graphics\Agapanthe.Graphics.csproj" />
     <ProjectReference Include="..\..\src\Agapanthe.Assets\Agapanthe.Assets.csproj" />
     <ProjectReference Include="..\..\src\Agapanthe.Core\Agapanthe.Core.csproj" />
+    <!-- ImGui debug-overlay spec, D3/D9: excluded from Master so no DebugUi.dll (even an empty shell) reaches
+         the build that ships to players. -->
+    <ProjectReference Include="..\..\src\Agapanthe.DebugUi\Agapanthe.DebugUi.csproj" Condition="'$(Configuration)' != 'Master'" />
   </ItemGroup>
 
   <PropertyGroup>
@@ -123,7 +126,7 @@
 
   <!-- Same shaderc-strip as Sandbox.csproj — see that file's comment for the full rationale. -->
   <Target Name="StripShadercFromRelease"
-          Condition="'$(Configuration)' == 'Release'"
+          Condition="'$(Configuration)' != 'Debug'"
           AfterTargets="CopyFilesToOutputDirectory;Publish">
     <ItemGroup>
       <_ShadercNativeToStrip Include="$(OutDir)shaderc_shared.dll;$(OutDir)libshaderc_shared.so*;$(OutDir)libshaderc_shared.dylib" />

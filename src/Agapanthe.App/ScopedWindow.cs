@@ -22,6 +22,7 @@ public sealed class ScopedWindow : IWindow
     private readonly Dictionary<Delegate, Delegate> _renderedTrampolines = new();
     private readonly Dictionary<Delegate, Delegate> _framebufferResizedTrampolines = new();
     private readonly Dictionary<Delegate, Delegate> _keyPressedTrampolines = new();
+    private readonly Dictionary<Delegate, Delegate> _charInputTrampolines = new();
     private readonly List<Action> _cleanups = new();
     private bool _disposed;
 
@@ -171,6 +172,34 @@ public sealed class ScopedWindow : IWindow
         }
     }
 
+    public event Action<char>? CharInput
+    {
+        add
+        {
+            if (value is null)
+            {
+                return;
+            }
+
+            Action<char> trampoline = c =>
+            {
+                if (!_disposed)
+                {
+                    value(c);
+                }
+            };
+            _charInputTrampolines[value] = trampoline;
+            _inner.CharInput += trampoline;
+        }
+        remove
+        {
+            if (value is not null && _charInputTrampolines.Remove(value, out var trampoline))
+            {
+                _inner.CharInput -= (Action<char>)trampoline;
+            }
+        }
+    }
+
     public string Title
     {
         get => _inner.Title;
@@ -185,7 +214,19 @@ public sealed class ScopedWindow : IWindow
 
     public bool MouseCaptured => _inner.MouseCaptured;
 
+    public Vector2 MousePosition => _inner.MousePosition;
+
+    public Vector2 ScrollDelta => _inner.ScrollDelta;
+
+    public bool CaptureMouseOnClick
+    {
+        get => _inner.CaptureMouseOnClick;
+        set => _inner.CaptureMouseOnClick = value;
+    }
+
     public bool IsKeyDown(Key key) => _inner.IsKeyDown(key);
+
+    public bool IsMouseButtonDown(MouseButton button) => _inner.IsMouseButtonDown(button);
 
     public void SetMouseCaptured(bool captured) => _inner.SetMouseCaptured(captured);
 
@@ -265,6 +306,13 @@ public sealed class ScopedWindow : IWindow
         }
 
         _keyPressedTrampolines.Clear();
+
+        foreach (var trampoline in _charInputTrampolines.Values)
+        {
+            _inner.CharInput -= (Action<char>)trampoline;
+        }
+
+        _charInputTrampolines.Clear();
 
         foreach (var cleanup in _cleanups)
         {

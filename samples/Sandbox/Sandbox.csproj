@@ -11,6 +11,9 @@
     <ProjectReference Include="..\..\src\Agapanthe.Graphics\Agapanthe.Graphics.csproj" />
     <ProjectReference Include="..\..\src\Agapanthe.Assets\Agapanthe.Assets.csproj" />
     <ProjectReference Include="..\..\src\Agapanthe.Core\Agapanthe.Core.csproj" />
+    <!-- ImGui debug-overlay spec, D3/D9: excluded from Master so no DebugUi.dll (even an empty shell) reaches
+         the build that ships to players. -->
+    <ProjectReference Include="..\..\src\Agapanthe.DebugUi\Agapanthe.DebugUi.csproj" Condition="'$(Configuration)' != 'Master'" />
   </ItemGroup>
 
   <PropertyGroup>
@@ -177,7 +180,7 @@
        aim of this milestone. Debug keeps it: hot reload compiles GLSL at runtime. Delete ignores absent files,
        so this is harmless when no RID/native copy is present. -->
   <Target Name="StripShadercFromRelease"
-          Condition="'$(Configuration)' == 'Release'"
+          Condition="'$(Configuration)' != 'Debug'"
           AfterTargets="CopyFilesToOutputDirectory;Publish">
     <!-- Cover all three platform library names (Windows .dll / Linux .so / macOS .dylib, incl. versioned .so.*)
          at the output root and under runtimes/, so the exit criterion "native shaderc absent from publish" holds

@@ -6,8 +6,7 @@
        It exists so that Agapanthe.Engine — the simulation — can reference neither Rendering nor Graphics, which is
        what makes a dedicated server buildable without Vulkan (backlog §4quater: "topology is a deployment choice,
        never an architecture choice"). Everything GPU-bound that used to live in Engine lives here instead; the
-       split follows DEPENDENCIES, not the ISystem/IRenderSystem line (DebugOverlaySystem is an ISystem and belongs
-       here; UiRenderSystem is both). -->
+       split follows DEPENDENCIES, not the ISystem/IRenderSystem line (UiRenderSystem is both). -->
   <PropertyGroup>
     <TargetFramework>net10.0</TargetFramework>
     <ImplicitUsings>enable</ImplicitUsings>

@@ -1,4 +1,9 @@
 <Solution>
+  <Configurations>
+    <BuildType Name="Debug" />
+    <BuildType Name="Release" />
+    <BuildType Name="Master" />
+  </Configurations>
   <Folder Name="/samples/">
     <Project Path="samples/DedicatedServer/DedicatedServer.csproj" />
     <Project Path="samples/HeadlessSim/HeadlessSim.csproj" />

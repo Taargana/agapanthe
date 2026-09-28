@@ -10,6 +10,21 @@
          D5): explicit per-project opt-in only — mirrors this repo's allowlist culture
          (EngineIsHeadlessTests). A project must set IsPackable=true itself to ever be packed. -->
     <IsPackable>false</IsPackable>
+    <!-- ImGui debug overlay spec (docs/plans/2026-09-28-imgui-debug-overlay-design.md, D9): a 3rd
+         named configuration, the build that actually ships to players. The SDK gives Debug/Release
+         implicit defaults (Optimize, DefineConstants=TRACE); a custom name gets none, so both are
+         set explicitly below. -->
+    <Configurations>Debug;Release;Master</Configurations>
+  </PropertyGroup>
+
+  <!-- Master = Release codegen (Optimize=true) + TRACE (the SDK only adds TRACE for the literal
+       "Release" name, not a custom configuration) + the MASTER define, which Agapanthe.DebugUi (and
+       any future dev-only tooling) uses to exclude itself from the one build that reaches players.
+       An ordinary Release build (QA/staging/profiling) does NOT define MASTER and keeps ImGui. -->
+  <PropertyGroup Condition="'$(Configuration)'=='Master'">
+    <DefineConstants>$(DefineConstants);TRACE;MASTER</DefineConstants>
+    <Optimize>true</Optimize>
+    <DebugType>portable</DebugType>
   </PropertyGroup>
 
   <ItemGroup>

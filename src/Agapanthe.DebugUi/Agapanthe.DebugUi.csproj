@@ -1,0 +1,94 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- ImGui debug overlay spec (docs/plans/2026-09-28-imgui-debug-overlay-design.md): a dedicated project
+       isolating the one 3rd-party dependency this milestone adds (Hexa.NET.ImGui), same posture as
+       Agapanthe.Net/Agapanthe.Audio. NEVER referenced by Agapanthe.App/Agapanthe.Platform.App (that's the
+       whole point, D3/D9 — a consumer opts in directly, in-repo via ProjectReference or externally via
+       PackageReference, both conditional on Configuration != 'Master'). Packable (D3 round 4) so an
+       external consumer like Club Architect can reference it too. -->
+  <ItemGroup>
+    <ProjectReference Include="..\Agapanthe.Core\Agapanthe.Core.csproj" />
+    <ProjectReference Include="..\Agapanthe.Graphics\Agapanthe.Graphics.csproj" />
+    <ProjectReference Include="..\Agapanthe.Engine\Agapanthe.Engine.csproj" />
+    <ProjectReference Include="..\Agapanthe.Engine.Render\Agapanthe.Engine.Render.csproj" />
+    <ProjectReference Include="..\Agapanthe.Rendering\Agapanthe.Rendering.csproj" />
+    <!-- D3 round 2 (🟠2): IWindow (MousePosition/CharInput/CaptureMouseOnClick) lives in App. Acyclic —
+         App never references DebugUi. -->
+    <ProjectReference Include="..\Agapanthe.App\Agapanthe.App.csproj" />
+  </ItemGroup>
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <!-- Club Architect packaging (D5 pattern): opt-in override of Directory.Build.props' default. -->
+    <IsPackable>true</IsPackable>
+    <Description>Agapanthe engine — native ImGui debug overlay (Debug/Release only, excluded from Master).</Description>
+    <!-- No IsAotCompatible: neither Hexa.NET.ImGui nor ImGui.NET documents NativeAOT/trimming support
+         explicitly (D2) — patron FontCooker/Agapanthe.Assets.Pipeline, which also omit it. -->
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- Excluded from Master (D9) — the ONLY build that ships to players. No PublishAot clause: it would be
+         inert for a packaged consumer (the condition is evaluated once at THIS project's own pack time, per
+         D3/D9 round 4/5) and, worse, would strip Hexa while `#if !MASTER` code stayed compiled under an
+         explicit -p:PublishAot=true, breaking the build. -->
+    <PackageReference Include="Hexa.NET.ImGui" Version="2.2.9" Condition="'$(Configuration)' != 'Master'" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="Agapanthe.Tests" />
+  </ItemGroup>
+
+  <!-- ============================ Shader precompile (D4, round 5) ============================
+       imgui.vert/imgui.frag are precompiled to SPIR-V at THIS project's build time (via the same
+       tools/ShaderPrecompiler the engine's own shaders/ uses) and embedded as raw .spv bytes — no shader
+       compiler at runtime, in any configuration. The precompiler names its cache output by content hash
+       (for the engine's own runtime cache-lookup use); here there is no runtime lookup, so the two hash-named
+       outputs are copied to fixed names before becoming EmbeddedResource. -->
+  <PropertyGroup>
+    <ImGuiShaderSourceDir>$([MSBuild]::NormalizeDirectory('$(MSBuildThisFileDirectory)Shaders'))</ImGuiShaderSourceDir>
+    <ImGuiShaderPrecompilerProject>$([MSBuild]::NormalizePath('$(MSBuildThisFileDirectory)..\..\tools\ShaderPrecompiler\ShaderPrecompiler.csproj'))</ImGuiShaderPrecompilerProject>
+    <ImGuiShaderHashStageDir>$([MSBuild]::NormalizeDirectory('$(MSBuildProjectDirectory)\obj\imguishadercache'))</ImGuiShaderHashStageDir>
+    <ImGuiShaderFixedStageDir>$([MSBuild]::NormalizeDirectory('$(MSBuildProjectDirectory)\obj\imguishaderfixed'))</ImGuiShaderFixedStageDir>
+    <ImGuiShaderCacheStamp>$(ImGuiShaderFixedStageDir).precooked.stamp</ImGuiShaderCacheStamp>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ImGuiShaderSourceFile Include="$(ImGuiShaderSourceDir)**\*" />
+  </ItemGroup>
+
+  <Target Name="PrecompileImGuiShaders"
+          Inputs="@(ImGuiShaderSourceFile)"
+          Outputs="$(ImGuiShaderCacheStamp)">
+    <MSBuild Projects="$(ImGuiShaderPrecompilerProject)"
+             Targets="Build"
+             Properties="Configuration=$(Configuration)"
+             RemoveProperties="RuntimeIdentifier;SelfContained;PublishAot;PublishTrimmed;PublishSingleFile">
+      <Output TaskParameter="TargetOutputs" ItemName="_ImGuiShaderPrecompilerAssembly" />
+    </MSBuild>
+    <MakeDir Directories="$(ImGuiShaderHashStageDir)" />
+    <Exec Command="dotnet exec &quot;@(_ImGuiShaderPrecompilerAssembly)&quot; &quot;$(ImGuiShaderSourceDir.TrimEnd('\'))&quot; &quot;$(ImGuiShaderHashStageDir.TrimEnd('\'))&quot;" />
+    <MakeDir Directories="$(ImGuiShaderFixedStageDir)" />
+    <ItemGroup>
+      <_ImGuiVertSpv Include="$(ImGuiShaderHashStageDir)Vertex_*.spv" />
+      <_ImGuiFragSpv Include="$(ImGuiShaderHashStageDir)Fragment_*.spv" />
+    </ItemGroup>
+    <Copy SourceFiles="@(_ImGuiVertSpv)" DestinationFiles="$(ImGuiShaderFixedStageDir)imgui.vert.spv" />
+    <Copy SourceFiles="@(_ImGuiFragSpv)" DestinationFiles="$(ImGuiShaderFixedStageDir)imgui.frag.spv" />
+    <Touch Files="$(ImGuiShaderCacheStamp)" AlwaysCreate="true" />
+  </Target>
+
+  <!-- Always runs (after PrecompileImGuiShaders, before compile) so the two fixed-name .spv are embedded even
+       when the pre-cook step above was up to date and skipped. -->
+  <Target Name="IncludeImGuiShaders"
+          DependsOnTargets="PrecompileImGuiShaders"
+          BeforeTargets="BeforeBuild;BeforeCompile;CoreCompile">
+    <ItemGroup>
+      <EmbeddedResource Include="$(ImGuiShaderFixedStageDir)imgui.vert.spv" LogicalName="imgui.vert.spv" />
+      <EmbeddedResource Include="$(ImGuiShaderFixedStageDir)imgui.frag.spv" LogicalName="imgui.frag.spv" />
+    </ItemGroup>
+  </Target>
+
+</Project>

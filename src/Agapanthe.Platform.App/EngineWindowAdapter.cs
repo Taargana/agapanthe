@@ -48,6 +48,12 @@ public sealed class EngineWindowAdapter(EngineWindow inner) : IWindow
         remove => inner.KeyPressed -= value;
     }
 
+    public event Action<char>? CharInput
+    {
+        add => inner.CharInput += value;
+        remove => inner.CharInput -= value;
+    }
+
     public string Title
     {
         get => inner.Title;
@@ -62,7 +68,19 @@ public sealed class EngineWindowAdapter(EngineWindow inner) : IWindow
 
     public bool MouseCaptured => inner.MouseCaptured;
 
+    public Vector2 MousePosition => inner.MousePosition;
+
+    public Vector2 ScrollDelta => inner.ScrollDelta;
+
+    public bool CaptureMouseOnClick
+    {
+        get => inner.CaptureMouseOnClick;
+        set => inner.CaptureMouseOnClick = value;
+    }
+
     public bool IsKeyDown(Key key) => inner.IsKeyDown(key);
+
+    public bool IsMouseButtonDown(MouseButton button) => inner.IsMouseButtonDown(button);
 
     public void SetMouseCaptured(bool captured) => inner.SetMouseCaptured(captured);
 

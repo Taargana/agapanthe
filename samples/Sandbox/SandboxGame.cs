@@ -1,5 +1,9 @@
 using Agapanthe.App;
 using Agapanthe.Platform.App.Systems;
+#if !MASTER
+using Agapanthe.DebugUi;
+using Silk.NET.Input;
+#endif
 
 namespace Sandbox;
 
@@ -36,4 +40,25 @@ internal sealed class SandboxGame : IGame
     // Contenu-3c: the scene-system factory registry.
     public IReadOnlyList<ISceneSystemFactory> SceneSystems { get; } =
         [new ProbeDropSystemFactory(), new LandingChallengeSystemFactory(), new DriveControlSystemFactory()];
+
+#if !MASTER
+    // ImGui debug-overlay spec, D3: excluded from Master (the DebugUi ProjectReference itself is conditional,
+    // != 'Master' — this override simply does not exist in that configuration's compiled output).
+    public Func<SimSceneContext, PresentationSceneContext, IDisposable?>? ConfigureDebugTools =>
+        (sim, presentation) =>
+        {
+            var system = new ImGuiDebugSystem(
+                presentation.Device, presentation.Renderer, presentation.RenderList,
+                sim.Simulation.Stats, presentation.Window, sim.Options.OverlayVisible);
+            presentation.Orchestrator.Add(system);
+            presentation.Window.KeyPressed += key =>
+            {
+                if (key == Key.F3)
+                {
+                    system.Toggle();
+                }
+            };
+            return system;
+        };
+#endif
 }

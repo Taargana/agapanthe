@@ -56,7 +56,11 @@ public static class AppHost
         ResourceRegistry? registry = null;
         FrameRenderer? frameRenderer = null;
         FrameOrchestrator? orchestrator = null;
-        DebugOverlaySystem? debugOverlay = null;
+        // ImGui debug-overlay spec, D3: whatever IGame.ConfigureDebugTools returned for the CURRENT presentation
+        // lifetime — disposed and replaced at every scene switch, and at final teardown (TeardownTargets.
+        // DisposeDebugTools). null for any game that never opts in (the common case: Agapanthe.App never
+        // references Agapanthe.DebugUi itself).
+        IDisposable? debugToolsHandle = null;
         UiRenderSystem? uiSystem = null;
         FontAsset? uiFont = null;
         AudioDevice? audioDevice = null;
@@ -142,12 +146,6 @@ public static class AppHost
                 uiSystem = new UiRenderSystem(renderer);
                 orchestrator.Add(Stage.Input, uiSystem);   // clears last frame's quads before any system draws
                 orchestrator.Add(uiSystem);                 // render stage
-                debugOverlay = new DebugOverlaySystem(
-                    uiSystem.DrawList, uiFont, renderer, renderList, orchestrator.Simulation.Stats)
-                {
-                    Visible = options.OverlayVisible,
-                };
-                orchestrator.Add(Stage.PostSimulation, debugOverlay);
                 Log.Info($"AppHost: [ui] font loaded from '{fontPath}'.");
             }
             else
@@ -208,6 +206,10 @@ public static class AppHost
             recipe.Build(prefetched, sim, presentation);
             currentSceneName = recipe.Name;
             WarnIfDrawablesMissingIdentity(world);
+
+            // ImGui debug-overlay spec, D3: called AFTER Build so a recipe's own IRenderSystems register first —
+            // the render-system order is fixed at the first tick, and the debug panel should draw last/on top.
+            debugToolsHandle = game.ConfigureDebugTools?.Invoke(sim, presentation);
 
             // Contenu-3a: apply a restore the recipe requested (AGAPANTHE_LOAD) — after Build, so every asset the
             // snapshot can reference is registered. The resolver rebuilds the MeshRef render cache from AssetRef.
@@ -295,9 +297,6 @@ public static class AppHost
                         (d.Direction.X * sin) + (d.Direction.Z * cos));
                     renderer.Lights.Directional = d;
                     Log.Info($"Key light direction: {d.Direction}");
-                    break;
-                case Key.F3 when debugOverlay is not null:
-                    debugOverlay.Toggle();
                     break;
                 case Key.F:
                     // Physics queries demo (D6): crosshair raycast, not a literal cursor-position pick — once the
@@ -611,6 +610,12 @@ public static class AppHost
             {
                 frameRenderer!.WaitIdle();
 
+                // ImGui debug-overlay spec, D3: dispose the outgoing presentation lifetime's debug tools right
+                // after WaitIdle (same position as every other GPU-owning teardown here), before anything else
+                // is torn down — and null out immediately so a throw later in this method can never double-dispose.
+                debugToolsHandle?.Dispose();
+                debugToolsHandle = null;
+
                 scopedWindow?.Dispose();
                 orchestrator!.Simulation.Dispose();
                 registry?.Dispose();
@@ -627,11 +632,6 @@ public static class AppHost
                 {
                     orchestrator.Add(Stage.Input, uiSystem);
                     orchestrator.Add(uiSystem);
-                }
-
-                if (debugOverlay is not null)
-                {
-                    orchestrator.Add(Stage.PostSimulation, debugOverlay);
                 }
 
                 // Module-boundary correction (BlackEnvironment lives in Agapanthe.App, Renderer must not
@@ -675,6 +675,9 @@ public static class AppHost
                 recipeToBuild.Build(prefetchedForBuild, sim, presentation);
                 currentSceneName = recipeToBuild.Name;
                 WarnIfDrawablesMissingIdentity(world);
+
+                // ImGui debug-overlay spec, D3: same "after Build" placement as the first-load site above.
+                debugToolsHandle = game.ConfigureDebugTools?.Invoke(sim, presentation);
                 Log.Info($"AppHost: [scene switch] now on '{recipeToBuild.Name}'.");
             }
         };
@@ -714,6 +717,14 @@ public static class AppHost
                 // Scene management spec, D9.6: the window closed while a background load was in flight. Blocking
                 // here is acceptable — this is shutdown, not a frame-budget-sensitive path. Must run before
                 // device.Dispose(): the thread-safety spec's Dispose() throws if a loader is still sanctioned.
+                // ImGui debug-overlay spec, D3: final teardown — the scene-switch path (PerformHandOff) already
+                // disposes+nulls on every switch, so at process end this disposes whatever is left (the last
+                // scene's, or null if none ever opted in).
+                DisposeDebugTools = () =>
+                {
+                    debugToolsHandle?.Dispose();
+                    debugToolsHandle = null;
+                },
                 DisposeInFlightLoader = () =>
                 {
                     if (loaderThread is null)
@@ -842,10 +853,14 @@ public static class AppHost
         var report = t.Report;
         var disposeAudio = t.DisposeAudio;
         var disposeInFlightLoader = t.DisposeInFlightLoader;
+        var disposeDebugTools = t.DisposeDebugTools;
         return
         [
             ("audioDevice.Dispose+ReportLeaks", disposeAudio ?? (static () => { })),
             ("frameRenderer.WaitIdle", () => fr?.WaitIdle()),
+            // ImGui debug-overlay spec, D3: same position as the scene-switch dispose (right after WaitIdle) —
+            // one single point of truth for when it is safe to tear down the debug panel's GPU resources.
+            ("debugTools.Dispose", disposeDebugTools ?? (static () => { })),
             ("frameRenderer.Dispose", () => fr?.Dispose()),
             // Scene management spec, D9.6: stop any in-flight background load before device.Dispose() below —
             // the thread-safety spec's Dispose() throws if a loader thread is still sanctioned.
@@ -917,4 +932,9 @@ internal readonly record struct TeardownTargets(
     /// never-activated registry — <c>default</c> leaves it a no-op so a test can assert the label order
     /// unaffected.</summary>
     public Action? DisposeInFlightLoader { get; init; }
+
+    /// <summary>ImGui debug-overlay spec, D3: disposes whatever <c>IGame.ConfigureDebugTools</c> returned for the
+    /// current presentation lifetime — <c>default</c> leaves it a no-op so a test can assert the label order
+    /// unaffected.</summary>
+    public Action? DisposeDebugTools { get; init; }
 }

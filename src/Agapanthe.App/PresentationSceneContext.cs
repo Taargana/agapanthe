@@ -54,7 +54,7 @@ public sealed class PresentationSceneContext
     /// <see cref="Agapanthe.Ui.TextLayout.DrawText"/> to draw its own on-screen text — <c>null</c> exactly when no
     /// cooked font was found (mirroring the debug overlay's own existing silent-absence convention). A recipe never
     /// constructs its own <c>UiRenderSystem</c> — this is the one, process-shared instance <see cref="AppHost"/>
-    /// owns, the same list <c>DebugOverlaySystem</c> appends to.
+    /// owns.
     /// </summary>
     public UiDrawList? UiDrawList { get; init; }
 

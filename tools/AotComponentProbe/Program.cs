@@ -115,7 +115,9 @@ try
             + $"measured {extent.Width:F1}×{extent.Height:F1} px, {list.Count} quad(s).");
 
         // UI-2: the profiler's pure types travel the same AOT path. No reflection, no dynamic generics — but the
-        // probe IS the declared AOT gate, so they are exercised rather than assumed.
+        // probe IS the declared AOT gate, so it is exercised rather than assumed. Sparkline (the graph-drawing
+        // helper) was deleted alongside DebugOverlaySystem (ImGui debug-overlay spec, D8 — replaced by ImGui's own
+        // widgets) — assert directly on FrameSeries.CopyChronological's output instead of a quad count.
         var series = new FrameSeries(8);
         for (var i = 0; i < 12; i++)
         {
@@ -124,12 +126,11 @@ try
 
         Span<float> graph = stackalloc float[8];
         var samples = series.CopyChronological(graph);
-        Sparkline.Draw(list, samples, new System.Numerics.Vector4(0f, 0f, 8f, 8f), font.WhiteTexelUv, 0xFFFFFFFFu, 16f);
-        Console.WriteLine($"AotProfilerSmoke: {samples.Length} sample(s), {list.Count} quad(s) after graph.");
+        Console.WriteLine($"AotProfilerSmoke: {samples.Length} sample(s), oldest={samples[0]:F1}, newest={samples[^1]:F1}.");
 
-        if (list.Count == 0 || extent.Width <= 0f)
+        if (list.Count == 0 || extent.Width <= 0f || samples.Length != 8 || samples[0] != 4f || samples[^1] != 11f)
         {
-            Console.Error.WriteLine("AotComponentProbe: FAIL — text layout produced nothing under AOT.");
+            Console.Error.WriteLine("AotComponentProbe: FAIL — text layout or profiler series produced wrong data under AOT.");
             return 1;
         }
     }

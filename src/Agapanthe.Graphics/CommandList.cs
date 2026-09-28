@@ -430,6 +430,20 @@ public readonly unsafe struct CommandList
     }
 
     /// <summary>
+    /// Sets ONLY the scissor rect, leaving the viewport untouched — unlike <see cref="SetViewportScissorRect"/>,
+    /// which re-poses both together. ImGui debug-overlay spec (D4): a clip rect must scissor-only per draw command
+    /// without redefining the NDC→pixel mapping each time, which re-posing the viewport per command would do.
+    /// The caller is responsible for clamping to the framebuffer bounds — a raw ImGui-derived clip rect can be
+    /// negative or exceed the framebuffer (a partially off-screen window), and a negative
+    /// <see cref="Offset2D"/> is invalid to Vulkan.
+    /// </summary>
+    public void SetScissor(int x, int y, uint width, uint height)
+    {
+        var scissor = new Rect2D(new Offset2D(x, y), new Extent2D(width, height));
+        _device.Api.CmdSetScissor(_buffer, 0, 1, &scissor);
+    }
+
+    /// <summary>
     /// Transitions <paramref name="image"/> from one <see cref="ImageLayoutState"/> to another with a
     /// synchronization2 barrier. The (stage, access) pair for each state reproduces exactly the combinations
     /// the frame loop used before this API existed (color attach, depth attach, present) plus shader-read and

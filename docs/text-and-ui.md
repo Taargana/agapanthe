@@ -1,19 +1,20 @@
-# Debug Overlay & Text Rendering
+# Text Rendering & Debug Overlay
 
-Covers the three closed milestones of the "Texte & UI" domain: **UI-1** (SDF text rendering),
-**UI-2** (in-view debug overlay + CPU profiler), **UI-3** (GPU timestamps). Design rationale and
-decision logs live in `docs/plans/2026-08-03-text-ui-design.md` (UI-1/2/3 pre-spec) and
-`docs/plans/2026-09-13-ui3-gpu-timestamps-design.md` (UI-3 detail); this document is the
-reference for *using* and *extending* what shipped.
+Covers the SDF text-rendering stack (`Agapanthe.Ui`) and the engine's built-in **debug overlay**.
+The overlay shipped originally as a custom text/graph panel (**UI-1/UI-2/UI-3**, closed
+milestones — design rationale in `docs/plans/2026-08-03-text-ui-design.md` and
+`docs/plans/2026-09-13-ui3-gpu-timestamps-design.md`), then was **replaced entirely by a native
+ImGui panel** (see `docs/plans/2026-09-28-imgui-debug-overlay-design.md`) — this document
+reflects the current, post-replacement state.
 
-**What this actually is today**: the only real consumer of this text/rendering stack is the
-engine's built-in **debug overlay** (fps, allocation, draw counts, GPU timestamps — §1.1). No
-sample app draws gameplay text (HUD, score, dialogue) with it yet. The underlying API
-(`UiDrawList`, `TextLayout`, `TextBuilder`, `Sparkline`) is generic and public, so any game code
-*can* draw its own text or panels the same way (§1.4) — but nothing does today, and there is no
-interactivity at all (no mouse, no click, no focus, no widgets — blocked behind the input work
-item in backlog §4quater). Treat this as **debug-overlay infrastructure that happens to be
-reusable**, not a game UI system.
+**What this actually is today**: `Agapanthe.Ui` (`UiDrawList`, `TextLayout`, SDF font rendering,
+§2.2-2.3) is generic, public, GPU-free text-rendering infrastructure — any game code can draw its
+own text/panels with it (§1.4), and it remains the only text path available to a **Master**
+build. The **debug overlay itself** (fps, alloc, draw counts, GPU timestamps, §1.1) is a
+*separate* thing since the ImGui milestone: it lives in its own project, `Agapanthe.DebugUi`,
+built on `Hexa.NET.ImGui` rather than on `Agapanthe.Ui` — real interactive widgets (a "Close"
+button today; an entity/scene inspector is the natural next consumer), but **excluded from the
+`Master` build configuration** (the one that ships to players) by construction — see §2.6.
 
 ---
 
@@ -21,33 +22,40 @@ reusable**, not a game UI system.
 
 ### 1.1 The debug overlay
 
-Every `AppHost`-based app (`samples/Sandbox`, `samples/TopDown`) ships a built-in debug overlay,
-drawn top-left, whenever a cooked font is present. Toggle it with **F3** at runtime, or start it
-hidden with `AGAPANTHE_OVERLAY=0`. Recording of the underlying stats happens unconditionally —
-hiding the overlay never stops metrics from accumulating, so pressing F3 mid-session shows a
-history that goes back to process start (up to the ring buffer's ~4 s retention).
+Every `AppHost`-based app that opts in (`samples/Sandbox`, `samples/TopDown`) ships a native
+ImGui debug panel, titled "Agapanthe Debug". Toggle it with **F3** at runtime, or start it hidden
+with `AGAPANTHE_OVERLAY=0`. Recording of the underlying stats happens unconditionally — hiding
+the overlay never stops metrics from accumulating.
+
+Unlike the panel's UI-1/UI-2 predecessor, it is a real ImGui window: draggable, resizable, and
+interactive (a **Close** button hides it, same effect as F3). Clicking or dragging inside the
+panel does not trigger the FPS-look camera capture (`ImGuiIO.WantCaptureMouse` arbitrates —
+see §2.6).
 
 The panel shows, top to bottom:
 
 ```
-854 fps   0.33 ms   peak 3.3
-alloc 0 B/frame   peak 2048 B
+171 fps   2.31 ms   peak 13.5
+alloc 544 B/frame   peak 2640 B
 draws 1+4   candidates 1
-[ frame-time graph ]
-[ allocation graph ]
-gpu  shadow 0.03  scene 0.03  tonemap 0.01  ui 0.00 ms   (only if GPU timestamps are supported)
-[ GPU total graph ]                                       (only if GPU timestamps are supported)
+gpu  shadow 0.03  scene 0.03  tonemap 0.01  ui -- ms   (only if GPU timestamps are supported)
+[Close]
 ```
 
 | Line | Meaning |
 |---|---|
-| `854 fps   0.33 ms   peak 3.3` | Average FPS derived from mean frame time; last frame's CPU-side engine time (see below for what "frame time" excludes); the peak over the retention window. |
-| `alloc 0 B/frame   peak 2048 B` | Managed bytes allocated during the frame's engine work. **This is the project's blocking 0-alloc gate made visible**: green at exactly 0, red the instant a frame allocates. The peak stays visible for the whole ~4 s retention window even after the gate returns to green — a warm-up spike does not mean the gate is currently broken. |
+| `171 fps   2.31 ms   peak 13.5` | Average FPS derived from mean frame time; last frame's CPU-side engine time (see below for what "frame time" excludes); the peak over the retention window. |
+| `alloc 544 B/frame   peak 2640 B` | Managed bytes allocated during the frame's engine work. **This is the project's blocking 0-alloc gate made visible**: green at exactly 0, red (as shown here) the instant a frame allocates. The peak stays visible for the whole retention window even after the gate returns to green — a warm-up spike does not mean the gate is currently broken. |
 | `draws 1+4   candidates 1` | Instanced draw calls issued by the last scene pass + shadow pass; candidate entities considered for culling that frame. |
-| Frame-time graph (blue) | `Sparkline` of frame-time history, floor-scaled to the 60 Hz budget (16.7 ms) so a steady frame rate reads flat rather than auto-scaling into fake spikes. |
-| Allocation graph (green/red) | Same idea for the allocation series, scaled to the current frame (not the window max) — a real regression must not rasterise to an invisible fraction of a pixel next to an old warm-up spike. |
 | `gpu  shadow … scene … tonemap … ui … ms` | Per-pass GPU time for the frame whose timestamps most recently became available (UI-3) — see §1.2. A `--` placeholder means that region did not run this cycle (e.g. `ui` when nothing was queued); it is never confused with a genuine `0.00`. |
-| GPU total graph (purple) | Sum of whichever of the 4 regions were actually available that frame. |
+| `[Close]` | Hides the panel — same effect as pressing F3 again. |
+
+**v1 has no graphs** (no frame-time/allocation/GPU-total sparklines): this Hexa.NET.ImGui
+version's `PlotLines` overloads all require a values-getter delegate (no plain
+`ReadOnlySpan<float>` overload exists) — descoped honestly rather than reimplementing delegate
+marshalling for a visual nice-to-have. The numbers above are the content that mattered for parity
+with the old panel; an entity/scene inspector (the natural next real consumer of ImGui here) is
+tracked in the milestone's Deferred section, not graphs.
 
 **"Frame time" is CPU engine time, not GPU time, and not wall-clock time.** The measurement
 bracket wraps `Tick` + `DrawFrame` (opened in `SimulationHost.BeginFrame`, closed in `EndFrame`)
@@ -103,26 +111,22 @@ AGAPANTHE_SCENE=model AGAPANTHE_CAPTURE_UI=/tmp/overlay.ppm AGAPANTHE_MAX_FRAMES
 
 ### 1.4 Drawing your own text or graphs from game code
 
-The debug overlay is itself the canonical example — `DebugOverlaySystem.cs` is real, in-repo
-code, not a toy sample. The 0-alloc pattern every line follows:
+This is `Agapanthe.Ui`/`TextLayout`/`UiDrawList` — the GPU-free layer, unaffected by the ImGui
+milestone and still the only text path a **Master** build ships with. `Club Architect`'s own
+splash/menu text uses exactly this (`PresentationSceneContext.UiDrawList`/`.Font`, a recipe's own
+`Stage.Render` system) — the debug overlay is no longer the reference consumer of this API.
 
 ```csharp
-Span<char> buffer = stackalloc char[128];
-var line = new TextBuilder(buffer);
-line.Append(Stats.AverageFps, "F0");
-line.Append(" fps   ");
-line.Append(Stats.FrameTimeMs.Last, "F2");
-line.Append(" ms   peak ");
-line.Append(Stats.FrameTimeMs.Max, "F1");
-TextLayout.DrawText(_drawList, line.Written, _font, new Vector2(x, y), TextSize, TextColour);
+TextLayout.DrawText(_drawList, "score: 1200", _font, new Vector2(x, y), TextSize, TextColour);
 ```
 
-`TextBuilder` is a `ref struct` wrapping a caller-owned `Span<char>` — it never allocates,
-`Append` has overloads for spans, `char`, `int`, `long`, and `float` (with a numeric format
-string). `TextLayout.DrawText` appends the resulting quads into a `UiDrawList` your render
-system owns; `Renderer.DrawUi` consumes whatever is in that list once per frame. A solid
-rectangle (a panel background) is `UiDrawList.AddRect(rect, font.WhiteTexelUv, rgba)` — it
-samples the atlas's reserved white texel instead of a glyph.
+`TextLayout.DrawText` appends quads into a `UiDrawList` your render system owns; `Renderer.DrawUi`
+consumes whatever is in that list once per frame. A solid rectangle (a panel background) is
+`UiDrawList.AddRect(rect, font.WhiteTexelUv, rgba)` — it samples the atlas's reserved white texel
+instead of a glyph. For 0-alloc numeric formatting into a string (fps counters, scores), format
+into a caller-owned `Span<char>` with `TryFormat` directly (`TextBuilder`, the old wrapper around
+that pattern, was removed alongside the debug overlay it existed solely to serve — it had no
+other consumer).
 
 Two hard caps, silent-truncation (not growth) past them: **256 glyphs** and **64 lines** per
 single `DrawText`/`Measure` call. A HUD with more content than that needs multiple calls, not a
@@ -131,8 +135,7 @@ bigger buffer.
 To wire a brand-new draw list into the frame: own a `UiDrawList`, register an `IRenderSystem`
 that calls `Renderer.DrawUi(cmd, frame, target, drawList.Quads)` once per frame (see
 `UiRenderSystem` for the reference wiring — it clears its list in `Stage.Input` and draws in the
-render stage, and must be registered before any other system, like `DebugOverlaySystem`, that
-adds to the *same* list mid-frame).
+render stage).
 
 ### 1.5 Cooking a font
 
@@ -171,7 +174,7 @@ font.ttf + charset.txt --[tools/FontCooker, offline, build-time]--> font.agfont
                                                     FontAssetFormat.Read (runtime, GPU-free)
                                                                         │
                                                                         ▼
-game code / DebugOverlaySystem --[TextLayout.DrawText / UiDrawList.AddRect]--> UiQuad[] (UiDrawList)
+game code --[TextLayout.DrawText / UiDrawList.AddRect]--> UiQuad[] (UiDrawList)
                                                                         │
                                               Renderer.DrawUi(cmd, frame, target, quads)
                                                                         │
@@ -202,11 +205,8 @@ Public surface, all allocation-free at steady state:
 - **`TextLayout`** (static): `Measure`/`DrawText`, both bounded to 256 glyphs / 64 lines per call
   (silent truncation past that, not growth — a deliberate ceiling, not an oversight).
   `TextAlign.Left/Center/Right`.
-- **`TextBuilder`** (`ref struct`): 0-alloc numeric-to-span formatting via `TryFormat`, wrapping a
-  caller-owned `Span<char>` (typically `stackalloc`).
-- **`Sparkline`** (static): `Draw(drawList, samples, rect, whiteTexelUv, rgba, scaleMax)` — bars
-  oldest-first, subsamples when there are more history points than pixels, and a non-positive/NaN
-  `scaleMax` degrades to empty bars rather than dividing by zero.
+  (`TextBuilder`/`Sparkline`, the debug-overlay-only helpers this layer used to also carry, were
+  removed alongside `DebugOverlaySystem` — see §2.6; they had no other consumer.)
 
 ### 2.3 GPU rendering path
 
@@ -231,10 +231,10 @@ pass, `LoadOp = Load` (the scene underneath is preserved, not cleared).
 
 `FrameStats`/`FrameSeries` (`Agapanthe.Engine`, headless-safe — no GPU, no window):
 append-only circular buffers (~4 s retention at 60 Hz), 0-alloc `Record`/`CopyChronological`.
-`SimulationHost.BeginFrame()`/`EndFrame()` own the measurement bracket; `DebugOverlaySystem`
-(`Agapanthe.Engine.Render`, `Stage.PostSimulation`) only reads and draws, never samples on its
-own — this is deliberate: sampling from a system would measure across the host's windowing/input
-pump instead of engine work alone, permanently and falsely reddening the alloc gate.
+`SimulationHost.BeginFrame()`/`EndFrame()` own the measurement bracket; the debug panel (today
+`ImGuiDebugSystem`, `Agapanthe.DebugUi`) only reads and draws, never samples on its own — this is
+deliberate: sampling from a system would measure across the host's windowing/input pump instead
+of engine work alone, permanently and falsely reddening the alloc gate.
 
 ### 2.5 GPU profiler (UI-3)
 
@@ -258,17 +258,46 @@ the raw ticks, masking to the queue's actual `timestampValidBits` (Vulkan only d
 low-order bits; NVIDIA commonly reports 64, but Intel/AMD/MoltenVK commonly report 36-40) and
 rejecting a wrapped or non-finite result rather than fabricating a value.
 
-`DebugOverlaySystem` owns its own single `FrameSeries` for the GPU total (not one per region —
-the per-pass breakdown is already fully conveyed by the text line every frame; four
-per-region histories written every frame and read by nothing would repeat the exact
-write-but-never-read shape the project already closed once, `AggregateBoundsSystem`).
+The debug panel reads `Renderer.LastGpuPassTimingsMs` directly each frame it draws — no
+intermediate `FrameSeries` of its own for the GPU numbers (v1 has no graphs at all, §1.1); the
+per-pass breakdown is fully conveyed by the text line.
+
+### 2.6 The debug overlay's own project (`Agapanthe.DebugUi`) and the `Master` build
+
+The ImGui milestone (`docs/plans/2026-09-28-imgui-debug-overlay-design.md`) replaced
+`DebugOverlaySystem`/`Sparkline`/`TextBuilder` (all deleted, §2.2) with a native ImGui panel in
+its own project, **`Agapanthe.DebugUi`** — isolated the same way `Agapanthe.Net`/`Agapanthe.Audio`
+isolate their one third-party dependency each. It is never referenced by `Agapanthe.App`/
+`Agapanthe.Platform.App` (a consumer opts in itself, via `IGame.ConfigureDebugTools`); a headless
+host (`HeadlessSim`/`DedicatedServer`) never sees it at all.
+
+A 3rd build configuration, **`Master`**, is the one that actually ships to players —
+`dotnet publish -r <rid> --self-contained -p:PublishAot=true -c Master`. `Release` stays an
+internal QA/profiling tier that **keeps** the debug panel; only `Master` excludes it — every
+`ProjectReference`/`PackageReference` touching `Agapanthe.DebugUi`/`Hexa.NET.ImGui` is conditional
+on `'$(Configuration)' != 'Master'`, so no `DebugUi.dll`/`cimgui` native library reaches that
+build at all (`DebugUiIsolationTests` + `EngineIsHeadlessTests` gate this).
+
+`ImGuiVulkanBackend` (`Agapanthe.DebugUi`) is a hand-written Vulkan backend on top of
+`Agapanthe.Graphics`'s public primitives — never a type from Hexa.NET.ImGui's own reference
+backends (those want a raw `VkDevice`/`VkCommandBuffer`, which `Agapanthe.Graphics` never lets
+out). Vertices live in a per-frame SSBO ring read via `gl_VertexIndex` (same technique as
+`ui.vert`), paired with a real GPU index buffer. `ImGuiDebugSystem` is an `IRenderSystem`, never
+an `ISystem` — the `NewFrame`→widgets→`Render()` cycle must run exactly once per actually-rendered
+frame.
 
 ---
 
 ## Part 3 — Known limitations (documented, not silently accepted)
 
-- No interactivity anywhere — no mouse, click, focus, or widgets (blocked on backlog §4quater's
-  input work, by design).
+- The debug panel has no graphs (v1) — no `PlotLines` overload takes a plain
+  `ReadOnlySpan<float>` in this Hexa.NET.ImGui version (§1.1).
+- No entity/scene inspector yet — the natural next real consumer of ImGui's interactivity here,
+  explicitly deferred by the milestone.
+- `Agapanthe.Ui`'s own text path (§1.4) still has no interactivity — no mouse, click, focus, or
+  widgets (blocked on backlog §4quater's input work, by design); this is unrelated to the ImGui
+  panel, which has its own independent input plumbing (`IWindow.MousePosition`/
+  `IsMouseButtonDown`/`ScrollDelta`/`CharInput`).
 - 256 glyphs / 64 lines per `DrawText`/`Measure` call — silent truncation, not growth.
 - No CJK or complex scripts — charset-driven (ASCII + Latin-1 + tofu today), not a renderer
   limit; extending `charset.txt` and re-cooking is additive.
@@ -292,9 +321,11 @@ write-but-never-read shape the project already closed once, `AggregateBoundsSyst
 |---|---|
 | Font cooking (offline) | `tools/FontCooker/`, `fonts/*.ttf`, `fonts/charset.txt` |
 | Font format (runtime read) | `src/Agapanthe.Assets/Font/FontAsset.cs`, `FontAssetFormat.cs` |
-| GPU-free UI layer | `src/Agapanthe.Ui/` (`UiDrawList`, `UiQuad`, `TextLayout`, `TextBuilder`, `Sparkline`, `TextShaper`) |
-| GPU rendering | `src/Agapanthe.Rendering/Passes/UiPass.cs`, `Renderer.LoadFont`/`DrawUi`, `shaders/ui.vert`/`ui.frag` |
-| Frame wiring | `src/Agapanthe.Engine.Render/UiRenderSystem.cs`, `DebugOverlaySystem.cs` |
+| GPU-free UI layer | `src/Agapanthe.Ui/` (`UiDrawList`, `UiQuad`, `TextLayout`, `TextShaper`) |
+| GPU rendering (game text) | `src/Agapanthe.Rendering/Passes/UiPass.cs`, `Renderer.LoadFont`/`DrawUi`, `shaders/ui.vert`/`ui.frag` |
+| Frame wiring (game text) | `src/Agapanthe.Engine.Render/UiRenderSystem.cs` |
 | CPU profiler data | `src/Agapanthe.Engine/FrameStats.cs`, `SimulationHost.BeginFrame`/`EndFrame` |
-| GPU profiler | `src/Agapanthe.Graphics/QueryPool.cs`, `GpuTimestampMath.cs`, `CommandList.WriteTimestampBegin`/`End`/`ResetQueryPool`, `GraphicsDevice.SupportsGpuTimestamps`/`TimestampValidBits`/`TimestampPeriodNs`, `Renderer.LastGpuPassTimingsMs` |
-| Host wiring + env vars | `src/Agapanthe.App/HostOptions.cs`, `AppHost.cs` |
+| GPU profiler data | `src/Agapanthe.Graphics/QueryPool.cs`, `GpuTimestampMath.cs`, `CommandList.WriteTimestampBegin`/`End`/`ResetQueryPool`, `GraphicsDevice.SupportsGpuTimestamps`/`TimestampValidBits`/`TimestampPeriodNs`, `Renderer.LastGpuPassTimingsMs` |
+| Debug panel (ImGui, Debug/Release only) | `src/Agapanthe.DebugUi/` (`ImGuiDebugSystem.cs`, `ImGuiVulkanBackend.cs`, `Shaders/imgui.vert`/`imgui.frag`) |
+| `Master` build config | `Directory.Build.props`, `Agapanthe.slnx`, each consumer's `.csproj` (conditional `DebugUi` reference) |
+| Host wiring + env vars | `src/Agapanthe.App/HostOptions.cs`, `AppHost.cs`, `IGame.ConfigureDebugTools` |

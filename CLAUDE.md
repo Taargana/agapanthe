@@ -59,6 +59,14 @@ DYLD_LIBRARY_PATH=/opt/homebrew/lib dotnet run --project samples/Sandbox
 DYLD_LIBRARY_PATH=/opt/homebrew/lib dotnet run --project samples/Sandbox -- MetalRoughSpheres.glb
 ```
 
+> **3 configurations depuis le jalon ImGui debug overlay** (`docs/plans/2026-09-28-imgui-debug-overlay-design.md`)
+> : `Debug` (dev) · `Release` (palier interne QA/profiling — garde l'outillage debug ImGui) · **`Master`** (le
+> **seul** build qui part réellement chez les joueurs — exclut structurellement `Agapanthe.DebugUi`/
+> `Hexa.NET.ImGui`). **La commande de sortie réelle est
+> `dotnet publish -r <rid> --self-contained -p:PublishAot=true -c Master`** — pas `-c Release` (qui reste un
+> palier intermédiaire). Depuis .NET 8 un `dotnet publish` sans `-c` explicite produit un Release par défaut,
+> jamais un Master.
+
 Env vars debug : `AGAPANTHE_MAX_FRAMES=N` (auto-close, sortie 0 si 0 leak) · `AGAPANTHE_CAPTURE=out.ppm` (dump HDR tonemappé) · `AGAPANTHE_VIEW="x,y,z"` (angle caméra) · `AGAPANTHE_HDRI=<path.hdr>` (environnement IBL) · `AGAPANTHE_IBL_TEST=<préfixe>` (génère l'IBL headless + dump faces/maps) · `AGAPANTHE_SHADER_RELOAD_TEST=1` (force un reload des 4 passes + logge le wall-time).
 
 > **MP-0c — déterminisme des captures** : depuis le fixed-timestep accumulator, un run déterministe (capture, banc)
