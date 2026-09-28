@@ -24,9 +24,12 @@ namespace Agapanthe.Engine;
 /// <see cref="Stage.Simulation"/> systems are greedily grouped into waves by their declared
 /// <see cref="ISystem.Reads"/>/<see cref="ISystem.Writes"/> — systems in the same wave share no conflict and may
 /// run on different threads at once; a system with <see cref="ISystem.RequiresExclusiveExecution"/> (the default)
-/// always gets a solo wave. Waves themselves execute strictly one after another (a full join between them, and
-/// before the stage's structural barrier), on a persistent worker-thread pool created once and reused every tick —
-/// never <c>Task.Run</c>/<c>Parallel.Invoke</c>, which would allocate per call. <see cref="Stage.Input"/> and
+/// always gets a solo wave. Within a shared wave, a member may additionally declare
+/// <see cref="ISystem.RequiresOwnerThread"/> (Job-2b) to keep its OWN execution pinned to the owner thread while
+/// the rest of the wave still runs on workers — thread affinity, orthogonal to resource exclusivity. Waves
+/// themselves execute strictly one after another (a full join between them, and before the stage's structural
+/// barrier), on a persistent worker-thread pool created once and reused every tick — never
+/// <c>Task.Run</c>/<c>Parallel.Invoke</c>, which would allocate per call. <see cref="Stage.Input"/> and
 /// <see cref="Stage.PostSimulation"/> are untouched by any of this and stay fully sequential.
 /// </para>
 /// </summary>
@@ -66,9 +69,22 @@ public sealed class SystemScheduler : IDisposable
     // placement found).
     private List<bool>? _simulationWaveExclusive;
 
-    // The largest wave BuildSimulationWaves ever produced — the most concurrency this scheduler's Stage.Simulation
-    // could ever actually use. Caps the worker pool below at this instead of a flat ProcessorCount-1, so a 2-system
-    // wave on a 32-core machine spins up 1 worker, not 31 that would never all be used (Job-1 audit F6).
+    // Job-2b: how many of each wave's LEADING entries are worker-eligible (ISystem.RequiresOwnerThread == false) —
+    // BuildSimulationWaves stable-partitions each wave's list in place so those entries are contiguous at the
+    // front, with any owner-pinned entries (RequiresOwnerThread == true) contiguous at the back. Parallel to
+    // _simulationWaves by index — unlike _simulationWaveExclusive (structural-test-only, the grouping algorithm
+    // never reads it back), THIS field IS read every tick, by RunSimulationWaves, to decide each wave's execution
+    // branch. Also exposed read-only via GetSimulationWaveWorkerEligibleCountForTest() for structural assertions.
+    // A stable partition cannot change correctness: two systems in the same wave are conflict-free by construction
+    // (Conflicts/ConflictsWithAny), so their relative execution order was never guaranteed to matter — only each
+    // sub-group's OWN relative order is preserved.
+    private List<int>? _simulationWaveWorkerEligibleCount;
+
+    // The largest worker-eligible count across every wave BuildSimulationWaves produced (Job-2b audit F3: NOT the
+    // largest wave.Count — an owner-pinned member never consumes a worker slot) — the most concurrency this
+    // scheduler's Stage.Simulation could ever actually use. Caps the worker pool below at this instead of a flat
+    // ProcessorCount-1, so a 2-system wave on a 32-core machine spins up 1 worker, not 31 that would never all be
+    // used (Job-1 audit F6).
     private int _maxSimulationWaveWidth = 1;
 
     // Job-1 D5: called ONCE, the first time a wave with more than one system actually needs to run concurrently —
@@ -207,39 +223,72 @@ public sealed class SystemScheduler : IDisposable
         _tickIndex++;
     }
 
-    // Job-1 D5: runs the precomputed waves in order, full join between waves. A wave of exactly one system (today's
-    // overwhelmingly common case) executes inline on the calling thread — no worker pool is ever created for it.
-    // Only a wave with 2+ systems dispatches to the persistent worker pool (created lazily, on first need).
+    // Job-1 D5 / Job-2b: runs the precomputed waves in order, full join between waves. A wave with no owner-pinned
+    // members (ISystem.RequiresOwnerThread == false for every entry — today's overwhelmingly common case) behaves
+    // exactly as before Job-2b: wave.Count <= 1 executes inline on the calling thread with no worker pool ever
+    // created, otherwise the whole wave dispatches to the persistent worker pool. A wave that is ENTIRELY
+    // owner-pinned (workerEligibleCount == 0) runs sequentially inline, even for 2+ systems — the worker pool is
+    // never touched. A MIXED wave forks: the worker-eligible prefix dispatches to workers exactly as
+    // RunWaveInParallel always has, while the owner-pinned suffix runs inline on the calling thread, overlapping
+    // the workers rather than waiting for them first.
     private void RunSimulationWaves(in TickContext ctx)
     {
         var waves = _simulationWaves!;
+        var workerEligibleCounts = _simulationWaveWorkerEligibleCount!;
         for (var w = 0; w < waves.Count; w++)
         {
             var wave = waves[w];
-            if (wave.Count <= 1)
+            var workerEligibleCount = workerEligibleCounts[w];
+
+            if (workerEligibleCount == wave.Count)
             {
-                if (wave.Count == 1)
+                if (wave.Count <= 1)
                 {
-                    wave[0].Execute(in ctx);
+                    if (wave.Count == 1)
+                    {
+                        wave[0].Execute(in ctx);
+                    }
+
+                    continue;
+                }
+
+                RunWaveInParallel(wave, workerEligibleCount, in ctx);
+                continue;
+            }
+
+            if (workerEligibleCount == 0)
+            {
+                // Entirely owner-pinned: sequential, inline, on the calling thread — the worker pool is never
+                // created for this wave. Propagation is direct (no try/catch): a single thread is involved, so
+                // there is no concurrent exception to merge, exactly like today's wave.Count == 1 case.
+                for (var i = 0; i < wave.Count; i++)
+                {
+                    wave[i].Execute(in ctx);
                 }
 
                 continue;
             }
 
-            RunWaveInParallel(wave, in ctx);
+            RunWaveInParallel(wave, workerEligibleCount, in ctx);
         }
     }
 
-    private void RunWaveInParallel(List<ISystem> wave, in TickContext ctx)
+    // workerEligibleCount == wave.Count: identical to Job-1's original behavior (the whole wave dispatches to
+    // workers). workerEligibleCount < wave.Count (Job-2b): only the worker-eligible PREFIX [0, workerEligibleCount)
+    // is partitioned across the worker pool — the stable partition BuildSimulationWaves already performed
+    // guarantees that prefix is contiguous and holds exactly the worker-eligible members. The owner-pinned suffix
+    // [workerEligibleCount, wave.Count) then runs inline on the calling thread, released to run IMMEDIATELY after
+    // signaling the workers (never before) so the two genuinely overlap rather than merely being sequenced.
+    private void RunWaveInParallel(List<ISystem> wave, int workerEligibleCount, in TickContext ctx)
     {
         EnsureWorkerPool();
 
-        var active = Math.Min(wave.Count, _workers!.Length);
+        var active = Math.Min(workerEligibleCount, _workers!.Length);
         _workerCtx = ctx;
         _waveCountdown!.Reset(active);
 
-        var baseSize = wave.Count / active;
-        var remainder = wave.Count % active;
+        var baseSize = workerEligibleCount / active;
+        var remainder = workerEligibleCount % active;
         var start = 0;
         for (var i = 0; i < active; i++)
         {
@@ -253,12 +302,30 @@ public sealed class SystemScheduler : IDisposable
             _workerGoSignals![i].Release();
         }
 
+        // Job-2b: the owner-pinned suffix runs HERE, on the calling thread, while the workers released above are
+        // already running — real overlap, not owner-then-worker or worker-then-owner sequencing. On exception,
+        // stop this loop immediately (mirrors WorkerLoop's own catch: remaining pinned members are skipped for
+        // this tick, not run) and fold the exception into the same `errors` collection the workers report into
+        // below — collected sequentially on this single thread, so there is no concurrent writer to race with.
+        List<Exception>? errors = null;
+        for (var i = workerEligibleCount; i < wave.Count; i++)
+        {
+            try
+            {
+                wave[i].Execute(in ctx);
+            }
+            catch (Exception ex)
+            {
+                (errors ??= []).Add(ex);
+                break;
+            }
+        }
+
         WaitForWaveOrDiagnoseHang(active);
 
         // Never let a system's exception vanish on a worker thread (audit posture: silence there is worse than a
         // thrown exception here) — rethrow on the calling thread, preserving the original stack via
         // ExceptionDispatchInfo, once every worker in this wave has finished.
-        List<Exception>? errors = null;
         for (var i = 0; i < active; i++)
         {
             var ex = _workerExceptions![i];
@@ -486,15 +553,54 @@ public sealed class SystemScheduler : IDisposable
             }
         }
 
-        _simulationWaves = waves;
-        _simulationWaveExclusive = exclusiveFlags;
-
-        var maxWidth = 1;
+        // Job-2b: stable-partition each wave's list in place — worker-eligible members first, owner-pinned members
+        // last — so RunWaveInParallel can dispatch a contiguous PREFIX to workers via the existing
+        // WorkerJob(wave, start, size) shape, with no new per-tick allocation. Stable, so each sub-group keeps its
+        // own relative registration order; only the group BOUNDARY moves. Done ONCE here (not per tick): every
+        // ISystem predating Job-2b inherits RequiresOwnerThread's false default, so this is a strict no-op for any
+        // wave built before this member existed — nothing to move, workerEligibleCount == wave.Count always.
+        var workerEligibleCounts = new List<int>(waves.Count);
         for (var w = 0; w < waves.Count; w++)
         {
-            if (waves[w].Count > maxWidth)
+            var wave = waves[w];
+            var ownerPinned = new List<ISystem>();
+            var writeIndex = 0;
+            for (var i = 0; i < wave.Count; i++)
             {
-                maxWidth = waves[w].Count;
+                if (wave[i].RequiresOwnerThread)
+                {
+                    ownerPinned.Add(wave[i]);
+                }
+                else
+                {
+                    wave[writeIndex] = wave[i];
+                    writeIndex++;
+                }
+            }
+
+            for (var i = 0; i < ownerPinned.Count; i++)
+            {
+                wave[writeIndex] = ownerPinned[i];
+                writeIndex++;
+            }
+
+            workerEligibleCounts.Add(wave.Count - ownerPinned.Count);
+        }
+
+        _simulationWaves = waves;
+        _simulationWaveExclusive = exclusiveFlags;
+        _simulationWaveWorkerEligibleCount = workerEligibleCounts;
+
+        // Job-2b audit F3: sized on workerEligibleCounts, not waves[w].Count — an owner-pinned member never
+        // consumes a worker slot (RunWaveInParallel dispatches only the worker-eligible PREFIX), so counting it
+        // here would over-provision the pool by exactly the number of pinned members in the widest wave. A fully
+        // pinned wave (workerEligibleCount == 0) never creates a pool at all regardless of this value.
+        var maxWidth = 1;
+        for (var w = 0; w < workerEligibleCounts.Count; w++)
+        {
+            if (workerEligibleCounts[w] > maxWidth)
+            {
+                maxWidth = workerEligibleCounts[w];
             }
         }
 
@@ -551,6 +657,11 @@ public sealed class SystemScheduler : IDisposable
     /// holds a <see cref="ISystem.RequiresExclusiveExecution"/> system, structurally rather than inferred from
     /// wave size.</summary>
     internal IReadOnlyList<bool>? GetSimulationWaveExclusivityForTest() => _simulationWaveExclusive;
+
+    /// <summary>Test/inspection accessor (Job-2b): parallel to <see cref="GetSimulationWavesForTest"/> — how many of
+    /// each wave's LEADING entries are worker-eligible (<see cref="ISystem.RequiresOwnerThread"/> == <c>false</c>);
+    /// the remainder, at the end of that same wave's list, are owner-pinned.</summary>
+    internal IReadOnlyList<int>? GetSimulationWaveWorkerEligibleCountForTest() => _simulationWaveWorkerEligibleCount;
 
     /// <summary>Test-only accessor: cumulative bytes each worker thread has allocated across every wave it has run
     /// (see <see cref="_workerAllocatedBytesForTest"/>) — <see langword="null"/> if no worker pool was ever created

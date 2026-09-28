@@ -22,8 +22,9 @@ namespace Agapanthe.Engine;
 /// <c>GC.GetAllocatedBytesForCurrentThread()</c> — a per-thread counter — so an allocation made by a system
 /// running on a worker thread is invisible to <see cref="LastFrameAllocatedBytes"/> and to whatever reads it
 /// (<c>FrameStats</c>, the debug overlay). Harmless today: the only real <see cref="Stage.Simulation"/> system
-/// anywhere in this codebase (<c>PhysicsSystem</c>) is <c>RequiresExclusiveExecution == true</c>, so no worker
-/// pool is ever created in production and the owner thread still does 100% of the work. This becomes a real blind
+/// anywhere in this codebase (<c>PhysicsSystem</c>, non-exclusive + owner-pinned since Job-2b) is still ALONE in
+/// its own wave — no other <see cref="Stage.Simulation"/> system exists to share it with — so no worker pool is
+/// ever created in production and the owner thread still does 100% of the work. This becomes a real blind
 /// spot the day a second, non-exclusive <see cref="Stage.Simulation"/> system exists — closing it (measuring and
 /// folding in worker-thread allocations) is deferred, tracked debt, not silently dropped.
 /// </para>

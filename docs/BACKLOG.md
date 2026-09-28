@@ -755,11 +755,58 @@ pas fixe = source de vérité unique (prérequis netcode) — voir §Physique.
   aujourd'hui (le receive tourne toujours sur le thread propriétaire), et corriger proprement
   exigerait de distinguer deux sources d'`InvalidOperationException` sans rouvrir la protection
   anti-crash de Net-1 — différé comme son propre petit chantier.
-- **Job system — sous-jalon 2b (candidat, non planifié)** : `bool RequiresOwnerThread` sur `ISystem`
-  (affinité de thread, orthogonal à `RequiresExclusiveExecution`) — permettrait à `PhysicsSystem` de
-  déclarer de vrais `Reads`/`Writes` et de tourner inline sur le thread propriétaire pendant qu'un
-  système disjoint tourne sur un worker dans la même vague, sans toucher à `AssertOwnerThreadStrict`.
-  Voir le détail dans l'entrée Job-2 ci-dessus.
+- ~~**Job system — sous-jalon 2b : `RequiresOwnerThread` (affinité de thread)**~~ ✅ **CLOS** — spec
+  `docs/plans/2026-09-28-job-system-submilestone2b-design.md`, approuvée **4,6/5** après revue
+  scorée (1 tour, aucune citation fabriquée trouvée). Nouveau `bool ISystem.RequiresOwnerThread`
+  (défaut `false`, orthogonal à `RequiresExclusiveExecution`) : un système peut désormais partager
+  une vague (`RequiresExclusiveExecution=false`) tout en étant garanti de toujours s'exécuter sur le
+  thread propriétaire, jamais un worker. `SystemScheduler.BuildSimulationWaves` partitionne chaque
+  vague en place (worker-eligible d'abord, owner-pinné ensuite, stable, calculé une fois — no-op
+  strict sur toute vague antérieure à ce jalon) ; `RunSimulationWaves` gagne un 3ᵉ cas (tout-pinné :
+  séquentiel inline, aucun pool créé) et `RunWaveInParallel` un vrai fork-join (le suffixe pinné
+  s'exécute sur le thread appelant immédiatement après avoir signalé les workers — recouvrement réel,
+  pas une séquence). `PhysicsSystem` en devient le premier et seul vrai consommateur : `Reads=
+  [GlobalId,RigidBody,InstanceSlot]`/`Writes=[WorldPosition,Velocity]` (vérifiés ligne à ligne contre
+  `GameWorld.Physics.cs`), `RequiresExclusiveExecution=false`/`RequiresOwnerThread=true` —
+  **zéro changement de comportement observable** : seul système `Stage.Simulation` du dépôt, sa
+  vague reste `Count==1` partout, `HeadlessSim` JIT+NativeAOT re-vérifié byte-identique
+  (`dbe9ed91…`/`1c760d7f…`) avant et après la passe de correctifs d'audit. **1006 tests** (+~15),
+  0 warning.
+
+  Double audit `csharp-lowlevel` + `engine-architect`, tous deux PASS-with-concerns — **convergence
+  forte sur un vrai 🔴 latent** : la prémisse implicite du split Job-1 `AssertOwnerThread`
+  (lenient)/`AssertOwnerThreadStrict` supposait que le thread propriétaire ne mute jamais PENDANT
+  qu'un worker tourne (il ne faisait que bloquer dans `WaitForWaveOrDiagnoseHang`) — Job-2b casse
+  cette prémisse : le propriétaire exécute désormais du code utilisateur pendant une vague mixte. Un
+  futur système pinné non-exclusif qui appellerait `Spawn`/`Despawn` courrait donc une vraie race
+  contre un worker appelant la surface lenient (`IsAlive`/`GetGlobalId`) — **reproduit empiriquement**
+  par `csharp-lowlevel` (une `NullReferenceException` intermittente dans `HashSet<T>.Contains`).
+  `PhysicsSystem` est sûr aujourd'hui uniquement parce que `StepPhysics` ne touche aucun des champs
+  que la surface lenient lit — pas parce que le pinning rend la file structurelle sûre en général.
+  **Corrigé en documentation + gate structurel** (pas de garde runtime — versé à Job-3, voir
+  ci-dessous) : `ISystem.RequiresOwnerThread`/`RequiresExclusiveExecution`,
+  `GameWorld.AssertOwnerThread`/`AssertOwnerThreadStrict` et `PhysicsSystem.RequiresOwnerThread`
+  documentent désormais explicitement cette contrainte ; nouveau test
+  `GameWorldOwnerThreadGuardTests` (scan de source) qui épingle que la surface lenient n'a que 2
+  call sites connus-sûrs (`IsAlive`, `GetGlobalId`) et lève bruyamment si un 3ᵉ apparaît sans revue
+  délibérée. Findings 🟠/🟡 supplémentaires corrigés : le test-vitrine de propagation d'exception
+  pinnée ne discriminait rien par mutation (un worker instantané masquait l'ordre attente-puis-rethrow
+  — corrigé avec un worker qui bascule un flag après un vrai délai) ; le test d'intégration avec le
+  vrai `PhysicsSystem` ne prouvait le pinning qu'en Debug (`AssertOwnerThreadStrict` est
+  `[Conditional("DEBUG")]`) — corrigé via un décorateur `ISystem` qui capture le thread-id
+  indépendamment de la configuration ; sizing du pool de workers calé sur `wave.Count` total au lieu
+  de `workerEligibleCount` (sur-provisionnement mesuré : 3 workers pour 1 seul membre éligible) —
+  corrigé, une ligne ; 3 commentaires hors diff rendus faux par ce jalon (`GameWorld.cs`
+  `AssertOwnerThreadStrict` affirmait « there is no opt-out », `SimulationHost.cs` affirmait
+  `PhysicsSystem` toujours `RequiresExclusiveExecution==true`, `ISystem.RequiresExclusiveExecution`
+  citait encore le scratch de broadphase comme exemple canonique) ; combinaison
+  `(Exclusive=true, OwnerThread=true)` non testée — test ajouté. **Dette laissée, versée à Job-3** :
+  garde runtime qui promouvrait `AssertOwnerThread` en strict pendant le segment pinné d'une vague
+  mixte (au lieu de s'appuyer sur une convention documentée) ; `DrawablesMissingIdentity()` (public,
+  sans garde de thread du tout, interroge Arch) à auditer avant qu'un worker ne puisse jamais
+  l'atteindre ; sizing exact du pool encore basé sur un maximum global plutôt que par-vague (impact
+  nul aujourd'hui). Job-3 (filet de vérification runtime déclaré-vs-réel) reste le candidat suivant,
+  désormais avec deux items concrets à couvrir plutôt qu'un principe abstrait.
 - **Job system — sous-jalon 3 (non planifié)** : filet de vérification runtime prouvant que l'accès
   réel d'un système correspond à ses `Reads`/`Writes` déclarés — pour l'instant, un système qui ment
   est un hasard silencieux non détecté, exactement la posture qu'`AssertOwnerThread` lui-même a eue

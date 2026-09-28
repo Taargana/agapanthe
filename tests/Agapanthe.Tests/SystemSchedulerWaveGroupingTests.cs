@@ -13,11 +13,13 @@ public sealed class SystemSchedulerWaveGroupingTests
     private sealed class DeclaringSystem(
         IReadOnlyList<Type>? reads = null,
         IReadOnlyList<Type>? writes = null,
-        bool requiresExclusiveExecution = false) : ISystem
+        bool requiresExclusiveExecution = false,
+        bool requiresOwnerThread = false) : ISystem
     {
         public IReadOnlyList<Type> Reads { get; } = reads ?? [];
         public IReadOnlyList<Type> Writes { get; } = writes ?? [];
         public bool RequiresExclusiveExecution { get; } = requiresExclusiveExecution;
+        public bool RequiresOwnerThread { get; } = requiresOwnerThread;
         public void Execute(in TickContext ctx)
         {
         }
@@ -25,6 +27,8 @@ public sealed class SystemSchedulerWaveGroupingTests
 
     private sealed class ComponentA;
     private sealed class ComponentB;
+    private sealed class ComponentC;
+    private sealed class ComponentD;
 
     [Fact]
     public void TwoSystems_WithDisjointReadsAndWrites_ShareAWave()
@@ -87,6 +91,52 @@ public sealed class SystemSchedulerWaveGroupingTests
 
         var waves = scheduler.GetSimulationWavesForTest()!;
         Assert.Single(waves);
+    }
+
+    [Fact]
+    public void OwnerPinnedAndWorkerEligibleSystems_StablePartitionWithinTheirSharedWave()
+    {
+        // Job-2b: 4 mutually disjoint (never-conflicting) systems registered in an INTERLEAVED order
+        // (worker, pinned, worker, pinned) so a naive "just move pinned ones to the end" that didn't preserve
+        // each sub-group's own relative order would be caught. Expected result: all 4 share one wave (no
+        // Reads/Writes conflict), reordered to [a, b, c, d] — worker-eligible (a, b) first in THEIR original
+        // relative order, owner-pinned (c, d) last in THEIR original relative order.
+        using var scheduler = new SystemScheduler();
+        var a = new DeclaringSystem(writes: [typeof(ComponentA)]);
+        var c = new DeclaringSystem(writes: [typeof(ComponentC)], requiresOwnerThread: true);
+        var b = new DeclaringSystem(writes: [typeof(ComponentB)]);
+        var d = new DeclaringSystem(writes: [typeof(ComponentD)], requiresOwnerThread: true);
+        scheduler.Add(Stage.Simulation, a);
+        scheduler.Add(Stage.Simulation, c);
+        scheduler.Add(Stage.Simulation, b);
+        scheduler.Add(Stage.Simulation, d);
+
+        scheduler.Tick(1f / 60f);
+
+        var waves = scheduler.GetSimulationWavesForTest()!;
+        var workerEligibleCounts = scheduler.GetSimulationWaveWorkerEligibleCountForTest()!;
+        Assert.Single(waves);
+        Assert.Equal(new ISystem[] { a, b, c, d }, waves[0]);
+        Assert.Equal(2, workerEligibleCounts[0]);
+    }
+
+    [Fact]
+    public void ExclusiveAndOwnerPinned_TogetherAreHarmlesslyRedundant_StillASoloWave()
+    {
+        // Job-2b audit F7: the one combination of the two flags no earlier test exercised. RequiresOwnerThread is
+        // meaningless when RequiresExclusiveExecution is true (a solo wave already always runs inline on the owner
+        // thread) — pins that this combination is not treated specially and does not break the solo-wave path.
+        using var scheduler = new SystemScheduler();
+        var exclusiveAndPinned = new DeclaringSystem(requiresExclusiveExecution: true, requiresOwnerThread: true);
+        scheduler.Add(Stage.Simulation, exclusiveAndPinned);
+
+        scheduler.Tick(1f / 60f);
+
+        var waves = scheduler.GetSimulationWavesForTest()!;
+        var workerEligibleCounts = scheduler.GetSimulationWaveWorkerEligibleCountForTest()!;
+        Assert.Single(waves);
+        Assert.Equal([exclusiveAndPinned], waves[0]);
+        Assert.Equal(0, workerEligibleCounts[0]);
     }
 
     [Fact]

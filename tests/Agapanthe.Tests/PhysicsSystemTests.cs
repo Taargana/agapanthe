@@ -21,14 +21,31 @@ public sealed class PhysicsSystemTests
         => Assert.False(PhysicsSystem.RatesMatch(1f / 30f, 1f / 60f));
 
     [Fact]
-    public void RequiresExclusiveExecution_IsAlwaysTrue()
+    public void RequiresExclusiveExecutionIsFalse_AndRequiresOwnerThreadIsTrue()
     {
-        // Job-1 D4 regression pin: PhysicsSystem uses GameWorld's shared broadphase scratch, invisible to the
-        // Reads/Writes conflict model, so it must never be eligible to run in the same Stage.Simulation wave as
-        // any other system.
+        // Job-2b: PhysicsSystem now declares real Reads/Writes, so it no longer needs to monopolize its whole wave
+        // (RequiresExclusiveExecution == false) — but GameWorld.StepPhysics's broadphase scratch is still invisible
+        // to Reads/Writes and protected purely by AssertOwnerThreadStrict, so it must still always run on the
+        // scheduler's owner thread (RequiresOwnerThread == true), never a worker.
         using var world = new GameWorld();
         var system = new PhysicsSystem(world, PhysicsSettings.Default(groundY: 0f));
 
-        Assert.True(system.RequiresExclusiveExecution);
+        Assert.False(system.RequiresExclusiveExecution);
+        Assert.True(system.RequiresOwnerThread);
+    }
+
+    [Fact]
+    public void ReadsAndWrites_MatchExactlyWhatStepPhysicsTouches()
+    {
+        // Job-2b: pins the exact component sets derived from reading GameWorld.Physics.cs in full — GlobalId and
+        // RigidBody are read but never written there; InstanceSlot is read (to feed MarkDirty); WorldPosition and
+        // Velocity are the only two .Set<T>() calls in the whole file.
+        using var world = new GameWorld();
+        var system = new PhysicsSystem(world, PhysicsSettings.Default(groundY: 0f));
+
+        Assert.Equal(
+            new[] { typeof(GlobalId), typeof(RigidBody), typeof(InstanceSlot) },
+            system.Reads);
+        Assert.Equal(new[] { typeof(WorldPosition), typeof(Velocity) }, system.Writes);
     }
 }

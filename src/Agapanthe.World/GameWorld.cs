@@ -226,6 +226,22 @@ public sealed partial class GameWorld : IDisposable
     /// <see cref="ConditionalAttribute"/> compiles the call away entirely in Release, so the zero-alloc hot path
     /// pays nothing for it. Every structural/mutating entry point uses <see cref="AssertOwnerThreadStrict"/>
     /// instead — see its remarks for why the two must not be merged.
+    /// <para>
+    /// <b>Only <see cref="IsAlive"/> and <see cref="GetGlobalId"/> use this today — that is load-bearing, not
+    /// incidental (Job-2b audit finding). Both are genuinely read-only.</b>
+    /// The original Job-1 safety argument for letting a sanctioned worker past this guard assumed the owner thread
+    /// never mutates structural state (<c>_pendingSpawn</c>/<c>_pendingDead</c>/<c>_live</c>) WHILE a worker is
+    /// running — true when the owner only ever blocks in <c>SystemScheduler.WaitForWaveOrDiagnoseHang</c>. Job-2b
+    /// (<c>ISystem.RequiresOwnerThread</c>, <c>Agapanthe.Engine</c>) breaks that assumption: the owner now runs a
+    /// pinned system's <c>Execute</c> WHILE workers from the same wave are running. A future pinned, non-exclusive
+    /// system that called <c>Spawn</c>/<c>Despawn</c>/<c>SetParent</c> (or a deferred variant) would race a
+    /// concurrent worker calling this guard's surface — reproduced empirically during that audit (an intermittent
+    /// <see cref="NullReferenceException"/> inside <c>HashSet&lt;T&gt;.Contains</c>). <c>PhysicsSystem</c> is
+    /// safe only because <c>StepPhysics</c> never touches any of the three fields this guard's surface reads — NOT
+    /// because pinning itself makes the structural queue safe. Adding a second lenient call site, or a pinned system
+    /// that touches structural state, needs a real runtime guard (backlog: Job-3 candidate — a scheduler-held flag
+    /// that promotes this guard to strict for the duration of a mixed wave's pinned segment), not just a comment.
+    /// </para>
     /// </summary>
     [Conditional("DEBUG")]
     private void AssertOwnerThread([CallerMemberName] string caller = "")
@@ -254,8 +270,16 @@ public sealed partial class GameWorld : IDisposable
     /// <c>Save</c>/<c>Load</c>/<c>StepPhysics</c>/<c>SetBodyVelocity</c>/<c>ResolveMeshRefs</c> and every
     /// <c>TryRaycast</c>/<c>RaycastAll</c>/<c>OverlapSphere</c>/<c>OverlapBox</c>/<c>QuerySurfaceContacts</c>
     /// broadphase entry point use this — none of them are safe for two threads to call concurrently, and a
-    /// <c>Reads</c>/<c>Writes</c> declaration cannot represent why (D4). A system that needs any of these from
-    /// <see cref="Execute"/>-equivalent code must keep <c>RequiresExclusiveExecution == true</c>; there is no opt-out.
+    /// <c>Reads</c>/<c>Writes</c> declaration cannot represent why (D4).
+    /// <para>
+    /// <b>Job-2b correction:</b> a system that needs any of these from <see cref="Execute"/>-equivalent code no
+    /// longer strictly needs <c>RequiresExclusiveExecution == true</c> — it may instead declare
+    /// <c>ISystem.RequiresOwnerThread == true</c> (thread affinity) alongside real <c>Reads</c>/<c>Writes</c>, which
+    /// keeps it pinned to this same owner thread without monopolizing its whole wave. This guard itself is
+    /// unaffected either way: it never honors <see cref="SetSanctionedWorkerThreads"/>, full stop. What a pinned
+    /// system must NOT do is mutate state that <see cref="AssertOwnerThread"/>'s lenient surface reads — see that
+    /// guard's own remarks for the race this would otherwise open.
+    /// </para>
     /// </summary>
     [Conditional("DEBUG")]
     private void AssertOwnerThreadStrict([CallerMemberName] string caller = "")

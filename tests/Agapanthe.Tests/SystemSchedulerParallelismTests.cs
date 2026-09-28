@@ -59,14 +59,20 @@ public sealed class SystemSchedulerParallelismTests
         TimeSpan busyWait,
         IReadOnlyList<Type>? reads = null,
         IReadOnlyList<Type>? writes = null,
-        bool requiresExclusiveExecution = false) : ISystem
+        bool requiresExclusiveExecution = false,
+        bool requiresOwnerThread = false) : ISystem
     {
         public IReadOnlyList<Type> Reads { get; } = reads ?? [];
         public IReadOnlyList<Type> Writes { get; } = writes ?? [];
         public bool RequiresExclusiveExecution { get; } = requiresExclusiveExecution;
+        public bool RequiresOwnerThread { get; } = requiresOwnerThread;
+
+        // Job-2b: which thread actually ran this Execute call, for tests that assert owner-thread pinning.
+        public int? ExecutedOnThreadId { get; private set; }
 
         public void Execute(in TickContext ctx)
         {
+            ExecutedOnThreadId = Environment.CurrentManagedThreadId;
             using (tracker.Enter())
             {
                 var sw = Stopwatch.StartNew();
@@ -197,6 +203,176 @@ public sealed class SystemSchedulerParallelismTests
     }
 
     [Fact]
+    public void OwnerPinnedAndWorkerEligibleSystems_ActuallyOverlap_PinnedStaysOnTheOwnerThread()
+    {
+        // Job-2b's central proof: a wave mixing one owner-pinned and one worker-eligible system must show REAL
+        // concurrent overlap (MaxObserved == 2, like Job-1's own parallelism proof), with the pinned member
+        // specifically executing on the SAME thread that called Tick — never a worker.
+        if (Environment.ProcessorCount < 3)
+        {
+            return; // see TwoDisjointSystems_ActuallyRunConcurrently... for why this skip is legitimate.
+        }
+
+        var ownerThreadId = Environment.CurrentManagedThreadId;
+        var tracker = new ConcurrencyTracker();
+        var delay = TimeSpan.FromMilliseconds(150);
+        using var scheduler = new SystemScheduler();
+        var pinned = new TrackedSystem(tracker, delay, writes: [typeof(ComponentA)], requiresOwnerThread: true);
+        var workerEligible = new TrackedSystem(tracker, delay, writes: [typeof(ComponentB)]);
+        scheduler.Add(Stage.Simulation, pinned);
+        scheduler.Add(Stage.Simulation, workerEligible);
+
+        var wall = Stopwatch.StartNew();
+        scheduler.Tick(1f / 60f);
+        wall.Stop();
+
+        Assert.True(
+            wall.Elapsed < delay + delay,
+            $"expected wall-clock < {(delay + delay).TotalMilliseconds} ms (real overlap), got {wall.Elapsed.TotalMilliseconds} ms");
+        Assert.Equal(2, tracker.MaxObserved);
+        Assert.Equal(ownerThreadId, pinned.ExecutedOnThreadId);
+        Assert.NotEqual(ownerThreadId, workerEligible.ExecutedOnThreadId);
+    }
+
+    [Fact]
+    public void AllOwnerPinnedWave_RunsSequentiallyInline_NoWorkerPoolEverCreated()
+    {
+        var ownerThreadId = Environment.CurrentManagedThreadId;
+        var tracker = new ConcurrencyTracker();
+        using var scheduler = new SystemScheduler();
+        var a = new TrackedSystem(tracker, TimeSpan.Zero, writes: [typeof(ComponentA)], requiresOwnerThread: true);
+        var b = new TrackedSystem(tracker, TimeSpan.Zero, writes: [typeof(ComponentB)], requiresOwnerThread: true);
+        scheduler.Add(Stage.Simulation, a);
+        scheduler.Add(Stage.Simulation, b);
+
+        scheduler.Tick(1f / 60f);
+
+        Assert.Equal(ownerThreadId, a.ExecutedOnThreadId);
+        Assert.Equal(ownerThreadId, b.ExecutedOnThreadId);
+        // Structural proof, not inference: no wave in this scheduler ever needed a worker, so the pool was never
+        // created at all (GetWorkerAllocatedBytesForTest is null exactly when EnsureWorkerPool never ran).
+        Assert.Null(scheduler.GetWorkerAllocatedBytesForTest());
+    }
+
+    // Job-2b audit F2: a busy-waiting worker that flips a flag on completion — an instantaneous NoOpDisjointSystem
+    // finishes before the owner-pinned segment even needs to wait for it, so a test using one cannot actually
+    // discriminate "the exception surfaced only after workers finished" from "it raced ahead of them" (confirmed by
+    // mutation: removing the try/catch around the pinned loop left the original version of this test green).
+    private sealed class SlowFlagSystem(IReadOnlyList<Type> writes, TimeSpan delay) : ISystem
+    {
+        public IReadOnlyList<Type> Writes { get; } = writes;
+        public bool RequiresExclusiveExecution => false;
+        public bool Finished { get; private set; }
+
+        public void Execute(in TickContext ctx)
+        {
+            var sw = Stopwatch.StartNew();
+            while (sw.Elapsed < delay)
+            {
+            }
+
+            Finished = true;
+        }
+    }
+
+    [Fact]
+    public void OwnerPinnedSystemThrows_ExceptionSurfaces_OnlyAfterWorkersInTheSameWaveFinish()
+    {
+        using var scheduler = new SystemScheduler();
+        var slowWorker = new SlowFlagSystem([typeof(ComponentB)], TimeSpan.FromMilliseconds(100));
+        scheduler.Add(
+            Stage.Simulation,
+            new ThrowingSystem(
+                [typeof(ComponentA)], () => new InvalidOperationException("pinned boom"), requiresOwnerThread: true));
+        scheduler.Add(Stage.Simulation, slowWorker);
+
+        var ex = Record.Exception(() => scheduler.Tick(1f / 60f));
+
+        Assert.IsType<InvalidOperationException>(ex);
+        Assert.Equal("pinned boom", ex!.Message);
+        Assert.True(slowWorker.Finished); // the worker genuinely finished before the exception surfaced, not after
+
+        // Recovery, not just detection (mirrors SchedulerStillTicksCorrectly_OnTheTickAfterAWorkerThrew): the
+        // countdown/semaphore state must still be consistent for a later tick after an owner-pinned throw, with no
+        // stale worker-exception slot leaking into it.
+        var secondTickEx = Record.Exception(() => scheduler.Tick(1f / 60f));
+        Assert.IsType<InvalidOperationException>(secondTickEx);
+    }
+
+    [Fact]
+    public void OwnerPinnedAndWorkerEligibleBothThrow_SurfaceAsAnAggregateExceptionWithBoth()
+    {
+        using var scheduler = new SystemScheduler();
+        scheduler.Add(
+            Stage.Simulation,
+            new ThrowingSystem([typeof(ComponentA)], () => new InvalidOperationException("pinned"), requiresOwnerThread: true));
+        scheduler.Add(Stage.Simulation, new ThrowingSystem([typeof(ComponentB)], () => new ArgumentException("worker")));
+
+        var ex = Record.Exception(() => scheduler.Tick(1f / 60f));
+
+        var aggregate = Assert.IsType<AggregateException>(ex);
+        Assert.Equal(2, aggregate.InnerExceptions.Count);
+        Assert.Contains(aggregate.InnerExceptions, e => e is InvalidOperationException { Message: "pinned" });
+        Assert.Contains(aggregate.InnerExceptions, e => e is ArgumentException { Message: "worker" });
+    }
+
+    // Job-2b item 6: proof against the REAL PhysicsSystem, not just doubles — the strongest evidence the mechanism
+    // works, because two similar-looking test doubles proving something isn't the same as production code proving
+    // it. A synthetic disjoint system shares PhysicsSystem's wave; physics must still integrate correctly (a
+    // dropped body's Y changes under gravity), run itself on the owner thread, AND the synthetic system must
+    // genuinely run on a worker thread.
+    private sealed class ThreadCapturingNoOpSystem(IReadOnlyList<Type> writes) : ISystem
+    {
+        public IReadOnlyList<Type> Writes { get; } = writes;
+        public bool RequiresExclusiveExecution => false;
+        public int? ExecutedOnThreadId { get; private set; }
+        public void Execute(in TickContext ctx) => ExecutedOnThreadId = Environment.CurrentManagedThreadId;
+    }
+
+    // Job-2b audit F4: GameWorld.AssertOwnerThreadStrict (the only thing that would have caught PhysicsSystem
+    // running on a worker) is [Conditional("DEBUG")] — a test relying solely on "StepPhysics didn't throw" proves
+    // nothing under `-c Release`/`Master`. This decorator captures the real executing thread-id directly, without
+    // adding any test-only instrumentation to PhysicsSystem itself, and delegates everything else unchanged.
+    private sealed class ThreadCapturingDecorator(ISystem inner) : ISystem
+    {
+        public IReadOnlyList<Type> Reads => inner.Reads;
+        public IReadOnlyList<Type> Writes => inner.Writes;
+        public bool RequiresExclusiveExecution => inner.RequiresExclusiveExecution;
+        public bool RequiresOwnerThread => inner.RequiresOwnerThread;
+        public int? ExecutedOnThreadId { get; private set; }
+
+        public void Execute(in TickContext ctx)
+        {
+            ExecutedOnThreadId = Environment.CurrentManagedThreadId;
+            inner.Execute(in ctx);
+        }
+    }
+
+    [Fact]
+    public void RealPhysicsSystem_SharesAWaveWithADisjointSystem_BothRunCorrectly()
+    {
+        var ownerThreadId = Environment.CurrentManagedThreadId;
+        using var world = new GameWorld();
+        var spec = new ImportedEntitySpec(
+            new MeshHandle(0, 1), new MaterialHandle(0, 1),
+            new Double3(0, 1000, 0), Matrix4x4.Identity, Vector3.Zero, 1f, 0);
+        var body = world.SpawnBody(in spec, Vector3.Zero, inverseMass: 1f, restitution: 0.3f, radius: 0f);
+        var settings = PhysicsSettings.Default(groundY: -1_000_000f);
+
+        using var host = SimulationHost.CreateDefault(world);
+        var physics = new ThreadCapturingDecorator(new PhysicsSystem(world, settings));
+        var disjoint = new ThreadCapturingNoOpSystem([typeof(ComponentA)]);
+        host.Add(Stage.Simulation, physics);
+        host.Add(Stage.Simulation, disjoint);
+
+        host.Tick(1f / 60f);
+
+        Assert.True(world.GetWorldPosition(body).Y < 1000.0); // physics really integrated
+        Assert.Equal(ownerThreadId, physics.ExecutedOnThreadId); // physics really ran on the owner thread
+        Assert.NotEqual(ownerThreadId, disjoint.ExecutedOnThreadId); // disjoint system really ran on a worker
+    }
+
+    [Fact]
     public void MultiSystemWave_SanctionsWorkerThreads_SoAGuardedGameWorldReadDoesNotThrow()
     {
         using var world = new GameWorld();
@@ -295,10 +471,12 @@ public sealed class SystemSchedulerParallelismTests
         }
     }
 
-    private sealed class ThrowingSystem(IReadOnlyList<Type> writes, Func<Exception> makeException) : ISystem
+    private sealed class ThrowingSystem(
+        IReadOnlyList<Type> writes, Func<Exception> makeException, bool requiresOwnerThread = false) : ISystem
     {
         public IReadOnlyList<Type> Writes { get; } = writes;
         public bool RequiresExclusiveExecution => false;
+        public bool RequiresOwnerThread { get; } = requiresOwnerThread;
         public void Execute(in TickContext ctx) => throw makeException();
     }
 
