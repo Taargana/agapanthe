@@ -1,7 +1,9 @@
+using Agapanthe.Assets.Font;
 using Agapanthe.Core;
 using Agapanthe.Engine.Render;
 using Agapanthe.Graphics;
 using Agapanthe.Rendering;
+using Agapanthe.Ui;
 
 namespace Agapanthe.App;
 
@@ -46,4 +48,23 @@ public sealed class PresentationSceneContext
     /// engine-architect: the prior placement weakened the <c>SimSceneContext_NamesNoGpuOrWindowType</c> gate's
     /// intent without tripping its assertion).</summary>
     public required IReadOnlyList<ISceneSystemFactory> SceneSystemFactories { get; init; }
+
+    /// <summary>
+    /// Scene management spec, D5: the shared <c>UiRenderSystem.DrawList</c> a recipe appends to via
+    /// <see cref="Agapanthe.Ui.TextLayout.DrawText"/> to draw its own on-screen text — <c>null</c> exactly when no
+    /// cooked font was found (mirroring the debug overlay's own existing silent-absence convention). A recipe never
+    /// constructs its own <c>UiRenderSystem</c> — this is the one, process-shared instance <see cref="AppHost"/>
+    /// owns, the same list <c>DebugOverlaySystem</c> appends to.
+    /// </summary>
+    public UiDrawList? UiDrawList { get; init; }
+
+    /// <summary>
+    /// Scene management spec, D5: the loaded font, for <see cref="UiDrawList"/> draws — <c>null</c> exactly when
+    /// <see cref="UiDrawList"/> is. Stays valid across a scene switch (a hand-off never reloads the font; the
+    /// engine keeps exactly one atlas live for the whole process, <c>Renderer.LoadFont</c>'s own contract).
+    /// <b>A recipe must never call <c>presentation.Renderer.LoadFont(...)</c> itself</b> — it would replace the
+    /// shared atlas without updating this property, silently corrupting glyph UVs (this font's metrics against a
+    /// different atlas). Loading the font is <see cref="AppHost"/>'s job alone.
+    /// </summary>
+    public FontAsset? UiFont { get; init; }
 }

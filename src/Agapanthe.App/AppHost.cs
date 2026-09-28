@@ -58,6 +58,7 @@ public static class AppHost
         FrameOrchestrator? orchestrator = null;
         DebugOverlaySystem? debugOverlay = null;
         UiRenderSystem? uiSystem = null;
+        FontAsset? uiFont = null;
         AudioDevice? audioDevice = null;
         AudioClip audioDemoClip = default;
 
@@ -128,10 +129,15 @@ public static class AppHost
 
             // The debug overlay (UI-2) is engine infrastructure, not a game concern: it records frame metrics every
             // frame whether shown or not. Registered here so it runs after the scene view system.
-            var fontPath = Path.Combine(AppContext.BaseDirectory, "fonts", "JetBrainsMono-Regular.agfont");
+            // Scene management spec, D5: IGame.FontPath overrides the engine default — one single resolution
+            // point, mirroring ResolveUniverse's own game-level-default shape exactly (options.Universe ??
+            // game.Universe). A game that never overrides FontPath (every existing host — Sandbox, TopDown,
+            // ThinClient) keeps today's exact filename and behavior.
+            var fontRelativePath = game.FontPath ?? Path.Combine("fonts", "JetBrainsMono-Regular.agfont");
+            var fontPath = Path.Combine(AppContext.BaseDirectory, fontRelativePath);
             if (File.Exists(fontPath))
             {
-                var uiFont = FontAssetFormat.Read(File.ReadAllBytes(fontPath));
+                uiFont = FontAssetFormat.Read(File.ReadAllBytes(fontPath));
                 renderer.LoadFont(uiFont);
                 uiSystem = new UiRenderSystem(renderer);
                 orchestrator.Add(Stage.Input, uiSystem);   // clears last frame's quads before any system draws
@@ -185,6 +191,8 @@ public static class AppHost
                 RenderList = renderList,
                 Orchestrator = orchestrator,
                 SceneSystemFactories = game.SceneSystems,
+                UiDrawList = uiSystem?.DrawList,
+                UiFont = uiFont,
             };
 
             // Scene management spec, D14: the first load uses the same two-phase mechanism a later switch does —
@@ -653,6 +661,8 @@ public static class AppHost
                     RenderList = renderList,
                     Orchestrator = orchestrator,
                     SceneSystemFactories = game.SceneSystems,
+                    UiDrawList = uiSystem?.DrawList,
+                    UiFont = uiFont,
                 };
 
                 var recipeToBuild = pendingRecipe!;

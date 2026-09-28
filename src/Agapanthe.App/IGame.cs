@@ -14,7 +14,8 @@ public interface IGame
     string Title { get; }
 
     /// <summary>Every scene this game can build. <see cref="AppHost"/> selects one at startup from
-    /// <c>AGAPANTHE_SCENE</c> (or <see cref="DefaultScene"/>); there is no in-process switching in this milestone.</summary>
+    /// <c>AGAPANTHE_SCENE</c> (or <see cref="DefaultScene"/>); a recipe may switch to another at runtime via
+    /// <see cref="SimSceneContext.RequestSceneSwitch"/> (scene management spec).</summary>
     IReadOnlyList<ISceneRecipe> Scenes { get; }
 
     /// <summary>The <see cref="ISceneRecipe.Name"/> chosen when <c>AGAPANTHE_SCENE</c> is unset.</summary>
@@ -30,4 +31,14 @@ public interface IGame
     /// <c>[[system]]</c> block needs no changes here. <see cref="SceneRecipe"/> dispatches by matching
     /// <see cref="ISceneSystemFactory.Kind"/> and throws for a kind with no registered factory.</summary>
     IReadOnlyList<ISceneSystemFactory> SceneSystems => [];
+
+    /// <summary>
+    /// Scene management spec, D5: the UI font this game's recipes draw text with, as a path relative to
+    /// <see cref="AppContext.BaseDirectory"/> (e.g. <c>"fonts/Oswald-Bold.agfont"</c>) — <see cref="AppHost"/>
+    /// resolves it the same way <see cref="Universe"/> is resolved (an <see cref="IGame"/>-level default, not a
+    /// <c>HostOptions</c>/env-var override — a font choice is a game identity decision, not a per-run tuning knob).
+    /// Defaults to <c>null</c>, meaning the engine's own default (<c>fonts/JetBrainsMono-Regular.agfont</c>) — every
+    /// existing game (Sandbox, TopDown, ThinClient) keeps that behavior unchanged by not overriding this.
+    /// </summary>
+    string? FontPath => null;
 }

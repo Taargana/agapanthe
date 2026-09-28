@@ -5,17 +5,31 @@
        pipeline takes with shaderc (Release forbids runtime compilation and strips the native library outright).
 
        Like tools/ShaderPrecompiler, this project is deliberately NOT referenced by any shipping project: a
-       ProjectReference would drag StbTrueTypeSharp into the AOT closure. It is invoked by an MSBuild target via
-       `dotnet exec`. Hence no PublishAot / IsAotCompatible here — it is a dev-machine tool. -->
+       ProjectReference would drag StbTrueTypeSharp into the AOT closure. Invoked in-repo via an MSBuild target
+       (`dotnet exec`); an EXTERNAL consumer (scene management spec, D6) invokes it as a real .NET tool instead
+       (`PackAsTool` — a tool manifest is not a PackageReference, so it cannot leak into a consumer's own build/
+       publish output the way a plain PackageReference would; `dotnet tool install` also performs its own isolated
+       dependency-closure restore, which a bare `dotnet exec` against a NuGet-cache DLL cannot do). Hence no
+       PublishAot / IsAotCompatible here — it is a dev-machine tool either way. -->
   <PropertyGroup>
     <OutputType>Exe</OutputType>
     <TargetFramework>net10.0</TargetFramework>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <!-- Never rename: Agapanthe.Assets's internal .agfont writer grants InternalsVisibleTo("FontCooker") keyed on
+         this exact assembly name (see the ItemGroup below) — renaming it breaks that grant silently. -->
     <AssemblyName>FontCooker</AssemblyName>
     <!-- stb's API is pointer-based (byte* SDF bitmaps, stbtt_fontinfo by pointer). Confined to this tool. -->
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <!-- Club Architect packaging spec, D6: opt-in override of Directory.Build.props' default, packed as a real
+         .NET tool (not a library) — installed via `dotnet tool install`, invoked via `dotnet tool run
+         agapanthe-fontcooker`, never referenced as a PackageReference by a consumer. -->
+    <IsPackable>true</IsPackable>
+    <PackAsTool>true</PackAsTool>
+    <PackageId>Agapanthe.FontCooker</PackageId>
+    <ToolCommandName>agapanthe-fontcooker</ToolCommandName>
+    <Description>Agapanthe engine — offline .ttf to .agfont SDF font cooker (build-time tool, consumed via `dotnet tool`).</Description>
   </PropertyGroup>
 
   <!-- Assets only (for FontAsset + the internal .agfont writer, reachable via InternalsVisibleTo("FontCooker")).
