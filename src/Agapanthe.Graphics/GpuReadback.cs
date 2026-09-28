@@ -108,7 +108,9 @@ public static unsafe class GpuReadback
                 CommandBufferCount = 1,
                 PCommandBuffers = &cmd,
             };
-            VkCheck.ThrowIfFailed(vk.QueueSubmit(device.GraphicsQueue, 1, &submit, fence), "vkQueueSubmit");
+            // GraphicsDevice thread-safety spec D4b: routed through the device's locked wrapper instead of
+            // calling vk.QueueSubmit raw — this was the missed submission site round 1 found.
+            device.QueueSubmit(device.GraphicsQueue, &submit, fence);
             VkCheck.ThrowIfFailed(vk.WaitForFences(device.Device, 1, in fence, true, ulong.MaxValue), "vkWaitForFences");
 
             var result = new byte[byteCount];

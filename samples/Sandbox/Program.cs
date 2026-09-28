@@ -13,10 +13,16 @@ using Sandbox;
 //   dotnet run --project samples/Sandbox -- MetalRoughSpheres.glb   -> model viewer; the arg is a content key
 //     (bare name -> models/<name>), resolved against the cooked content manifest (Contenu-2)
 //   AGAPANTHE_IBL_TEST=<prefix>                                  -> the standalone M7 IBL-generation tool
+//   AGAPANTHE_THREAD_SAFETY_TEST=<N>                             -> GraphicsDevice thread-safety probe (Debug only)
 
 if (Environment.GetEnvironmentVariable("AGAPANTHE_IBL_TEST") is { Length: > 0 } iblPrefix)
 {
     return IblTestTool.Run(iblPrefix);
+}
+
+if (Environment.GetEnvironmentVariable("AGAPANTHE_THREAD_SAFETY_TEST") is { Length: > 0 } threadSafetyIterations)
+{
+    return ThreadSafetyProbeTool.Run(int.Parse(threadSafetyIterations));
 }
 
 return AppHost.RunClient(

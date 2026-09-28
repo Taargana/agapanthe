@@ -74,8 +74,22 @@ public readonly struct GpuAllocation
 /// device's <c>FindMemoryType</c> (DeviceLocal → DEVICE_LOCAL; HostVisible → HOST_VISIBLE|HOST_COHERENT).
 /// </summary>
 /// <remarks>
-/// <b>Not thread-safe</b> (phase-1 rendering is single-threaded). The underlying blocks are retained
-/// until <see cref="Dispose"/> (reclamation/defragmentation is deferred to phase 2).
+/// <b>Thread-safe (GraphicsDevice thread-safety spec, D3)</b>: a single <see cref="Lock"/> guards every
+/// method touching <see cref="_allocators"/> or any <see cref="FreeListAllocator"/> it owns —
+/// <see cref="Allocate"/>, <see cref="Free"/>, <see cref="GetStats"/>, <see cref="LogStats"/> and
+/// <see cref="Dispose"/> all take it. This is a real lock, not a courtesy: <see cref="FreeListAllocator"/>
+/// mutates a plain <c>List&lt;Region&gt;</c> with no synchronization of its own (verified by mutation —
+/// removing this lock reproduces <c>InvalidOperationException: Collection was modified</c> and
+/// <c>NullReferenceException</c> under two threads sharing one memory type,
+/// <c>GpuAllocatorConcurrencyTests</c>), so an unguarded concurrent <see cref="Allocate"/>/<see cref="Free"/>
+/// on the same memory type corrupts that list, not just a benign race.
+/// <para>
+/// <b>Lock-ordering invariant (D7)</b>: this lock is independent of <c>DeletionQueue</c>'s — the acquisition
+/// order is always DeletionQueue → this lock (a deferred buffer destructor calls
+/// <see cref="Free"/> while <c>DeletionQueue.Flush</c> still holds its own lock), never the reverse. Nothing
+/// while holding this lock acquires <c>DeletionQueue</c>'s lock, because <see cref="Allocate"/>/
+/// <see cref="Free"/> never enqueue anything into it.
+/// </para>
 /// </remarks>
 public sealed class GpuAllocator : IDisposable
 {
@@ -83,6 +97,7 @@ public sealed class GpuAllocator : IDisposable
     private readonly VulkanMemoryBackend? _vulkanBackend;
     private readonly Func<uint, MemoryDomain, uint> _resolveMemoryType;
     private readonly Dictionary<uint, FreeListAllocator> _allocators = new();
+    private readonly Lock _lock = new();
     private bool _disposed;
 
     /// <summary>Production constructor: allocates real <c>VkDeviceMemory</c> through the device.</summary>
@@ -129,17 +144,24 @@ public sealed class GpuAllocator : IDisposable
     /// <exception cref="GraphicsException">No memory type satisfies the domain and type bits.</exception>
     public GpuAllocation Allocate(in MemoryRequirementsInfo requirements, MemoryDomain domain)
     {
-        ObjectDisposedException.ThrowIf(_disposed, this);
         if (requirements.Size == 0)
         {
             throw new ArgumentException("Allocation size must be positive.", nameof(requirements));
         }
 
-        var memoryTypeIndex = _resolveMemoryType(requirements.MemoryTypeBits, domain);
-        var allocator = GetOrCreateAllocator(memoryTypeIndex);
-        var alignment = requirements.Alignment == 0 ? 1UL : requirements.Alignment;
-        var sub = allocator.Allocate(requirements.Size, alignment);
-        return new GpuAllocation(sub, memoryTypeIndex, domain);
+        lock (_lock)
+        {
+            // Round-3 non-blocking fix: checked INSIDE the lock, not before it — the exact check-then-act
+            // gap this lock exists to close (a concurrent Dispose passing this check, then clearing
+            // _allocators and freeing blocks, then this call suballocating into a block that no longer
+            // exists) is only closed if the check and the use are atomic together.
+            ObjectDisposedException.ThrowIf(_disposed, this);
+            var memoryTypeIndex = _resolveMemoryType(requirements.MemoryTypeBits, domain);
+            var allocator = GetOrCreateAllocator(memoryTypeIndex);
+            var alignment = requirements.Alignment == 0 ? 1UL : requirements.Alignment;
+            var sub = allocator.Allocate(requirements.Size, alignment);
+            return new GpuAllocation(sub, memoryTypeIndex, domain);
+        }
     }
 
     /// <summary>
@@ -151,26 +173,32 @@ public sealed class GpuAllocator : IDisposable
     /// <exception cref="InvalidOperationException">The allocation did not originate from this allocator.</exception>
     public void Free(in GpuAllocation allocation)
     {
-        ObjectDisposedException.ThrowIf(_disposed, this);
-        if (!_allocators.TryGetValue(allocation.MemoryTypeIndex, out var allocator))
+        lock (_lock)
         {
-            throw new InvalidOperationException(
-                $"Free of an allocation from unknown memory type {allocation.MemoryTypeIndex}.");
-        }
+            ObjectDisposedException.ThrowIf(_disposed, this);
+            if (!_allocators.TryGetValue(allocation.MemoryTypeIndex, out var allocator))
+            {
+                throw new InvalidOperationException(
+                    $"Free of an allocation from unknown memory type {allocation.MemoryTypeIndex}.");
+            }
 
-        allocator.Free(allocation.Suballocation);
+            allocator.Free(allocation.Suballocation);
+        }
     }
 
     /// <summary>Snapshot of per-memory-type statistics (one entry per type ever used).</summary>
     public IReadOnlyList<AllocationStats> GetStats()
     {
-        var stats = new List<AllocationStats>(_allocators.Count);
-        foreach (var allocator in _allocators.Values)
+        lock (_lock)
         {
-            stats.Add(allocator.GetStats());
-        }
+            var stats = new List<AllocationStats>(_allocators.Count);
+            foreach (var allocator in _allocators.Values)
+            {
+                stats.Add(allocator.GetStats());
+            }
 
-        return stats;
+            return stats;
+        }
     }
 
     /// <summary>
@@ -180,47 +208,54 @@ public sealed class GpuAllocator : IDisposable
     /// </summary>
     public void LogStats()
     {
-        if (_allocators.Count == 0)
+        lock (_lock)
         {
-            Log.Info("GpuAllocator: no GPU memory allocated (no resource has requested any yet).");
-            return;
-        }
+            if (_allocators.Count == 0)
+            {
+                Log.Info("GpuAllocator: no GPU memory allocated (no resource has requested any yet).");
+                return;
+            }
 
-        Log.Info("GpuAllocator memory stats:");
-        ulong totalAllocated = 0;
-        ulong totalUsed = 0;
-        var totalBlocks = 0;
-        foreach (var (memoryTypeIndex, allocator) in _allocators)
-        {
-            var stats = allocator.GetStats();
-            totalAllocated += stats.AllocatedBytes;
-            totalUsed += stats.UsedBytes;
-            totalBlocks += stats.BlockCount;
-            var label = _vulkanBackend is null ? "?" : DescribeFlags(_vulkanBackend.GetMemoryTypeFlags(memoryTypeIndex));
-            Log.Info(
-                $"  type {stats.MemoryTypeIndex} [{label}]: {ToMiB(stats.AllocatedBytes)} allocated / " +
-                $"{ToMiB(stats.UsedBytes)} used, {stats.BlockCount} block(s), {stats.AllocationCount} alloc(s), " +
-                $"frag {stats.Fragmentation:0.00}");
-        }
+            Log.Info("GpuAllocator memory stats:");
+            ulong totalAllocated = 0;
+            ulong totalUsed = 0;
+            var totalBlocks = 0;
+            foreach (var (memoryTypeIndex, allocator) in _allocators)
+            {
+                var stats = allocator.GetStats();
+                totalAllocated += stats.AllocatedBytes;
+                totalUsed += stats.UsedBytes;
+                totalBlocks += stats.BlockCount;
+                var label = _vulkanBackend is null ? "?" : DescribeFlags(_vulkanBackend.GetMemoryTypeFlags(memoryTypeIndex));
+                Log.Info(
+                    $"  type {stats.MemoryTypeIndex} [{label}]: {ToMiB(stats.AllocatedBytes)} allocated / " +
+                    $"{ToMiB(stats.UsedBytes)} used, {stats.BlockCount} block(s), {stats.AllocationCount} alloc(s), " +
+                    $"frag {stats.Fragmentation:0.00}");
+            }
 
-        Log.Info($"  total: {ToMiB(totalAllocated)} allocated / {ToMiB(totalUsed)} used across {totalBlocks} block(s).");
+            Log.Info($"  total: {ToMiB(totalAllocated)} allocated / {ToMiB(totalUsed)} used across {totalBlocks} block(s).");
+        }
     }
 
     /// <summary>Frees every backing block. Only valid after the GPU is idle and the DeletionQueue is drained.</summary>
     public void Dispose()
     {
-        if (_disposed)
+        lock (_lock)
         {
-            return;
+            if (_disposed)
+            {
+                return;
+            }
+
+            _disposed = true;
+            foreach (var allocator in _allocators.Values)
+            {
+                allocator.Dispose(); // frees this type's blocks through the backend (vkFreeMemory)
+            }
+
+            _allocators.Clear();
         }
 
-        _disposed = true;
-        foreach (var allocator in _allocators.Values)
-        {
-            allocator.Dispose(); // frees this type's blocks through the backend (vkFreeMemory)
-        }
-
-        _allocators.Clear();
         GC.SuppressFinalize(this);
     }
 

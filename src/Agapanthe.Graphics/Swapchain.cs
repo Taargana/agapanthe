@@ -109,7 +109,10 @@ public sealed unsafe class Swapchain : IDisposable
             PImageIndices = &imageIndex,
         };
 
-        var result = _device.KhrSwapchain.QueuePresent(_device.PresentQueue, &presentInfo);
+        // GraphicsDevice thread-safety spec D5: routed through the device so the present takes the same
+        // lock as submit (PresentQueue and GraphicsQueue alias to the same VkQueue in this engine's device
+        // selection) and is guarded against a non-owner thread calling it.
+        var result = _device.QueuePresent(_device.PresentQueue, &presentInfo);
         if (result is Result.ErrorOutOfDateKhr or Result.SuboptimalKhr)
         {
             return false;

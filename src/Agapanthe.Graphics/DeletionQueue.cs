@@ -44,6 +44,14 @@ public readonly struct DeletionPayload
 /// allocates nothing (the internal queue grows amortized). The <see cref="Enqueue(Action, long)"/>
 /// overload allocates a closure and exists only for rare/shutdown teardown — never call it on the hot path.
 /// </para>
+/// <para>
+/// <b>Lock-ordering invariant (GraphicsDevice thread-safety spec, D7)</b>: this type's own lock is
+/// independent of <c>GraphicsDevice._queueLock</c> — nothing executed while <see cref="Flush"/>/
+/// <see cref="FlushAll"/> hold this lock ever submits, presents or calls <c>WaitIdle</c>. It IS acquired
+/// before <c>GpuAllocator</c>'s lock (a queued buffer/image destructor calls <c>GpuAllocator.Free</c>
+/// while this lock is still held) — the acquisition order is always DeletionQueue → GpuAllocator, never
+/// the reverse, and this is the only lock this type's callbacks ever nest into.
+/// </para>
 /// </summary>
 public sealed class DeletionQueue
 {

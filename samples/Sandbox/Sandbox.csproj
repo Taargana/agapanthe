@@ -18,6 +18,9 @@
     <TargetFramework>net10.0</TargetFramework>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
+    <!-- GraphicsDevice thread-safety spec, AW-006: ThreadSafetyProbeTool calls QueuePresent(Queue,
+         PresentInfoKHR*), a pointer-typed internal member — the call site itself needs unsafe context. -->
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
     <!-- Phase 2 rule 1: the shipping executable must publish as NativeAOT. Enabling PublishAot here also
          turns on the trim/AOT analyzers for the whole app closure, so IL2xxx/IL3xxx surface at build time
          (and, with the global TreatWarningsAsErrors, become errors — the permanent AOT gate). -->

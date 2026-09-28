@@ -1,3 +1,4 @@
+using System.Runtime.CompilerServices;
 using Agapanthe.Core;
 using Agapanthe.Graphics.Memory;
 using Silk.NET.Core;
@@ -6,6 +7,12 @@ using Silk.NET.Core.Native;
 using Silk.NET.Vulkan;
 using Silk.NET.Vulkan.Extensions.EXT;
 using Silk.NET.Vulkan.Extensions.KHR;
+
+// GraphicsDevice thread-safety spec, AW-006: the windowed diagnostic tool (samples/Sandbox/Tools/
+// ThreadSafetyProbeTool.cs) needs QueuePresent/AdvanceFrame (internal, D5/D6) to exercise the
+// guard-level discrimination test from a real sanctioned loader thread — a real window/device
+// cannot be built inside Agapanthe.Tests (round-2 finding, the reason this tool exists at all).
+[assembly: InternalsVisibleTo("Sandbox")]
 
 namespace Agapanthe.Graphics;
 
@@ -65,6 +72,27 @@ public sealed unsafe partial class GraphicsDevice : IDisposable
     private GpuAllocator? _allocator;
     private bool _disposed;
 
+    // GraphicsDevice thread-safety spec, D1/D2: bounded 2-thread contract, owner + at most one sanctioned
+    // loader thread. Mirrors GameWorld._ownerThreadId (GameWorld.cs:67) exactly — captured once at
+    // construction, never reassigned.
+    private readonly int _ownerThreadId = Environment.CurrentManagedThreadId;
+
+    // 0 = unset until SetSanctionedLoaderThread registers a loader (Environment.CurrentManagedThreadId is
+    // guaranteed >= 1 for any real thread, so 0 is a safe sentinel — chosen over Nullable<int> because
+    // Volatile.Read/Write's generic overload requires a reference type; a plain int keeps this allocation-
+    // free on AssertCallerThread's hot path). Volatile-published (round-2 finding — both the owner and the
+    // loader thread read this), mirrors GameWorld._sanctionedWorkerThreadIds' Volatile.Read/Write pattern.
+    private int _sanctionedLoaderThreadId;
+
+    // D4a/b/c, D5: the single lock every submission/present/WaitIdle path converges on. Declared a LEAF
+    // lock (D7): nothing held while holding this ever acquires DeletionQueue's lock or GpuAllocator's lock,
+    // and nothing while holding either of those acquires this one. One shared lock for both submit and
+    // present is deliberate (D5) — PresentQueue and GraphicsQueue are the same VkQueue handle in this
+    // engine's own device selection (TryFindQueueFamilies picks one family supporting both, specifically to
+    // avoid concurrent sharing on the swapchain); a per-queue lock would silently stop protecting anything
+    // the moment that aliasing is (correctly) relied upon elsewhere.
+    private readonly Lock _queueLock = new();
+
     public GraphicsDevice(string applicationName, string[] requiredInstanceExtensions, IVkSurface windowSurface)
     {
         ArgumentNullException.ThrowIfNull(applicationName);
@@ -115,15 +143,27 @@ public sealed unsafe partial class GraphicsDevice : IDisposable
     public GpuAllocator Allocator =>
         _allocator ?? throw new InvalidOperationException("GraphicsDevice allocator is not available (device disposed or construction failed).");
 
+    private long _currentFrameIndex;
+
     /// <summary>
     /// Authoritative render frame counter, advanced once per presented frame by the
     /// FrameRenderer. Resources disposed mid-loop stamp their destruction with this index so
     /// the DeletionQueue can defer it past the frames still in flight (spec §3.2.1).
+    /// Interlocked-backed (D6): a loader thread's uploads read this (via EnqueueDestroy) concurrently
+    /// with the owner thread advancing it.
     /// </summary>
-    public long CurrentFrameIndex { get; private set; }
+    public long CurrentFrameIndex => Interlocked.Read(ref _currentFrameIndex);
 
-    /// <summary>Advances the frame counter. Called by the FrameRenderer after each present.</summary>
-    internal void AdvanceFrame() => CurrentFrameIndex++;
+    /// <summary>
+    /// Advances the frame counter. Called by the FrameRenderer after each present. Owner-thread-only
+    /// (D2/D6) — a loader thread never advances the frame counter, so a loader calling this is a bug to
+    /// catch loudly, not a race to merely tolerate.
+    /// </summary>
+    internal void AdvanceFrame()
+    {
+        AssertOwnerThreadStrict();
+        Interlocked.Increment(ref _currentFrameIndex);
+    }
 
     /// <summary>
     /// Non-capturing deferred destroy (spec §3.2.5, zero managed allocation on the hot path).
@@ -226,9 +266,114 @@ public sealed unsafe partial class GraphicsDevice : IDisposable
     internal uint GraphicsQueueFamily { get; private set; }
     internal uint PresentQueueFamily { get; private set; }
 
-    /// <summary>Blocks until the GPU finished all submitted work.</summary>
+    /// <summary>
+    /// Registers <paramref name="threadId"/> as the single sanctioned loader thread (GraphicsDevice
+    /// thread-safety spec, D1) — a background thread building an isolated <c>ResourceRegistry</c> may then
+    /// call <see cref="QueueSubmit2"/>/the legacy <see cref="QueueSubmit"/> without tripping
+    /// <see cref="AssertCallerThread"/>. Owner-thread-only: a loader must never (de)sanction itself or
+    /// another thread. At most one loader at a time — a second call while one is already registered throws
+    /// rather than silently replacing it.
+    /// </summary>
+    /// <exception cref="InvalidOperationException">Called from a non-owner thread, or a loader is already registered.</exception>
+    /// <exception cref="ObjectDisposedException">The device was already disposed.</exception>
+    public void SetSanctionedLoaderThread(int threadId)
+    {
+        AssertOwnerThreadStrict();
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        var existing = Volatile.Read(ref _sanctionedLoaderThreadId);
+        if (existing != 0)
+        {
+            throw new InvalidOperationException(
+                $"GraphicsDevice already has a sanctioned loader thread ({existing}); at most one is supported. " +
+                "Call ClearSanctionedLoaderThread() first.");
+        }
+
+        Volatile.Write(ref _sanctionedLoaderThreadId, threadId);
+    }
+
+    /// <summary>
+    /// Un-registers the sanctioned loader thread (D1). Caller contract: call this after <c>Join()</c>-ing
+    /// the loader thread, before disposing the device — <see cref="Dispose"/> throws if a loader is still
+    /// registered (D8). Owner-thread-only, like <see cref="SetSanctionedLoaderThread"/>.
+    /// </summary>
+    /// <exception cref="InvalidOperationException">Called from a non-owner thread.</exception>
+    /// <exception cref="ObjectDisposedException">The device was already disposed.</exception>
+    public void ClearSanctionedLoaderThread()
+    {
+        AssertOwnerThreadStrict();
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        Volatile.Write(ref _sanctionedLoaderThreadId, 0);
+    }
+
+    /// <summary>
+    /// Always-on guard (D2 — not <c>[Conditional("DEBUG")]</c>, mirrors Job-2's promotion of
+    /// <c>SimCommandQueue.AssertOwnerThread</c> for the same reasoning: a non-overlapping cross-thread call
+    /// is otherwise invisible in Release, and a missed lock here is native-crash-class, not a benign logic
+    /// error). Passes for the owner thread OR the single sanctioned loader thread (if any) — used by
+    /// <see cref="QueueSubmit2"/>/<see cref="QueueSubmit"/>, where a loader legitimately submits.
+    /// </summary>
+    internal void AssertCallerThread([CallerMemberName] string caller = "")
+    {
+        var callingThreadId = Environment.CurrentManagedThreadId;
+        if (callingThreadId == _ownerThreadId)
+        {
+            return;
+        }
+
+        var sanctioned = Volatile.Read(ref _sanctionedLoaderThreadId);
+        if (sanctioned != 0 && sanctioned == callingThreadId)
+        {
+            return;
+        }
+
+        throw new InvalidOperationException(
+            $"GraphicsDevice.{caller} was called from thread {callingThreadId}, but the device is owned by " +
+            $"thread {_ownerThreadId} and the sanctioned loader thread (if any) is " +
+            $"{(sanctioned == 0 ? "none" : sanctioned.ToString())}.");
+    }
+
+    /// <summary>
+    /// Always-on guard (D2), owner thread ONLY — never the sanctioned loader thread, unlike
+    /// <see cref="AssertCallerThread"/>. Used by <see cref="QueuePresent"/>, <see cref="AdvanceFrame"/> and
+    /// the loader-sanction API itself: a loader thread calling any of these is a bug worth catching, not a
+    /// path to permit.
+    /// </summary>
+    internal void AssertOwnerThreadStrict([CallerMemberName] string caller = "")
+    {
+        var callingThreadId = Environment.CurrentManagedThreadId;
+        if (callingThreadId == _ownerThreadId)
+        {
+            return;
+        }
+
+        throw new InvalidOperationException(
+            $"GraphicsDevice.{caller} was called from thread {callingThreadId}, but the device is owned by " +
+            $"thread {_ownerThreadId}. This member is never safe for the sanctioned loader thread to call.");
+    }
+
+    /// <summary>
+    /// Blocks until the GPU finished all submitted work. Takes <see cref="_queueLock"/> (D4c — the most
+    /// serious gap this spec closes): <c>vkDeviceWaitIdle</c> requires external synchronization against any
+    /// concurrent <c>vkQueueSubmit</c>/<c>vkQueueSubmit2</c> on any thread, and this is called mid-loop
+    /// (window resize, IBL generation, per-frame swapchain handling), not just at final teardown. Any submit
+    /// attempted concurrently blocks on this same lock until <c>vkDeviceWaitIdle</c> returns — the correct
+    /// serialization, not a symptom-masking stall, since the Vulkan spec's requirement is a host-side
+    /// ordering constraint a mutex is the right primitive for.
+    /// <para>
+    /// <b>Contract</b>: the instant this releases the lock, the loader thread may resume submitting —
+    /// "idle" only ever means "idle with respect to work submitted before this call returned," never a
+    /// lasting guarantee. Every current caller only destroys resources the OWNER thread created (swapchain
+    /// images, HDR/depth targets, a transient IBL command pool); a future caller must never destroy
+    /// something the loader thread might still reference just because this returned.
+    /// </para>
+    /// </summary>
     public void WaitIdle()
-        => VkCheck.ThrowIfFailed(_vk.DeviceWaitIdle(_device), "vkDeviceWaitIdle");
+    {
+        lock (_queueLock)
+        {
+            VkCheck.ThrowIfFailed(_vk.DeviceWaitIdle(_device), "vkDeviceWaitIdle");
+        }
+    }
 
     /// <summary>
     /// Records a one-shot command buffer through <paramref name="record"/> and submits it on the graphics
@@ -325,6 +470,19 @@ public sealed unsafe partial class GraphicsDevice : IDisposable
         if (_disposed)
         {
             return;
+        }
+
+        // D8: right after the existing idempotency early-return above (not before it — a second Dispose()
+        // call following a successful first one, which already cleared the loader, must stay a harmless
+        // no-op), still before _disposed = true below. Loud by design: AppHost's teardown isolates each
+        // step in its own try/catch, so a caller who forgot to Join()/ClearSanctionedLoaderThread() its
+        // loader thread gets a logged, noisy leak rather than a silent pass or a data race found by luck.
+        var stillRegistered = Volatile.Read(ref _sanctionedLoaderThreadId);
+        if (stillRegistered != 0)
+        {
+            throw new InvalidOperationException(
+                $"GraphicsDevice.Dispose was called while loader thread {stillRegistered} is still " +
+                "sanctioned. Join() it and call ClearSanctionedLoaderThread() first.");
         }
 
         _disposed = true;
